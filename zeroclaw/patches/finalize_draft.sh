@@ -24,11 +24,12 @@ s{(multi_message_thread_ts: Arc::new\(Mutex::new\(HashMap::new\(\)\)\),)}
             partial_thread_ts: Arc::new(Mutex::new(HashMap::new())),};
 
 # 3. 在 send_draft 的 Partial 分支中保存 thread_ts
+# 修改 insert 使用 room_id.clone()，并在之后保存 thread_ts
 s{(\.insert\(room_id, std::time::Instant::now\(\)\);)\n\n(\s+)Ok\(Some\(event_id\)\)}
-{$1
+{.insert(room_id.clone(), std::time::Instant::now());
 
 $2// Save thread context for Partial mode final message.
-                self.partial_thread_ts.lock().await.insert(room_id.clone(), message.thread_ts.clone());
+                self.partial_thread_ts.lock().await.insert(room_id, message.thread_ts.clone());
 
                 Ok(Some(event_id))};
 
@@ -37,7 +38,7 @@ s{StreamMode::Partial => \{\n\s+// Final m\.replace edit with complete text\.\n\
 {StreamMode::Partial => {
                 // Delete draft and send final message in original thread.
                 self.last_draft_edit.lock().await.remove(\&room_id);
-                let thread_ts = self.partial_thread_ts.lock().await.remove(\&room_id);
+                let thread_ts = self.partial_thread_ts.lock().await.remove(\&room_id).flatten();
                 if let Err(e) = self.redact_message(\&room_id, message_id, None).await {
                     tracing::debug!("Matrix draft redaction failed: {e}");
                 }
