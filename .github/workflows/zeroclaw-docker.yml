@@ -10,11 +10,11 @@ on:
       image_tag:
         description: 'Docker image tag suffix'
         required: false
-        default: 'patched'
+        default: 'debian'
       push:
         description: 'Push Docker image to registry'
         type: boolean
-        default: false
+        default: true
 
 env:
   CARGO_TERM_COLOR: always
