@@ -22,6 +22,10 @@ env:
   CARGO_FEATURES: channel-matrix,channel-lark,whatsapp-web
   RUST_TOOLCHAIN: "1.93.0"
 
+permissions:
+  contents: read
+  packages: write
+
 jobs:
   build:
     name: Build & Package
