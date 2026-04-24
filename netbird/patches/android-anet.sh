@@ -26,8 +26,8 @@ s{net\.Interfaces\(\)}
 FILE="$TARGET/client/internal/routemanager/systemops/systemops_generic.go"
 
 perl -i -0pe '
-s{func IsAddrRouted\(addr netip\.Addr, vpnRoutes \[\]netip\.Prefix\) \(bool, netip\.Prefix\) \{\n}
-{$0\treturn false, netip.Prefix{}\n};
+s{(func IsAddrRouted\(addr netip\.Addr, vpnRoutes \[\]netip\.Prefix\) \(bool, netip\.Prefix\) \{\n)}
+{$1\treturn false, netip.Prefix{}\n};
 ' "$FILE"
 
 # 3. client/internal/stdnet/discover_pion.go
