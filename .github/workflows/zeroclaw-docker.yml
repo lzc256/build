@@ -1,4 +1,4 @@
-name: Zeroclaw - Build Debian Docker Image
+name: Zeroclaw - Build & Package
 
 on:
   workflow_dispatch:
@@ -20,7 +20,7 @@ env:
 
 jobs:
   build:
-    name: Build (amd64)
+    name: Build & Package
     runs-on: ubuntu-22.04
     timeout-minutes: 60
     steps:
@@ -72,11 +72,11 @@ jobs:
       - name: Prepare Docker context
         run: |
           set -e
-          mkdir -p docker-ctx/bin/amd64
-          mkdir -p docker-ctx/zeroclaw-data/.zeroclaw docker-ctx/zeroclaw-data/workspace
           mkdir -p docker-ctx/bin/amd64/web/dist
+          mkdir -p docker-ctx/zeroclaw-data/.zeroclaw docker-ctx/zeroclaw-data/workspace
           cp zeroclaw/target/x86_64-unknown-linux-gnu/release/zeroclaw docker-ctx/bin/amd64/
           touch docker-ctx/bin/amd64/web/dist/.gitkeep
+          cp zeroclaw/Dockerfile.debian.ci docker-ctx/Dockerfile
 
       - name: Generate config.toml
         env:
@@ -100,40 +100,61 @@ jobs:
         run: |
           echo "$CONFIG_CONTENT" > docker-ctx/zeroclaw-data/.zeroclaw/config.toml
           mkdir -p docker-ctx/zeroclaw-data/workspace
-          chown -R 65534:65534 docker-ctx/zeroclaw-data/
-
-      - name: Copy Dockerfile
-        run: cp zeroclaw/Dockerfile.debian.ci docker-ctx/Dockerfile
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Login to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Extract version
         id: version
         run: |
           VERSION=$(cd zeroclaw && sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-          echo "image_tag=${{ github.event.inputs.image_tag }}-${TIMESTAMP}" >> "$GITHUB_OUTPUT"
+          echo "image_tag=${{ github.event.inputs.image_tag }}" >> "$GITHUB_OUTPUT"
 
-      - name: Build and push
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image
         uses: docker/build-push-action@v6
         with:
           context: docker-ctx
-          push: true
-          tags: |
-            ${{ env.REGISTRY }}/${{ github.repository }}:zeroclaw-${{ steps.version.outputs.image_tag }}-debian
-            ${{ env.REGISTRY }}/${{ github.repository }}:zeroclaw-${{ steps.version.outputs.version }}-${{ steps.version.outputs.image_tag }}-debian
+          push: false
+          tags: zeroclaw-test:debian
           platforms: linux/amd64
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          load: true
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zeroclaw-binary-${{ github.run_number }}
+          path: zeroclaw/target/x86_64-unknown-linux-gnu/release/zeroclaw
+          retention-days: 7
+
+      - name: Upload Docker image
+        run: |
+          docker save zeroclaw-test:debian -o zeroclaw-debian.tar
+          echo "${{ env.REGISTRY }}/${{ github.repository }}:zeroclaw-${{ steps.version.outputs.image_tag }}-debian" > docker-tag.txt
+
+      - name: Upload Docker artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zeroclaw-docker-${{ github.run_number }}
+          path: |
+            zeroclaw-debian.tar
+            docker-tag.txt
+          retention-days: 7
+
+      - name: Login to GHCR
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.push == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push Docker image
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.push == 'true'
+        run: |
+          TAG=$(cat docker-tag.txt)
+          docker tag zeroclaw-test:debian "$TAG"
+          docker push "$TAG"
 
       - name: Summary
         run: |
@@ -142,4 +163,4 @@ jobs:
           echo "|------|-------|"
           echo "| Ref | \`${{ github.event.inputs.zeroclaw_ref }}\` |"
           echo "| Version | \`${{ steps.version.outputs.version }}\` |"
-          echo "| Image | \`${{ env.REGISTRY }}/${{ github.repository }}:zeroclaw-${{ steps.version.outputs.image_tag }}-debian\` |"
+          echo "| Artifacts | zeroclaw-binary, zeroclaw-docker |"
