@@ -1,0 +1,58 @@
+name: Other Project - Build Binary
+
+on:
+  workflow_dispatch:
+    inputs:
+      patch_name:
+        description: 'Patch name (without .sh)'
+        required: true
+        default: 'sample'
+      project_ref:
+        description: 'Project branch/tag/commit'
+        required: false
+        default: 'main'
+
+jobs:
+  build:
+    name: Build Binary
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Clone project
+        uses: actions/checkout@v4
+        with:
+          repository: your-org/other-project
+          path: other-project
+          ref: ${{ github.event.inputs.project_ref }}
+
+      - name: Apply patch
+        run: |
+          set -e
+          source scripts/common.sh
+          apply_patch "${{ github.event.inputs.patch_name }}" other-project
+
+      - name: Build
+        run: |
+          cd other-project
+          # 替换为你的构建命令
+          make release
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: other-project-binary
+          path: |
+            other-project/build/*.bin
+            other-project/build/*.elf
+          retention-days: 7
+
+      - name: Summary
+        run: |
+          echo "## Build Summary"
+          echo "| Item | Value |"
+          echo "|------|-------|"
+          echo "| Patch | \`${{ github.event.inputs.patch_name }}\` |"
+          echo "| Ref | \`${{ github.event.inputs.project_ref }}\` |"
