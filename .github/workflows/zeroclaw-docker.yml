@@ -10,7 +10,7 @@ on:
       zeroclaw_ref:
         description: 'Zeroclaw branch/tag/commit'
         required: false
-        default: 'main'
+        default: 'master'
       image_tag:
         description: 'Docker image tag suffix'
         required: false

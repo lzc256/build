@@ -7,14 +7,14 @@ jobs:
   build:
     name: Build ${{ matrix.target }}
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         include:
-          - target: x86_64-unknown-linux-gnu
+          - target: x86_64-linux-gnu
             arch: amd64
-          - target: aarch64-unknown-linux-gnu
+          - target: aarch64-linux-gnu
             arch: arm64
             cross: gcc-aarch64-linux-gnu
     steps:
@@ -27,29 +27,30 @@ jobs:
           repository: we-be/stealthpanda
           path: stealthpanda
 
-      - name: Install cross compiler
-        if: matrix.cross
+      - name: Install Zig
+        uses: crazy-max/gha-setup-zig@v3
+        with:
+          version: 0.15.2
+
+      - name: Install system deps
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y ${{ matrix.cross }}
+          sudo apt-get install -y xz-utils ca-certificates pkg-config libglib2.0-dev clang make curl git
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
+      - name: Install cross compiler
+        if: matrix.cross
+        run: sudo apt-get install -y ${{ matrix.cross }}
 
       - name: Build
+        env:
+          CC: ${{ matrix.cross == 'gcc-aarch64-linux-gnu' && 'aarch64-linux-gnu-gcc' || '' }}
         run: |
           cd stealthpanda
-          if [ -n "${{ matrix.cross || '' }}" ]; then
-            CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
-            cargo build --release --target ${{ matrix.target }}
-          else
-            cargo build --release --target ${{ matrix.target }}
-          fi
+          make build
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: stealthpanda-${{ matrix.arch }}
-          path: stealthpanda/target/${{ matrix.target }}/release/stealthpanda
+          path: stealthpanda/zig-out/bin/lightpanda
           retention-days: 7
