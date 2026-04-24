@@ -151,8 +151,7 @@ jobs:
           context: docker-ctx
           push: true
           tags: |
-            ${{ env.REGISTRY }}/${{ github.repository }}:zeroclaw-${{ steps.version.outputs.image_tag }}-debian
-            ${{ env.REGISTRY }}/${{ github.repository }}:zeroclaw-${{ steps.version.outputs.version }}-${{ steps.version.outputs.image_tag }}-debian
+            ${{ env.REGISTRY }}/${{ github.repository }}:zeroclaw-debian
           platforms: linux/amd64
 
       - name: Summary
