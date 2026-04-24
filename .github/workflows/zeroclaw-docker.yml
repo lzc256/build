@@ -5,6 +5,11 @@ on:
     branches:
       - main
       - master
+    paths:
+      - 'zeroclaw/**'
+      - 'scripts/**'
+      - 'patches/**'
+      - '.github/workflows/zeroclaw-docker.yml'
   workflow_dispatch:
     inputs:
       zeroclaw_ref:
