@@ -29,21 +29,22 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       should_build: ${{ steps.compare.outputs.should_build }}
-      version: ${{ steps.version.outputs.version }}
+      version: ${{ steps.version.outputs.tag_name }}
+      version_display: ${{ steps.version.outputs.version }}
     steps:
       - name: Get latest version
         id: version
         run: |
           TAG=$(curl -s https://api.github.com/repos/zeroclaw-labs/zeroclaw/releases/latest | jq -r '.tag_name')
-          echo "version=${TAG#v}" >> $GITHUB_OUTPUT
           echo "tag_name=${TAG}" >> $GITHUB_OUTPUT
+          echo "version=${TAG#v}" >> $GITHUB_OUTPUT
 
       - name: Cache check
         id: cache
         uses: actions/cache@v4
         with:
           path: version.txt
-          key: zeroclaw-version-${{ steps.version.outputs.tag_name }}
+          key: zeroclaw-version-${{ steps.version.outputs.version }}
 
       - name: Compare versions
         id: compare
@@ -119,7 +120,7 @@ jobs:
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4
         with:
-          name: zeroclaw-binary-${{ needs.check-update.outputs.version }}
+          name: zeroclaw-binary-${{ needs.check-update.outputs.version_display }}
           path: zeroclaw-src/target/x86_64-unknown-linux-gnu/release/zeroclaw
           retention-days: 7
 
@@ -171,20 +172,20 @@ jobs:
           context: docker-ctx
           push: true
           tags: |
-            ${{ env.REGISTRY }}/${{ github.repository }}:zeroclaw-${{ needs.check-update.outputs.version }}-debian
+            ${{ env.REGISTRY }}/${{ github.repository }}:zeroclaw-${{ needs.check-update.outputs.version_display }}-debian
             ${{ env.REGISTRY }}/${{ github.repository }}:zeroclaw-debian
           platforms: linux/amd64
 
       - name: Save version
         run: |
-          echo "${{ needs.check-update.outputs.version }}" > version.txt
+          echo "${{ needs.check-update.outputs.version_display }}" > version.txt
 
       - name: Summary
         run: |
           echo "## Zeroclaw Build Summary"
           echo "| Item | Value |"
           echo "|------|-------|"
-          echo "| Version | \`${{ needs.check-update.outputs.version }}\` |"
-          echo "| Binary | zeroclaw-binary-${{ needs.check-update.outputs.version }} |"
-          echo "| Docker | \`${{ env.REGISTRY }}/${{ github.repository }}:zeroclaw-${{ needs.check-update.outputs.version }}-debian\` |"
+          echo "| Version | \`${{ needs.check-update.outputs.version_display }}\` |"
+          echo "| Binary | zeroclaw-binary-${{ needs.check-update.outputs.version_display }} |"
+          echo "| Docker | \`${{ env.REGISTRY }}/${{ github.repository }}:zeroclaw-${{ needs.check-update.outputs.version_display }}-debian\` |"
           echo "| Latest | \`${{ env.REGISTRY }}/${{ github.repository }}:zeroclaw-debian\` |"
