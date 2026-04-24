@@ -9,6 +9,9 @@ on:
         description: 'Netbird branch/tag/commit'
         required: false
         default: 'main'
+  push:
+    paths:
+      - 'netbird/**'
 
 jobs:
   check-update:
@@ -27,6 +30,7 @@ jobs:
           echo "combined_key=build-${NETBIRD_SHA}-${ANET_SHA}" >> $GITHUB_OUTPUT
 
       - name: Cache Check
+        if: github.event_name != 'push'
         id: cache_check
         uses: actions/cache@v4
         with:
@@ -36,7 +40,10 @@ jobs:
       - name: Compare
         id: compare
         run: |
-          if [ -f build_status.txt ]; then
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "Push triggered. Building."
+            echo "should_build=true" >> $GITHUB_OUTPUT
+          elif [ -f build_status.txt ]; then
             echo "No updates detected. Skipping."
             echo "should_build=false" >> $GITHUB_OUTPUT
           else

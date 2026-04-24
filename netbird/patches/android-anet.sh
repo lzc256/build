@@ -43,17 +43,3 @@ s{net\.Interfaces\(\)}
 s{oif\.Addrs\(\)}
 {anet.InterfaceAddrsByInterface(\&oif)}g;
 ' "$FILE"
-
-# 4. client/system/info.go
-FILE="$TARGET/client/system/info.go"
-
-perl -i -0pe '
-s{(log "github.com/sirupsen/logrus"\n)}
-{$1\t"github.com/wlynxg/anet"\n};
-
-s{net\.Interfaces\(\)}
-{anet.Interfaces()}g;
-
-s{iface\.Addrs\(\)}
-{anet.InterfaceAddrsByInterface(\&iface)}g;
-' "$FILE"
