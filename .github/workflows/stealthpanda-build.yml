@@ -29,7 +29,7 @@ jobs:
 
       - name: Install Zig
         run: |
-          curl -L https://github.com/ziglang/zig/releases/download/0.15.2/zig-linux-x86_64-0.15.2.tar.xz -o zig.tar.xz
+          curl -L https://ziglang.org/download/0.15.2/zig-linux-x86_64-0.15.2.tar.xz -o zig.tar.xz
           tar -xf zig.tar.xz
           echo "$PWD/zig-linux-x86_64-0.15.2" >> $GITHUB_PATH
 
