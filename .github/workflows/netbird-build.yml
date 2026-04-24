@@ -1,0 +1,93 @@
+name: Netbird - Build Android Anet
+
+on:
+  schedule:
+    - cron: '56 18 */2 * *'
+  workflow_dispatch:
+    inputs:
+      netbird_ref:
+        description: 'Netbird branch/tag/commit'
+        required: false
+        default: 'main'
+
+jobs:
+  check-update:
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.compare.outputs.should_build }}
+      netbird_sha: ${{ steps.hashes.outputs.netbird_sha }}
+    steps:
+      - name: Get Latest Hashes
+        id: hashes
+        run: |
+          NETBIRD_SHA=$(curl -s https://api.github.com/repos/netbirdio/netbird/commits/main | jq -r .sha)
+          ANET_SHA=$(curl -s https://api.github.com/repos/lzc256/anet/commits/android-build | jq -r .sha)
+          
+          echo "netbird_sha=$NETBIRD_SHA" >> $GITHUB_OUTPUT
+          echo "combined_key=build-${NETBIRD_SHA}-${ANET_SHA}" >> $GITHUB_OUTPUT
+
+      - name: Cache Check
+        id: cache_check
+        uses: actions/cache@v4
+        with:
+          path: build_status.txt
+          key: ${{ steps.hashes.outputs.combined_key }}
+
+      - name: Compare
+        id: compare
+        run: |
+          if [ -f build_status.txt ]; then
+            echo "No updates detected. Skipping."
+            echo "should_build=false" >> $GITHUB_OUTPUT
+          else
+            echo "Updates detected. Proceeding to build."
+            echo "should_build=true" >> $GITHUB_OUTPUT
+            echo "done" > build_status.txt
+          fi
+
+  build:
+    needs: check-update
+    if: needs.check-update.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout patch framework
+        uses: actions/checkout@v4
+
+      - name: Clone netbird
+        uses: actions/checkout@v4
+        with:
+          repository: netbirdio/netbird
+          ref: ${{ github.event.inputs.netbird_ref || 'main' }}
+          path: netbird-src
+
+      - name: Apply patch
+        run: |
+          source scripts/common.sh
+          apply_patch android-anet netbird-src
+
+      - name: Show patched files
+        run: git -C netbird-src diff --stat
+
+      - name: Setup Go
+        uses: actions/setup-go@v4
+        with:
+          go-version-file: netbird-src/go.mod
+          cache: false
+
+      - name: Replace anet dependency
+        run: |
+          cd netbird-src
+          go mod edit -replace github.com/wlynxg/anet=github.com/lzc256/anet@latest
+          go mod tidy
+
+      - name: Build
+        run: |
+          cd netbird-src
+          GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -v -trimpath -tags "load_wgnt_from_rsrc" -ldflags "-s -w -checklinkname=0" -a -o netbird-anet-linux-arm64 ./client
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: netbird-anet-linux-arm64-${{ needs.check-update.outputs.netbird_sha }}
+          path: netbird-src/netbird-anet-linux-arm64
+          retention-days: 90
