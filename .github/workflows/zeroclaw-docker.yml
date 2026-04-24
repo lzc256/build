@@ -11,6 +11,10 @@ on:
         description: 'Docker image tag suffix'
         required: false
         default: 'patched'
+      push:
+        description: 'Push Docker image to registry'
+        type: boolean
+        default: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -69,6 +73,13 @@ jobs:
             exit 1
           fi
 
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zeroclaw-binary-${{ github.run_number }}
+          path: zeroclaw/target/x86_64-unknown-linux-gnu/release/zeroclaw
+          retention-days: 7
+
       - name: Prepare Docker context
         run: |
           set -e
@@ -111,50 +122,23 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build Docker image
-        uses: docker/build-push-action@v6
-        with:
-          context: docker-ctx
-          push: false
-          tags: zeroclaw-test:debian
-          platforms: linux/amd64
-          load: true
-
-      - name: Upload binary artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: zeroclaw-binary-${{ github.run_number }}
-          path: zeroclaw/target/x86_64-unknown-linux-gnu/release/zeroclaw
-          retention-days: 7
-
-      - name: Upload Docker image
-        run: |
-          docker save zeroclaw-test:debian -o zeroclaw-debian.tar
-          echo "${{ env.REGISTRY }}/${{ github.repository }}:zeroclaw-${{ steps.version.outputs.image_tag }}-debian" > docker-tag.txt
-
-      - name: Upload Docker artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: zeroclaw-docker-${{ github.run_number }}
-          path: |
-            zeroclaw-debian.tar
-            docker-tag.txt
-          retention-days: 7
-
       - name: Login to GHCR
-        if: github.event_name == 'workflow_dispatch' && github.event.inputs.push == 'true'
+        if: github.event.inputs.push == 'true'
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Push Docker image
-        if: github.event_name == 'workflow_dispatch' && github.event.inputs.push == 'true'
-        run: |
-          TAG=$(cat docker-tag.txt)
-          docker tag zeroclaw-test:debian "$TAG"
-          docker push "$TAG"
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: docker-ctx
+          push: ${{ github.event.inputs.push == 'true' }}
+          tags: |
+            ${{ env.REGISTRY }}/${{ github.repository }}:zeroclaw-${{ steps.version.outputs.image_tag }}-debian
+            ${{ env.REGISTRY }}/${{ github.repository }}:zeroclaw-${{ steps.version.outputs.version }}-${{ steps.version.outputs.image_tag }}-debian
+          platforms: linux/amd64
 
       - name: Summary
         run: |
@@ -163,4 +147,9 @@ jobs:
           echo "|------|-------|"
           echo "| Ref | \`${{ github.event.inputs.zeroclaw_ref }}\` |"
           echo "| Version | \`${{ steps.version.outputs.version }}\` |"
-          echo "| Artifacts | zeroclaw-binary, zeroclaw-docker |"
+          echo "| Binary | zeroclaw-binary-${{ github.run_number }} |"
+          if [[ "${{ github.event.inputs.push }}" == "true" ]]; then
+            echo "| Docker | \`${{ env.REGISTRY }}/${{ github.repository }}:zeroclaw-${{ steps.version.outputs.image_tag }}-debian\` |"
+          else
+            echo "| Docker | Not pushed (set push=true to push) |"
+          fi
