@@ -17,30 +17,26 @@ apply_patch() {
         return 1
     fi
 
-    # 查找 patch 文件（支持多项目）
+    # 查找 patch 文件
     local patch_file=""
-    local search_base="$(cd "$SCRIPT_DIR/.." && pwd)"
-    local patch_dirs=()
+    local found_dirs=""
     
-    # 使用 find 避免 glob 空匹配问题
-    while IFS= read -r dir; do
-        patch_dirs+=("$dir")
-    done < <(find "$search_base" -maxdepth 2 -type d -name patches 2>/dev/null || true)
-    
-    for dir in "${patch_dirs[@]}"; do
-        local candidate="${dir}/${patch_name}.sh"
+    # 在各项目的 patches 目录中查找
+    for proj in "$SCRIPT_DIR"/../*/; do
+        local candidate="${proj}patches/${patch_name}.sh"
         if [ -f "$candidate" ]; then
             patch_file="$candidate"
             break
+        fi
+        if [ -d "${proj}patches" ]; then
+            found_dirs="${found_dirs}${proj}patches/"$'\n'
         fi
     done
 
     if [ -z "$patch_file" ]; then
         echo "Error: Patch not found: ${patch_name}.sh"
         echo "Searched in:"
-        for dir in "${patch_dirs[@]}"; do
-            echo "  - $(dirname "$dir")/"
-        done
+        echo "$found_dirs"
         return 1
     fi
 

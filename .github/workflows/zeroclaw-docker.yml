@@ -3,10 +3,6 @@ name: Zeroclaw - Build Debian Docker Image
 on:
   workflow_dispatch:
     inputs:
-      patch_name:
-        description: 'Patch name (without .sh)'
-        required: true
-        default: 'finalize_draft'
       zeroclaw_ref:
         description: 'Zeroclaw branch/tag/commit'
         required: false
@@ -38,11 +34,15 @@ jobs:
           path: zeroclaw
           ref: ${{ github.event.inputs.zeroclaw_ref }}
 
-      - name: Apply patch
+      - name: Apply all patches
         run: |
           set -e
           source scripts/common.sh
-          apply_patch "${{ github.event.inputs.patch_name }}" zeroclaw
+          for patch in zeroclaw/patches/*.sh; do
+            [ -f "$patch" ] || continue
+            patch_name=$(basename "$patch" .sh)
+            apply_patch "$patch_name" zeroclaw
+          done
 
       - name: Show patched files
         run: git -C zeroclaw diff --stat
@@ -140,7 +140,6 @@ jobs:
           echo "## Zeroclaw Build Summary"
           echo "| Item | Value |"
           echo "|------|-------|"
-          echo "| Patch | \`${{ github.event.inputs.patch_name }}\` |"
           echo "| Ref | \`${{ github.event.inputs.zeroclaw_ref }}\` |"
           echo "| Version | \`${{ steps.version.outputs.version }}\` |"
           echo "| Image | \`${{ env.REGISTRY }}/${{ github.repository }}:zeroclaw-${{ steps.version.outputs.image_tag }}-debian\` |"
