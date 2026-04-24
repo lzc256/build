@@ -1,6 +1,9 @@
 name: Zeroclaw - Build & Package
 
 on:
+  schedule:
+    - cron: '0 */12 * * *'
+  workflow_dispatch:
   push:
     branches:
       - main
@@ -10,16 +13,6 @@ on:
       - 'scripts/**'
       - 'patches/**'
       - '.github/workflows/zeroclaw-docker.yml'
-  workflow_dispatch:
-    inputs:
-      zeroclaw_ref:
-        description: 'Zeroclaw branch/tag/commit'
-        required: false
-        default: 'master'
-      image_tag:
-        description: 'Docker image tag suffix'
-        required: false
-        default: 'debian'
 
 env:
   CARGO_TERM_COLOR: always
@@ -32,10 +25,51 @@ permissions:
   packages: write
 
 jobs:
+  check-update:
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.compare.outputs.should_build }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Get latest version
+        id: version
+        run: |
+          TAG=$(curl -s https://api.github.com/repos/zeroclaw-labs/zeroclaw/releases/latest | jq -r '.tag_name')
+          echo "version=${TAG#v}" >> $GITHUB_OUTPUT
+          echo "tag_name=${TAG}" >> $GITHUB_OUTPUT
+
+      - name: Cache check
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: version.txt
+          key: zeroclaw-version-${{ steps.version.outputs.tag_name }}
+
+      - name: Compare versions
+        id: compare
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "Push triggered. Building."
+            echo "should_build=true" >> $GITHUB_OUTPUT
+          elif [ -f version.txt ]; then
+            LAST_VERSION=$(cat version.txt)
+            if [ "$LAST_VERSION" != "${{ steps.version.outputs.version }}" ]; then
+              echo "Version updated: ${LAST_VERSION} -> ${{ steps.version.outputs.version }}. Building."
+              echo "should_build=true" >> $GITHUB_OUTPUT
+            else
+              echo "No update: ${{ steps.version.outputs.version }} == ${LAST_VERSION}. Skipping."
+              echo "should_build=false" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "First build: ${{ steps.version.outputs.version }}. Building."
+            echo "should_build=true" >> $GITHUB_OUTPUT
+          fi
+
   build:
-    name: Build & Package
+    needs: check-update
+    if: needs.check-update.outputs.should_build == 'true'
     runs-on: ubuntu-22.04
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - name: Checkout patch framework
         uses: actions/checkout@v4
@@ -45,7 +79,7 @@ jobs:
         with:
           repository: zeroclaw-labs/zeroclaw
           path: zeroclaw-src
-          ref: ${{ github.event.inputs.zeroclaw_ref }}
+          ref: ${{ needs.check-update.outputs.version }}
 
       - name: Apply all patches
         run: |
@@ -85,7 +119,7 @@ jobs:
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4
         with:
-          name: zeroclaw-binary-${{ github.run_number }}
+          name: zeroclaw-binary-${{ needs.check-update.outputs.version }}
           path: zeroclaw-src/target/x86_64-unknown-linux-gnu/release/zeroclaw
           retention-days: 7
 
@@ -121,20 +155,6 @@ jobs:
           echo "$CONFIG_CONTENT" > docker-ctx/zeroclaw-data/.zeroclaw/config.toml
           mkdir -p docker-ctx/zeroclaw-data/workspace
 
-      - name: Extract version
-        id: version
-        run: |
-          VERSION=$(cd zeroclaw-src && sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          # Use commit hash for push trigger, inputs.image_tag for manual trigger
-          if [ "${{ github.event_name }}" == "push" ]; then
-            echo "image_tag=${GITHUB_SHA:0:8}" >> "$GITHUB_OUTPUT"
-            echo "should_push=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "image_tag=${{ github.event.inputs.image_tag }}" >> "$GITHUB_OUTPUT"
-            echo "should_push=true" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -151,15 +171,20 @@ jobs:
           context: docker-ctx
           push: true
           tags: |
+            ${{ env.REGISTRY }}/${{ github.repository }}:zeroclaw-${{ needs.check-update.outputs.version }}-debian
             ${{ env.REGISTRY }}/${{ github.repository }}:zeroclaw-debian
           platforms: linux/amd64
+
+      - name: Save version
+        run: |
+          echo "${{ needs.check-update.outputs.version }}" > version.txt
 
       - name: Summary
         run: |
           echo "## Zeroclaw Build Summary"
           echo "| Item | Value |"
           echo "|------|-------|"
-          echo "| Ref | \`${{ github.event.inputs.zeroclaw_ref || github.sha }}\` |"
-          echo "| Version | \`${{ steps.version.outputs.version }}\` |"
-          echo "| Image Tag | \`${{ steps.version.outputs.image_tag }}\` |"
-          echo "| Docker | \`${{ env.REGISTRY }}/${{ github.repository }}:zeroclaw-${{ steps.version.outputs.image_tag }}-debian\` |"
+          echo "| Version | \`${{ needs.check-update.outputs.version }}\` |"
+          echo "| Binary | zeroclaw-binary-${{ needs.check-update.outputs.version }} |"
+          echo "| Docker | \`${{ env.REGISTRY }}/${{ github.repository }}:zeroclaw-${{ needs.check-update.outputs.version }}-debian\` |"
+          echo "| Latest | \`${{ env.REGISTRY }}/${{ github.repository }}:zeroclaw-debian\` |"
