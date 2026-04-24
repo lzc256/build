@@ -27,11 +27,10 @@ jobs:
           repository: we-be/stealthpanda
           path: stealthpanda
 
-      - name: Install Zig
-        run: |
-          curl -L https://ziglang.org/download/0.15.2/zig-linux-x86_64-0.15.2.tar.xz -o zig.tar.xz
-          tar -xf zig.tar.xz
-          echo "$PWD/zig-linux-x86_64-0.15.2" >> $GITHUB_PATH
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
 
       - name: Install system deps
         run: |
