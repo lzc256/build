@@ -26,8 +26,21 @@ s{net\.Interfaces\(\)}
 FILE="$TARGET/client/internal/routemanager/systemops/systemops_generic.go"
 
 perl -i -0pe '
+# Add anet import
+s{(log "github.com/sirupsen/logrus"\n)}
+{$1\t"github.com/wlynxg/anet"\n};
+
+# refreshLocalSubnetsCache: net.Interfaces() -> anet.Interfaces()
+s{localInterfaces, err := net\.Interfaces\(\)}
+{localInterfaces, err := anet.Interfaces()};
+
+# refreshLocalSubnetsCache: intf.Addrs() -> anet.InterfaceAddrsByInterface(&intf)
+s{addrs, err := intf\.Addrs\(\)}
+{addrs, err := anet.InterfaceAddrsByInterface(\&intf)};
+
+# IsAddrRouted: early return with comment
 s{(func IsAddrRouted\(addr netip\.Addr, vpnRoutes \[\]netip\.Prefix\) \(bool, netip\.Prefix\) \{\n)}
-{$1\treturn false, netip.Prefix{}\n};
+{$1\t// Android: Always skip route check. Advanced routing requires root, which Android lacks.\n\treturn false, netip.Prefix{}\n\n};
 ' "$FILE"
 
 # 3. client/internal/stdnet/discover_pion.go
