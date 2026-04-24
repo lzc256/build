@@ -1,6 +1,10 @@
 name: Zeroclaw - Build & Package
 
 on:
+  push:
+    branches:
+      - main
+      - master
   workflow_dispatch:
     inputs:
       zeroclaw_ref:
@@ -11,10 +15,6 @@ on:
         description: 'Docker image tag suffix'
         required: false
         default: 'debian'
-      push:
-        description: 'Push Docker image to registry'
-        type: boolean
-        default: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -121,13 +121,19 @@ jobs:
         run: |
           VERSION=$(cd zeroclaw-src && sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "image_tag=${{ github.event.inputs.image_tag }}" >> "$GITHUB_OUTPUT"
+          # Use commit hash for push trigger, inputs.image_tag for manual trigger
+          if [ "${{ github.event_name }}" == "push" ]; then
+            echo "image_tag=${GITHUB_SHA:0:8}" >> "$GITHUB_OUTPUT"
+            echo "should_push=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "image_tag=${{ github.event.inputs.image_tag }}" >> "$GITHUB_OUTPUT"
+            echo "should_push=true" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
       - name: Login to GHCR
-        if: github.event.inputs.push == 'true'
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
@@ -138,7 +144,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: docker-ctx
-          push: ${{ github.event.inputs.push == 'true' }}
+          push: true
           tags: |
             ${{ env.REGISTRY }}/${{ github.repository }}:zeroclaw-${{ steps.version.outputs.image_tag }}-debian
             ${{ env.REGISTRY }}/${{ github.repository }}:zeroclaw-${{ steps.version.outputs.version }}-${{ steps.version.outputs.image_tag }}-debian
@@ -149,11 +155,7 @@ jobs:
           echo "## Zeroclaw Build Summary"
           echo "| Item | Value |"
           echo "|------|-------|"
-          echo "| Ref | \`${{ github.event.inputs.zeroclaw_ref }}\` |"
+          echo "| Ref | \`${{ github.event.inputs.zeroclaw_ref || github.sha }}\` |"
           echo "| Version | \`${{ steps.version.outputs.version }}\` |"
-          echo "| Binary | zeroclaw-binary-${{ github.run_number }} |"
-          if [[ "${{ github.event.inputs.push }}" == "true" ]]; then
-            echo "| Docker | \`${{ env.REGISTRY }}/${{ github.repository }}:zeroclaw-${{ steps.version.outputs.image_tag }}-debian\` |"
-          else
-            echo "| Docker | Not pushed (set push=true to push) |"
-          fi
+          echo "| Image Tag | \`${{ steps.version.outputs.image_tag }}\` |"
+          echo "| Docker | \`${{ env.REGISTRY }}/${{ github.repository }}:zeroclaw-${{ steps.version.outputs.image_tag }}-debian\` |"
