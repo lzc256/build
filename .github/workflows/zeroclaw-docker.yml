@@ -32,14 +32,14 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 60
     steps:
-      - name: Checkout
+      - name: Checkout patch framework
         uses: actions/checkout@v4
 
       - name: Clone zeroclaw
         uses: actions/checkout@v4
         with:
           repository: zeroclaw-labs/zeroclaw
-          path: zeroclaw
+          path: zeroclaw-src
           ref: ${{ github.event.inputs.zeroclaw_ref }}
 
       - name: Apply all patches
@@ -49,11 +49,11 @@ jobs:
           for patch in zeroclaw/patches/*.sh; do
             [ -f "$patch" ] || continue
             patch_name=$(basename "$patch" .sh)
-            apply_patch "$patch_name" zeroclaw
+            apply_patch "$patch_name" zeroclaw-src
           done
 
       - name: Show patched files
-        run: git -C zeroclaw diff --stat
+        run: git -C zeroclaw-src diff --stat
 
       - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7
         with:
@@ -65,12 +65,12 @@ jobs:
 
       - name: Build release binary
         run: |
-          cd zeroclaw
+          cd zeroclaw-src
           cargo build --release --locked --features "${{ env.CARGO_FEATURES }}" --target x86_64-unknown-linux-gnu
 
       - name: Check binary size
         run: |
-          SIZE=$(stat -c%s zeroclaw/target/x86_64-unknown-linux-gnu/release/zeroclaw)
+          SIZE=$(stat -c%s zeroclaw-src/target/x86_64-unknown-linux-gnu/release/zeroclaw)
           echo "Binary size: $SIZE bytes"
           if [ "$SIZE" -lt 10000000 ]; then
             echo "::error::Binary suspiciously small, build may have failed"
@@ -81,7 +81,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: zeroclaw-binary-${{ github.run_number }}
-          path: zeroclaw/target/x86_64-unknown-linux-gnu/release/zeroclaw
+          path: zeroclaw-src/target/x86_64-unknown-linux-gnu/release/zeroclaw
           retention-days: 7
 
       - name: Prepare Docker context
@@ -89,9 +89,9 @@ jobs:
           set -e
           mkdir -p docker-ctx/bin/amd64/web/dist
           mkdir -p docker-ctx/zeroclaw-data/.zeroclaw docker-ctx/zeroclaw-data/workspace
-          cp zeroclaw/target/x86_64-unknown-linux-gnu/release/zeroclaw docker-ctx/bin/amd64/
+          cp zeroclaw-src/target/x86_64-unknown-linux-gnu/release/zeroclaw docker-ctx/bin/amd64/
           touch docker-ctx/bin/amd64/web/dist/.gitkeep
-          cp zeroclaw/Dockerfile.debian.ci docker-ctx/Dockerfile
+          cp zeroclaw-src/Dockerfile.debian.ci docker-ctx/Dockerfile
 
       - name: Generate config.toml
         env:
@@ -119,7 +119,7 @@ jobs:
       - name: Extract version
         id: version
         run: |
-          VERSION=$(cd zeroclaw && sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)
+          VERSION=$(cd zeroclaw-src && sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "image_tag=${{ github.event.inputs.image_tag }}" >> "$GITHUB_OUTPUT"
 

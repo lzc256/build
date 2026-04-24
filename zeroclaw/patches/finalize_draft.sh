@@ -4,8 +4,9 @@
 DESCRIPTION="\
 修改 matrix.rs:
 1. 添加 partial_thread_ts 字段追踪线程上下文
-2. send_draft Partial 分支: 保存 thread_ts
-3. finalize_draft Partial 分支: 删除 draft 并发送最终消息"
+2. 构造函数中初始化 partial_thread_ts
+3. send_draft Partial 分支: 保存 thread_ts
+4. finalize_draft Partial 分支: 删除 draft 并发送最终消息"
 
 TARGET="$1/crates/zeroclaw-channels/src/matrix.rs"
 
@@ -17,8 +18,12 @@ s{(multi_message_thread_ts: Arc<Mutex<HashMap<String, Option<String>>>>,)}
     /// Thread context captured from send_draft for Partial mode final message.
     partial_thread_ts: Arc<Mutex<HashMap<String, Option<String>>>>,};
 
-# 2. 在 send_draft 的 Partial 分支中保存 thread_ts
-# 在 insert(room_id, ...) 之后，Ok(Some(event_id)) 之前插入保存代码
+# 2. 在构造函数中初始化 partial_thread_ts
+s{(multi_message_thread_ts: Arc::new\(Mutex::new\(HashMap::new\(\)\)\),)}
+{$1
+            partial_thread_ts: Arc::new(Mutex::new(HashMap::new())),};
+
+# 3. 在 send_draft 的 Partial 分支中保存 thread_ts
 s{(\.insert\(room_id, std::time::Instant::now\(\)\);)\n\n(\s+)Ok\(Some\(event_id\)\)}
 {$1
 
@@ -27,7 +32,7 @@ $2// Save thread context for Partial mode final message.
 
                 Ok(Some(event_id))};
 
-# 3. 修改 finalize_draft 中 Partial 分支的实现
+# 4. 修改 finalize_draft 中 Partial 分支的实现
 s{StreamMode::Partial => \{\n\s+// Final m\.replace edit with complete text\.\n\s+self\.last_draft_edit\.lock\(\)\.await\.remove\(&room_id\);\n\s+self\.edit_message\(&room_id, message_id, text\)\.await\n\s+\}}
 {StreamMode::Partial => {
                 // Delete draft and send final message in original thread.
