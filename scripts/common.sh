@@ -2,6 +2,8 @@
 # common.sh - 公共 patch 逻辑
 # Usage: source scripts/common.sh && apply_patch <patch_name> <target_dir>
 
+set -e
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
