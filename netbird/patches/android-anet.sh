@@ -56,3 +56,20 @@ s{net\.Interfaces\(\)}
 s{oif\.Addrs\(\)}
 {anet.InterfaceAddrsByInterface(\&oif)}g;
 ' "$FILE"
+
+# 4. client/system/network_addr.go
+FILE="$TARGET/client/system/network_addr.go"
+
+perl -i -0pe '
+# Replace import block
+s{import \(\n\t"net"\n\t"net/netip"\n\)}
+{import (\n\t"net/netip"\n\n\t"github.com/wlynxg/anet"\n)};
+
+# net.Interfaces() -> anet.Interfaces()
+s{interfaces, err := net\.Interfaces\(\)}
+{interfaces, err := anet.Interfaces()};
+
+# iface.Addrs() -> anet.InterfaceAddrsByInterface(&iface)
+s{addrs, err := iface\.Addrs\(\)}
+{addrs, err := anet.InterfaceAddrsByInterface(\&iface)};
+' "$FILE"
