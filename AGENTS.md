@@ -46,6 +46,7 @@ git -C project-src diff
 | `zeroclaw-docker.yml` | `zeroclaw-labs/zeroclaw` | Docker 镜像 |
 | `stealthpanda-build.yml` | `we-be/stealthpanda` | 二进制 |
 | `netbird-build.yml` | `netbirdio/netbird` | `netbird-anet-linux-arm64` |
+| `firefly-docker.yml` | `firefly-iii/firefly-iii` | Docker 镜像 |
 | `other-build.yml` | 模板 | — |
 
 ### zeroclaw 构建参数
@@ -67,6 +68,13 @@ git -C project-src diff
 - 依赖替换: `github.com/wlynxg/anet` → `github.com/lzc256/anet@latest`
 - 产物: `netbird-anet-linux-arm64`
 - 保留: 90 天
+
+### firefly 构建参数
+
+- Alpine: `3.23.3`
+- PHP: `php85`
+- 镜像: `ghcr.io/<repo>:firefly` 和 `ghcr.io/<repo>:firefly-<version>`
+- 无 patch 脚本，直接在仓库内构建
 
 ## 目录说明
 

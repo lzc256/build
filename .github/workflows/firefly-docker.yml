@@ -1,0 +1,101 @@
+name: Firefly - Build Docker Image
+
+on:
+  schedule:
+    - cron: '56 18 */2 * *'
+  workflow_dispatch:
+    inputs:
+      firefly_version:
+        description: 'Firefly-III version (e.g. v6.1.17)'
+        required: false
+        default: ''
+  push:
+    paths:
+      - 'firefly/**'
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  check-update:
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.compare.outputs.should_build }}
+      firefly_version: ${{ steps.get_version.outputs.version }}
+    steps:
+      - name: Get Latest Firefly-III Version
+        id: get_version
+        run: |
+          if [ -n "${{ github.event.inputs.firefly_version }}" ]; then
+            VERSION="${{ github.event.inputs.firefly_version }}"
+          else
+            VERSION=$(curl -s https://api.github.com/repos/firefly-iii/firefly-iii/releases/latest | jq -r .tag_name)
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "combined_key=firefly-${VERSION}-${{ github.sha }}" >> $GITHUB_OUTPUT
+
+      - name: Cache Check
+        if: github.event_name != 'push'
+        id: cache_check
+        uses: actions/cache@v4
+        with:
+          path: .build_success
+          key: ${{ steps.get_version.outputs.combined_key }}
+
+      - name: Compare
+        id: compare
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "Push triggered. Building."
+            echo "should_build=true" >> $GITHUB_OUTPUT
+          elif [ -f .build_success ]; then
+            echo "No updates detected. Skipping."
+            echo "should_build=false" >> $GITHUB_OUTPUT
+          else
+            echo "Updates detected. Proceeding to build."
+            echo "should_build=true" >> $GITHUB_OUTPUT
+            echo "done" > .build_success
+          fi
+
+  build:
+    needs: check-update
+    if: needs.check-update.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Login to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build and Push
+        uses: docker/build-push-action@v6
+        with:
+          context: firefly
+          file: firefly/Dockerfile
+          push: true
+          build-args: |
+            FIREFLY_VERSION=${{ needs.check-update.outputs.firefly_version }}
+          tags: |
+            ${{ env.REGISTRY }}/${{ github.repository }}:firefly
+            ${{ env.REGISTRY }}/${{ github.repository }}:firefly-${{ needs.check-update.outputs.firefly_version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Summary
+        run: |
+          echo "## Firefly Build Summary"
+          echo "| Item | Value |"
+          echo "|------|-------|"
+          echo "| Version | \`${{ needs.check-update.outputs.firefly_version }}\` |"
+          echo "| Image | \`${{ env.REGISTRY }}/${{ github.repository }}:firefly-${{ needs.check-update.outputs.firefly_version }}\` |"
