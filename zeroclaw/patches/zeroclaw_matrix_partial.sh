@@ -5,8 +5,7 @@
 
 DESCRIPTION="Matrix StreamMode Partial 优化:
 1. collapse_tool_calls: 工具调用累积到 draft，带计数
-2. finalize_draft: 删除 draft，发送最终消息
-3. initial_draft: 初始内容改为 💬 Thinking..."
+2. finalize_draft: 删除 draft，发送最终消息到原线程"
 
 set -e
 
@@ -63,26 +62,13 @@ fi
 echo "  ✓ Modified finalize_draft"
 
 # =============================================================================
-# 修改 5: 初始 draft 内容改为 💬 Thinking...
-# =============================================================================
-
-perl -i -pe 's/^(\s+)("\.\.\.")$/$1"💬 Thinking..."/ if /"\.\.\."/ && !/Send initial/' "$TARGET"
-
-if ! grep -q "💬 Thinking" "$TARGET"; then
-    echo "ERROR: Failed to change initial draft text"
-    exit 1
-fi
-echo "  ✓ Changed initial draft to 💬 Thinking..."
-
-# =============================================================================
-# 修改 6: orchestrator/mod.rs - collapse_tool_calls
+# 修改 5: orchestrator/mod.rs - collapse_tool_calls
 # =============================================================================
 
 TARGET_ORCH="$1/crates/zeroclaw-channels/src/orchestrator/mod.rs"
 
 echo "Patching orchestrator/mod.rs..."
 
-# 检查原始代码是否存在
 if ! grep -q "while let Some(text) = notify_rx.recv().await" "$TARGET_ORCH"; then
     echo "ERROR: Original notify_task code not found"
     exit 1
