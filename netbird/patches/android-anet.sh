@@ -1,10 +1,23 @@
 #!/bin/bash
 DESCRIPTION="\
-Android anet patch:
+Android anet patch - Fix network interface access without root:
+
+Background:
+- Standard Go 'net' package uses netlink syscalls requiring root
+- Android apps lack root, causing 'netlinkrib: permission denied' errors
+- 'anet' library uses Android-specific APIs without netlink/root requirement
+
+Changes:
 - Replace net.Interfaces() with anet.Interfaces()
 - Replace iface.Addrs() with anet.InterfaceAddrsByInterface()
-- Disable IsAddrRouted check (early return)
-- Add anet import where needed"
+- Keep 'net' import for net.FlagUp, net.IPNet, net.Addr (still needed)
+- Disable IsAddrRouted check (Android lacks root for advanced routing)
+
+Affected files:
+- client/firewall/uspfilter/localip.go
+- client/internal/stdnet/discover_pion.go
+- client/internal/routemanager/systemops/systemops_generic.go
+- client/system/network_addr.go"
 
 TARGET="$1"
 
