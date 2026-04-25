@@ -61,9 +61,9 @@ s{oif\.Addrs\(\)}
 FILE="$TARGET/client/system/network_addr.go"
 
 perl -i -0pe '
-# Replace import block
+# Add anet import (keep net import for net.FlagUp, net.IPNet, net.Addr)
 s{import \(\n\t"net"\n\t"net/netip"\n\)}
-{import (\n\t"net/netip"\n\n\t"github.com/wlynxg/anet"\n)};
+{import (\n\t"net"\n\t"net/netip"\n\n\t"github.com/wlynxg/anet"\n)};
 
 # net.Interfaces() -> anet.Interfaces()
 s{interfaces, err := net\.Interfaces\(\)}
