@@ -66,10 +66,7 @@ echo "  ✓ Modified finalize_draft"
 # 修改 5: 初始 draft 内容改为 💬 Thinking...
 # =============================================================================
 
-perl -i -0pe '
-s{let initial_text = if message\.content\.is_empty\(\) \{\n\s+"\.\.\."\n\s+\} else}
-{let initial_text = if message.content.is_empty() {\n                "💬 Thinking..."\n            } else};
-' "$TARGET"
+perl -i -pe 's/^(\s+)("\.\.\.")$/$1"💬 Thinking..."/ if /"\.\.\."/ && !/Send initial/' "$TARGET"
 
 if ! grep -q "💬 Thinking" "$TARGET"; then
     echo "ERROR: Failed to change initial draft text"
