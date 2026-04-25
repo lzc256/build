@@ -4,8 +4,9 @@
 # =============================================================================
 
 DESCRIPTION="Matrix StreamMode Partial 优化:
-1. collapse_tool_calls: 工具调用累积到 draft
-2. finalize_draft: 删除 draft，发送最终消息"
+1. collapse_tool_calls: 工具调用累积到 draft，带计数
+2. finalize_draft: 删除 draft，发送最终消息
+3. initial_draft: 初始内容改为 💬 Thinking..."
 
 set -e
 
@@ -62,7 +63,22 @@ fi
 echo "  ✓ Modified finalize_draft"
 
 # =============================================================================
-# 修改 5: orchestrator/mod.rs - collapse_tool_calls
+# 修改 5: 初始 draft 内容改为 💬 Thinking...
+# =============================================================================
+
+perl -i -0pe '
+s{let initial_text = if message\.content\.is_empty\(\) \{\n\s+"\.\.\."\n\s+\} else}
+{let initial_text = if message.content.is_empty() {\n                "💬 Thinking..."\n            } else};
+' "$TARGET"
+
+if ! grep -q "💬 Thinking" "$TARGET"; then
+    echo "ERROR: Failed to change initial draft text"
+    exit 1
+fi
+echo "  ✓ Changed initial draft to 💬 Thinking..."
+
+# =============================================================================
+# 修改 6: orchestrator/mod.rs - collapse_tool_calls
 # =============================================================================
 
 TARGET_ORCH="$1/crates/zeroclaw-channels/src/orchestrator/mod.rs"

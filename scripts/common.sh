@@ -2,9 +2,8 @@
 # common.sh - 公共 patch 逻辑
 # Usage: source scripts/common.sh && apply_patch <patch_name> <target_dir>
 
-set -e
-
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 apply_patch() {
     local patch_name="$1"
@@ -22,14 +21,15 @@ apply_patch() {
     local found_dirs=""
     
     # 在各项目的 patches 目录中查找
-    for proj in "$SCRIPT_DIR"/../*/; do
-        local candidate="${proj}patches/${patch_name}.sh"
-        if [ -f "$candidate" ]; then
-            patch_file="$candidate"
-            break
-        fi
-        if [ -d "${proj}patches" ]; then
-            found_dirs="${found_dirs}${proj}patches/"$'\n'
+    for proj_dir in "$REPO_ROOT"/*/; do
+        local patches_dir="${proj_dir}patches"
+        if [ -d "$patches_dir" ]; then
+            local candidate="${patches_dir}/${patch_name}.sh"
+            if [ -f "$candidate" ]; then
+                patch_file="$candidate"
+                break
+            fi
+            found_dirs="${found_dirs}${patches_dir}/"$'\n'
         fi
     done
 
