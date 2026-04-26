@@ -166,15 +166,19 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Get short SHA
+        id: short_sha
+        run: echo "sha8=${GITHUB_SHA:0:8}" >> $GITHUB_OUTPUT
+
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
         with:
           context: docker-ctx
           push: true
           tags: |
-            ${{ env.REGISTRY }}/${{ github.repository }}:zeroclaw-${{ needs.check-update.outputs.version_display }}-debian
-            ${{ env.REGISTRY }}/${{ github.repository }}:zeroclaw-${{ needs.check-update.outputs.version_display }}-debian-${{ github.sha }}
             ${{ env.REGISTRY }}/${{ github.repository }}:zeroclaw-debian
+            ${{ env.REGISTRY }}/${{ github.repository }}:zeroclaw-debian-${{ needs.check-update.outputs.version_display }}
+            ${{ env.REGISTRY }}/${{ github.repository }}:zeroclaw-debian-${{ steps.short_sha.outputs.sha8 }}
           platforms: linux/amd64
 
       - name: Save version
