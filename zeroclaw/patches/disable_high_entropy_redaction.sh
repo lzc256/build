@@ -62,10 +62,56 @@ fi
 echo "  ✓ Init skip_high_entropy in with_sensitivity()"
 
 # 1d. Add with_high_entropy_disabled method after with_sensitivity
-# Insert after the closing brace of with_sensitivity
-perl -i -pe '
-s#(            skip_high_entropy: false,\n        \}\n    \}\n)#$1    /// Disable the high-entropy token heuristic.\n    ///\n    /// When set, scan skips Shannon-entropy-based detection\n    /// while all pattern-based checks remain active.\n    pub fn with_high_entropy_disabled(mut self, disabled: bool) -> Self {\n        self.skip_high_entropy = disabled;\n        self\n    }\n#;
-' "$TARGET_LD"
+python3 -c "
+target = '$TARGET_LD'
+with open(target, 'r') as f:
+    content = f.read()
+
+method = '''
+    /// Disable the high-entropy token heuristic.
+    ///
+    /// When set, scan skips Shannon-entropy-based detection
+    /// while all pattern-based checks remain active.
+    pub fn with_high_entropy_disabled(mut self, disabled: bool) -> Self {
+        self.skip_high_entropy = disabled;
+        self
+    }
+'''
+
+# Find with_sensitivity closing brace and insert after it
+# Pattern: skip_high_entropy: false,\n    }
+# Note: the actual code may have extra whitespace/newlines
+marker = 'skip_high_entropy: false,'
+idx = content.find(marker)
+if idx == -1:
+    raise Exception('Could not find skip_high_entropy in with_sensitivity')
+
+# Find the closing brace of the Self { ... } block
+# Search forward from marker to find the pattern
+search_start = idx
+search_end = idx + 200  # Look within reasonable distance
+search_region = content[search_start:search_end]
+
+# Find the position after skip_high_entropy: false,
+# Then find the closing } for the struct literal
+close_brace_pos = search_region.find('}')
+if close_brace_pos == -1:
+    raise Exception('Could not find closing brace')
+
+# Calculate absolute position
+insert_pos = search_start + close_brace_pos + 1
+
+content = content[:insert_pos] + method + content[insert_pos:]
+
+with open(target, 'w') as f:
+    f.write(content)
+"
+
+if ! grep -q "with_high_entropy_disabled" "$TARGET_LD"; then
+    echo "ERROR: Failed to add with_high_entropy_disabled method"
+    exit 1
+fi
+echo "  ✓ Added with_high_entropy_disabled method"
 
 # 1e. Conditional skip in scan()
 perl -i -pe '
@@ -172,14 +218,25 @@ if grep -q "LeakDetector::new().with_high_entropy_disabled" "$TARGET_ORCH"; then
 fi
 
 # 3e. Fix test calls - add , false parameter
+# The function now takes 3 args, tests call with 2 - need to add false as 3rd
 python3 -c "
 import re
 target = '$TARGET_ORCH'
 with open(target, 'r') as f:
     content = f.read()
-pattern = r'(sanitize_channel_response\([^)]+,[^)]+\))\)([\s;]*)$'
-replacement = r'\1, false)\2'
-content = re.sub(pattern, replacement, content, flags=re.MULTILINE)
+
+# Find all test calls to sanitize_channel_response that only have 2 args
+# Pattern: sanitize_channel_response(arg1, arg2);  or  sanitize_channel_response(arg1, &arg2);
+# We need to add false as third arg
+
+# Match function call at end of line with );
+content = re.sub(
+    r'(sanitize_channel_response\([^,]+,\s*[^)]+)\)(\s*);',
+    r'\1, false)\2;',
+    content,
+    flags=re.MULTILINE
+)
+
 with open(target, 'w') as f:
     f.write(content)
 "
