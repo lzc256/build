@@ -173,6 +173,7 @@ jobs:
           push: true
           tags: |
             ${{ env.REGISTRY }}/${{ github.repository }}:zeroclaw-${{ needs.check-update.outputs.version_display }}-debian
+            ${{ env.REGISTRY }}/${{ github.repository }}:zeroclaw-${{ needs.check-update.outputs.version_display }}-debian-${{ github.sha }}
             ${{ env.REGISTRY }}/${{ github.repository }}:zeroclaw-debian
           platforms: linux/amd64
 
