@@ -78,30 +78,19 @@ method = '''
     }
 '''
 
-# Find with_sensitivity closing brace and insert after it
-# Pattern: skip_high_entropy: false,\n    }
-# Note: the actual code may have extra whitespace/newlines
-marker = 'skip_high_entropy: false,'
+# Find the closing brace of with_sensitivity method
+# After step 1c, it looks like: sensitivity: sensitivity.clamp(0.0, 1.0),\n            skip_high_entropy: false,\n        }\n\n    }
+marker = 'skip_high_entropy: false,\n        }\n\n    }'
 idx = content.find(marker)
 if idx == -1:
-    raise Exception('Could not find skip_high_entropy in with_sensitivity')
+    # Try alternate: skip_high_entropy: false,\n        }\n    }
+    marker = 'skip_high_entropy: false,\n        }\n    }'
+    idx = content.find(marker)
+if idx == -1:
+    raise Exception('Could not find with_sensitivity closing pattern')
 
-# Find the closing brace of the Self { ... } block
-# Search forward from marker to find the pattern
-search_start = idx
-search_end = idx + 200  # Look within reasonable distance
-search_region = content[search_start:search_end]
-
-# Find the position after skip_high_entropy: false,
-# Then find the closing } for the struct literal
-close_brace_pos = search_region.find('}')
-if close_brace_pos == -1:
-    raise Exception('Could not find closing brace')
-
-# Calculate absolute position
-insert_pos = search_start + close_brace_pos + 1
-
-content = content[:insert_pos] + method + content[insert_pos:]
+end = idx + len(marker)
+content = content[:end] + method + content[end:]
 
 with open(target, 'w') as f:
     f.write(content)
