@@ -85,6 +85,8 @@ jobs:
       - name: Apply all patches
         run: |
           set -e
+          git config --global user.email "ci@build.local"
+          git config --global user.name "CI Build"
           source scripts/common.sh
           for patch_dir in zeroclaw/patches/*/; do
             [ -d "$patch_dir" ] || continue
