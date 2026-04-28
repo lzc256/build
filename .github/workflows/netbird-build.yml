@@ -70,7 +70,7 @@ jobs:
       - name: Apply patch
         run: |
           source scripts/common.sh
-          apply_patch android-anet netbird-src
+          apply_patch 01-android-anet netbird-src
 
       - name: Show patched files
         run: git -C netbird-src diff --stat

@@ -1,0 +1,159 @@
+From bdc2fc5aa50bd16b0c5d94352837c349f942929d Mon Sep 17 00:00:00 2001
+From: lzc256 <i@lzc256.com>
+Date: Tue, 28 Apr 2026 19:37:14 +0800
+Subject: [PATCH] Patch: disable high entropy redaction
+
+- LeakDetector: add skip_high_entropy field
+- LeakDetector: add with_high_entropy_disabled() builder method
+- LeakDetector: conditional skip in scan()
+- SecurityConfig: add disable_high_entropy_redaction config
+- sanitize_channel_response: wire config to LeakDetector
+- deliver_announcement: wire config to LeakDetector
+---
+ .../zeroclaw-channels/src/orchestrator/mod.rs  | 14 +++++++-------
+ crates/zeroclaw-config/src/schema.rs           |  9 +++++++++
+ .../src/security/leak_detector.rs              | 18 ++++++++++++++++--
+ 3 files changed, 32 insertions(+), 9 deletions(-)
+
+diff --git a/crates/zeroclaw-channels/src/orchestrator/mod.rs b/crates/zeroclaw-channels/src/orchestrator/mod.rs
+index 2250f8e..b770a7d 100644
+--- a/crates/zeroclaw-channels/src/orchestrator/mod.rs
++++ b/crates/zeroclaw-channels/src/orchestrator/mod.rs
+@@ -2100,7 +2100,7 @@ fn strip_think_tags_inline(s: &str) -> String {
+     result.trim().to_string()
+ }
+ 
+-fn sanitize_channel_response(response: &str, tools: &[Box<dyn Tool>]) -> String {
++fn sanitize_channel_response(response: &str, tools: &[Box<dyn Tool>], disable_high_entropy_redaction: bool) -> String {
+     let known_tool_names: HashSet<String> = tools
+         .iter()
+         .map(|tool| tool.name().to_ascii_lowercase())
+@@ -2117,7 +2117,7 @@ fn sanitize_channel_response(response: &str, tools: &[Box<dyn Tool>]) -> String
+     let sanitized = strip_tool_narration(&stripped_json);
+ 
+     // Scan for credential leaks before returning to caller
+-    match zeroclaw_runtime::security::LeakDetector::new().scan(&sanitized) {
++    match zeroclaw_runtime::security::LeakDetector::new().with_high_entropy_disabled(disable_high_entropy_redaction).scan(&sanitized) {
+         zeroclaw_runtime::security::LeakResult::Clean => sanitized,
+         zeroclaw_runtime::security::LeakResult::Detected { patterns, redacted } => {
+             tracing::warn!(
+@@ -3249,7 +3249,7 @@ async fn process_channel_message(
+             }
+ 
+             let sanitized_response =
+-                sanitize_channel_response(&outbound_response, ctx.tools_registry.as_ref());
++                sanitize_channel_response(&outbound_response, ctx.tools_registry.as_ref(), ctx.prompt_config.security.disable_high_entropy_redaction);
+             let mut delivered_response = if sanitized_response.is_empty()
+                 && !outbound_response.trim().is_empty()
+             {
+@@ -5667,7 +5667,7 @@ pub async fn deliver_announcement(
+     use zeroclaw_api::channel::SendMessage;
+ 
+     // Scan for credential leaks before delivering
+-    let leak_detector = zeroclaw_runtime::security::LeakDetector::new();
++    let leak_detector = zeroclaw_runtime::security::LeakDetector::new().with_high_entropy_disabled(config.security.disable_high_entropy_redaction);
+     let safe_output = match leak_detector.scan(output) {
+         zeroclaw_runtime::security::LeakResult::Detected { redacted, .. } => redacted,
+         zeroclaw_runtime::security::LeakResult::Clean => output.to_string(),
+@@ -5974,7 +5974,7 @@ mod tests {
+         // Issue #4478: response with leading whitespace before [Used tools: ...]
+         let input = "  [Used tools: web_search_tool]\nHere is the search result.";
+ 
+-        let result = sanitize_channel_response(input, &tools);
++        let result = sanitize_channel_response(input, &tools, false);
+ 
+         assert!(!result.contains("[Used tools:"));
+         assert!(result.contains("Here is the search result."));
+@@ -11862,7 +11862,7 @@ This is an example JSON object for profile settings."#;
+         let tools: Vec<Box<dyn Tool>> = Vec::new();
+         let leaked = "Temporary key: AKIAABCDEFGHIJKLMNOP"; // gitleaks:allow
+ 
+-        let result = sanitize_channel_response(leaked, &tools);
++        let result = sanitize_channel_response(leaked, &tools, false);
+ 
+         assert!(!result.contains("AKIAABCDEFGHIJKLMNOP")); // gitleaks:allow
+         assert!(result.contains("[REDACTED"));
+@@ -11873,7 +11873,7 @@ This is an example JSON object for profile settings."#;
+         let tools: Vec<Box<dyn Tool>> = Vec::new();
+         let clean_text = "This is a normal message with no credentials.";
+ 
+-        let result = sanitize_channel_response(clean_text, &tools);
++        let result = sanitize_channel_response(clean_text, &tools, false);
+ 
+         assert_eq!(result, clean_text);
+     }
+diff --git a/crates/zeroclaw-config/src/schema.rs b/crates/zeroclaw-config/src/schema.rs
+index d60a948..1e7a5bd 100644
+--- a/crates/zeroclaw-config/src/schema.rs
++++ b/crates/zeroclaw-config/src/schema.rs
+@@ -7931,6 +7931,15 @@ pub struct SecurityConfig {
+     #[serde(default)]
+     #[nested]
+     pub webauthn: WebAuthnConfig,
++    /// Disable the high-entropy token redaction heuristic in the leak detector.
++    ///
++    /// When `true`, the LeakDetector skips Shannon-entropy-based token
++    /// flagging while all pattern-based checks (API keys, AWS credentials,
++    /// private keys, JWTs, database URLs, generic secrets) remain active.
++    /// Useful when outbound content regularly contains legitimate high-entropy
++    /// strings such as base64-encoded payloads or API usage examples.
++    #[serde(default)]
++    pub disable_high_entropy_redaction: bool,
+ }
+ 
+ /// WebAuthn / FIDO2 hardware key authentication configuration (`[security.webauthn]`).
+diff --git a/crates/zeroclaw-runtime/src/security/leak_detector.rs b/crates/zeroclaw-runtime/src/security/leak_detector.rs
+index 461929a..3ce8283 100644
+--- a/crates/zeroclaw-runtime/src/security/leak_detector.rs
++++ b/crates/zeroclaw-runtime/src/security/leak_detector.rs
+@@ -32,6 +32,7 @@ pub enum LeakResult {
+ pub struct LeakDetector {
+     /// Sensitivity threshold (0.0-1.0, higher = more aggressive detection).
+     sensitivity: f64,
++    skip_high_entropy: bool,
+ }
+ 
+ impl Default for LeakDetector {
+@@ -43,16 +44,27 @@ impl Default for LeakDetector {
+ impl LeakDetector {
+     /// Create a new leak detector with default sensitivity.
+     pub fn new() -> Self {
+-        Self { sensitivity: 0.7 }
++        Self { sensitivity: 0.7, skip_high_entropy: false }
+     }
+ 
+     /// Create a detector with custom sensitivity.
+     pub fn with_sensitivity(sensitivity: f64) -> Self {
+         Self {
+             sensitivity: sensitivity.clamp(0.0, 1.0),
++            skip_high_entropy: false,
+         }
++
++    }
++    /// Disable the high-entropy token heuristic.
++    ///
++    /// When set, scan skips Shannon-entropy-based detection
++    /// while all pattern-based checks remain active.
++    pub fn with_high_entropy_disabled(mut self, disabled: bool) -> Self {
++        self.skip_high_entropy = disabled;
++        self
+     }
+ 
++
+     /// Scan content for potential credential leaks.
+     pub fn scan(&self, content: &str) -> LeakResult {
+         let mut patterns = Vec::new();
+@@ -65,7 +77,9 @@ impl LeakDetector {
+         self.check_private_keys(content, &mut patterns, &mut redacted);
+         self.check_jwt_tokens(content, &mut patterns, &mut redacted);
+         self.check_database_urls(content, &mut patterns, &mut redacted);
+-        self.check_high_entropy_tokens(content, &mut patterns, &mut redacted);
++        if !self.skip_high_entropy {
++            self.check_high_entropy_tokens(content, &mut patterns, &mut redacted);
++        }
+ 
+         if patterns.is_empty() {
+             LeakResult::Clean
+-- 
+2.53.0
+

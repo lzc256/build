@@ -1,0 +1,122 @@
+From e74e64a5936cfc9026dbc4973bfaaa09f1a56cd9 Mon Sep 17 00:00:00 2001
+From: lzc256 <i@lzc256.com>
+Date: Tue, 28 Apr 2026 19:40:51 +0800
+Subject: [PATCH] Patch: Matrix StreamMode Partial optimization
+
+- Add partial_thread_ts field to Matrix struct
+- Initialize partial_thread_ts in new()
+- Save thread_ts in send_draft for finalize_draft
+- Modify finalize_draft to redact and resend
+- Collapse tool calls with count and numbering
+---
+ crates/zeroclaw-channels/src/matrix.rs        | 20 +++++++++--
+ .../zeroclaw-channels/src/orchestrator/mod.rs | 36 +++++++++++++++----
+ 2 files changed, 47 insertions(+), 9 deletions(-)
+
+diff --git a/crates/zeroclaw-channels/src/matrix.rs b/crates/zeroclaw-channels/src/matrix.rs
+index a4ba27e..1f2e53c 100644
+--- a/crates/zeroclaw-channels/src/matrix.rs
++++ b/crates/zeroclaw-channels/src/matrix.rs
+@@ -61,6 +61,8 @@ pub struct MatrixChannel {
+     multi_message_sent_len: Arc<Mutex<HashMap<String, usize>>>,
+     /// Thread context captured from `send_draft()` for MultiMessage paragraph delivery.
+     multi_message_thread_ts: Arc<Mutex<HashMap<String, Option<String>>>>,
++    /// Thread context for Partial mode final message.
++    partial_thread_ts: Arc<Mutex<HashMap<String, Option<String>>>>,
+ }
+ 
+ impl std::fmt::Debug for MatrixChannel {
+@@ -269,6 +271,7 @@ impl MatrixChannel {
+             last_draft_edit: Arc::new(Mutex::new(HashMap::new())),
+             multi_message_sent_len: Arc::new(Mutex::new(HashMap::new())),
+             multi_message_thread_ts: Arc::new(Mutex::new(HashMap::new())),
++            partial_thread_ts: Arc::new(Mutex::new(HashMap::new())),
+         }
+     }
+ 
+@@ -1651,7 +1654,10 @@ impl Channel for MatrixChannel {
+                 self.last_draft_edit
+                     .lock()
+                     .await
+-                    .insert(room_id, std::time::Instant::now());
++                    .insert(room_id.clone(), std::time::Instant::now());
++
++                // Save thread_ts for finalize_draft.
++                self.partial_thread_ts.lock().await.insert(room_id, message.thread_ts.clone());
+ 
+                 Ok(Some(event_id))
+             }
+@@ -1818,9 +1824,17 @@ impl Channel for MatrixChannel {
+         match self.stream_mode {
+             StreamMode::Off => Ok(()),
+             StreamMode::Partial => {
+-                // Final m.replace edit with complete text.
+                 self.last_draft_edit.lock().await.remove(&room_id);
+-                self.edit_message(&room_id, message_id, text).await
++                let thread_ts = self.partial_thread_ts.lock().await.remove(&room_id).flatten();
++                if let Err(e) = self.redact_message(&room_id, message_id, None).await {
++                    tracing::debug!("Matrix draft deletion failed: {e}");
++                }
++                let mut msg = SendMessage::new(text, recipient);
++                msg.thread_ts = thread_ts;
++                if let Err(e) = self.send(&msg).await {
++                    tracing::debug!("Matrix final message send failed: {e}");
++                }
++                Ok(())
+             }
+             StreamMode::MultiMessage => {
+                 // Flush any remaining buffered text that didn't hit a \n\n boundary.
+diff --git a/crates/zeroclaw-channels/src/orchestrator/mod.rs b/crates/zeroclaw-channels/src/orchestrator/mod.rs
+index 2250f8e..981a580 100644
+--- a/crates/zeroclaw-channels/src/orchestrator/mod.rs
++++ b/crates/zeroclaw-channels/src/orchestrator/mod.rs
+@@ -2979,16 +2979,40 @@ async fn process_channel_message(
+             while notify_rx.recv().await.is_some() {}
+         }))
+     } else {
++        // TOOL CALLS COLLAPSE with count and numbering
+         Some(tokio::spawn(async move {
+             let thread_ts = notify_thread_root;
++            let mut tool_calls_draft_id: Option<String> = None;
++            let mut accumulated_tool_calls = String::new();
+             while let Some(text) = notify_rx.recv().await {
+                 if let Some(ref ch) = notify_channel {
+-                    let _ = ch
+-                        .send(
+-                            &SendMessage::new(&text, &notify_reply_target)
+-                                .in_thread(thread_ts.clone()),
+-                        )
+-                        .await;
++                    // Calculate line number for this tool call
++                    let num = if accumulated_tool_calls.is_empty() {
++                        1
++                    } else {
++                        accumulated_tool_calls.lines().count() + 1
++                    };
++                    // Remove original emoji and add numbering
++                    let clean_text = text.trim_start_matches("🔧 ");
++                    if !accumulated_tool_calls.is_empty() {
++                        accumulated_tool_calls.push_str("\n");
++                    }
++                    accumulated_tool_calls.push_str(&format!("{}. {}", num, clean_text));
++                    
++                    // Format with count in summary
++                    let count = accumulated_tool_calls.lines().count();
++                    let details_content = format!(
++                        "<details><summary>🔧 Tool Calls ({})</summary>\n\n{}\n</details>",
++                        count,
++                        accumulated_tool_calls
++                    );
++                    if let Some(ref draft_id) = tool_calls_draft_id {
++                        let _ = ch.update_draft(&notify_reply_target, draft_id, &details_content).await;
++                    } else {
++                        if let Ok(Some(id)) = ch.send_draft(&SendMessage::new(&details_content, &notify_reply_target).in_thread(thread_ts.clone())).await {
++                            tool_calls_draft_id = Some(id);
++                        }
++                    }
+                 }
+             }
+         }))
+-- 
+2.53.0
+

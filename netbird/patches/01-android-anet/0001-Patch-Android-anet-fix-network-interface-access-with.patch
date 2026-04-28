@@ -1,0 +1,150 @@
+From 84cd4b0adeb3f7fc4167280d84d57217ff86d529 Mon Sep 17 00:00:00 2001
+From: lzc256 <i@lzc256.com>
+Date: Tue, 28 Apr 2026 20:44:57 +0800
+Subject: [PATCH] Patch: Android anet - fix network interface access without
+ root
+
+- Replace net.Interfaces() with anet.Interfaces()
+- Replace iface.Addrs() with anet.InterfaceAddrsByInterface()
+- Keep net import for net.FlagUp, net.IPNet, net.Addr
+- Disable IsAddrRouted check (Android lacks root)
+---
+ client/firewall/uspfilter/localip.go                      | 5 +++--
+ .../internal/routemanager/systemops/systemops_generic.go  | 8 ++++++--
+ client/internal/stdnet/discover_pion.go                   | 7 +++----
+ client/system/network_addr.go                             | 6 ++++--
+ 4 files changed, 16 insertions(+), 10 deletions(-)
+
+diff --git a/client/firewall/uspfilter/localip.go b/client/firewall/uspfilter/localip.go
+index f63fe3e..51ff74e 100644
+--- a/client/firewall/uspfilter/localip.go
++++ b/client/firewall/uspfilter/localip.go
+@@ -7,6 +7,7 @@ import (
+ 	"sync"
+ 
+ 	log "github.com/sirupsen/logrus"
++	"github.com/wlynxg/anet"
+ 
+ 	"github.com/netbirdio/netbird/client/firewall/uspfilter/common"
+ )
+@@ -87,7 +88,7 @@ func (m *localIPManager) processIP(ip netip.Addr, bitmap *[256]*ipv4LowBitmap, i
+ }
+ 
+ func (m *localIPManager) processInterface(iface net.Interface, bitmap *[256]*ipv4LowBitmap, ipv4Set map[netip.Addr]struct{}, ipv4Addresses *[]netip.Addr) {
+-	addrs, err := iface.Addrs()
++	addrs, err := anet.InterfaceAddrsByInterface(&iface)
+ 	if err != nil {
+ 		log.Debugf("get addresses for interface %s failed: %v", iface.Name, err)
+ 		return
+@@ -140,7 +141,7 @@ func (m *localIPManager) UpdateLocalIPs(iface common.IFaceMapper) (err error) {
+ 		}
+ 	}
+ 
+-	interfaces, err := net.Interfaces()
++	interfaces, err := anet.Interfaces()
+ 	if err != nil {
+ 		log.Warnf("failed to get interfaces: %v", err)
+ 	} else {
+diff --git a/client/internal/routemanager/systemops/systemops_generic.go b/client/internal/routemanager/systemops/systemops_generic.go
+index 4211eb0..6a52b2b 100644
+--- a/client/internal/routemanager/systemops/systemops_generic.go
++++ b/client/internal/routemanager/systemops/systemops_generic.go
+@@ -14,6 +14,7 @@ import (
+ 	"github.com/hashicorp/go-multierror"
+ 	"github.com/libp2p/go-netroute"
+ 	log "github.com/sirupsen/logrus"
++	"github.com/wlynxg/anet"
+ 
+ 	nberrors "github.com/netbirdio/netbird/client/errors"
+ 	"github.com/netbirdio/netbird/client/iface/netstack"
+@@ -176,7 +177,7 @@ func (r *SysOps) isPrefixInLocalSubnets(prefix netip.Prefix) (bool, *net.IPNet)
+ }
+ 
+ func (r *SysOps) refreshLocalSubnetsCache() {
+-	localInterfaces, err := net.Interfaces()
++	localInterfaces, err := anet.Interfaces()
+ 	if err != nil {
+ 		log.Errorf("Failed to get local interfaces: %v", err)
+ 		return
+@@ -184,7 +185,7 @@ func (r *SysOps) refreshLocalSubnetsCache() {
+ 
+ 	var newSubnets []*net.IPNet
+ 	for _, intf := range localInterfaces {
+-		addrs, err := intf.Addrs()
++		addrs, err := anet.InterfaceAddrsByInterface(&intf)
+ 		if err != nil {
+ 			log.Errorf("Failed to get addresses for interface %s: %v", intf.Name, err)
+ 			continue
+@@ -399,6 +400,9 @@ func ipToAddr(ip net.IP, intf *net.Interface) (netip.Addr, error) {
+ // When advanced routing is active the WG socket is bound to the physical interface (fwmark on linux,
+ // IP_UNICAST_IF on windows, IP_BOUND_IF on darwin) and bypasses the main routing table, so the check is skipped.
+ func IsAddrRouted(addr netip.Addr, vpnRoutes []netip.Prefix) (bool, netip.Prefix) {
++	// Android: Always skip route check. Advanced routing requires root, which Android lacks.
++	return false, netip.Prefix{}
++
+ 	if nbnet.AdvancedRouting() {
+ 		return false, netip.Prefix{}
+ 	}
+diff --git a/client/internal/stdnet/discover_pion.go b/client/internal/stdnet/discover_pion.go
+index 83b4a1d..5e16448 100644
+--- a/client/internal/stdnet/discover_pion.go
++++ b/client/internal/stdnet/discover_pion.go
+@@ -1,9 +1,8 @@
+ package stdnet
+ 
+ import (
+-	"net"
+-
+ 	"github.com/pion/transport/v3"
++	"github.com/wlynxg/anet"
+ )
+ 
+ type pionDiscover struct {
+@@ -12,7 +11,7 @@ type pionDiscover struct {
+ func (d pionDiscover) iFaces() ([]*transport.Interface, error) {
+ 	ifs := []*transport.Interface{}
+ 
+-	oifs, err := net.Interfaces()
++	oifs, err := anet.Interfaces()
+ 	if err != nil {
+ 		return nil, err
+ 	}
+@@ -20,7 +19,7 @@ func (d pionDiscover) iFaces() ([]*transport.Interface, error) {
+ 	for _, oif := range oifs {
+ 		ifc := transport.NewInterface(oif)
+ 
+-		addrs, err := oif.Addrs()
++		addrs, err := anet.InterfaceAddrsByInterface(&oif)
+ 		if err != nil {
+ 			return nil, err
+ 		}
+diff --git a/client/system/network_addr.go b/client/system/network_addr.go
+index 5423cf8..e80bd68 100644
+--- a/client/system/network_addr.go
++++ b/client/system/network_addr.go
+@@ -5,10 +5,12 @@ package system
+ import (
+ 	"net"
+ 	"net/netip"
++
++	"github.com/wlynxg/anet"
+ )
+ 
+ func networkAddresses() ([]NetworkAddress, error) {
+-	interfaces, err := net.Interfaces()
++	interfaces, err := anet.Interfaces()
+ 	if err != nil {
+ 		return nil, err
+ 	}
+@@ -21,7 +23,7 @@ func networkAddresses() ([]NetworkAddress, error) {
+ 		if iface.HardwareAddr.String() == "" {
+ 			continue
+ 		}
+-		addrs, err := iface.Addrs()
++		addrs, err := anet.InterfaceAddrsByInterface(&iface)
+ 		if err != nil {
+ 			continue
+ 		}
+-- 
+2.53.0
+

@@ -86,9 +86,9 @@ jobs:
         run: |
           set -e
           source scripts/common.sh
-          for patch in zeroclaw/patches/*.sh; do
-            [ -f "$patch" ] || continue
-            patch_name=$(basename "$patch" .sh)
+          for patch_dir in zeroclaw/patches/*/; do
+            [ -d "$patch_dir" ] || continue
+            patch_name=$(basename "$patch_dir")
             apply_patch "$patch_name" zeroclaw-src
           done
 

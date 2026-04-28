@@ -1,0 +1,44 @@
+From f0f26cfad15f18a0075b8963984c4b58e4a6c395 Mon Sep 17 00:00:00 2001
+From: lzc256 <i@lzc256.com>
+Date: Tue, 28 Apr 2026 19:38:52 +0800
+Subject: [PATCH 2/2] Patch: Matrix partial draft Thinking placeholder
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- orchestrator: send_draft passes empty content instead of '...'
+- matrix.rs: empty content returns '💬 Thinking...' as placeholder
+---
+ crates/zeroclaw-channels/src/matrix.rs           | 2 +-
+ crates/zeroclaw-channels/src/orchestrator/mod.rs | 2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/crates/zeroclaw-channels/src/matrix.rs b/crates/zeroclaw-channels/src/matrix.rs
+index a4ba27e..58f4720 100644
+--- a/crates/zeroclaw-channels/src/matrix.rs
++++ b/crates/zeroclaw-channels/src/matrix.rs
+@@ -1628,7 +1628,7 @@ impl Channel for MatrixChannel {
+                 let room = self.get_joined_room(&room_id).await?;
+ 
+                 let initial_text = if message.content.is_empty() {
+-                    "..."
++                    "💬 Thinking..."
+                 } else {
+                     &message.content
+                 };
+diff --git a/crates/zeroclaw-channels/src/orchestrator/mod.rs b/crates/zeroclaw-channels/src/orchestrator/mod.rs
+index b770a7d..d793cc3 100644
+--- a/crates/zeroclaw-channels/src/orchestrator/mod.rs
++++ b/crates/zeroclaw-channels/src/orchestrator/mod.rs
+@@ -2872,7 +2872,7 @@ async fn process_channel_message(
+         if let Some(channel) = target_channel.as_ref() {
+             match channel
+                 .send_draft(
+-                    &SendMessage::new("...", &msg.reply_target).in_thread(msg.thread_ts.clone()),
++                    &SendMessage::new("", &msg.reply_target).in_thread(msg.thread_ts.clone()),
+                 )
+                 .await
+             {
+-- 
+2.53.0
+

@@ -1,57 +1,63 @@
 # Multi-Project Patch Framework
 
-使用脚本对多个项目进行 patch 和构建的框架。
+使用 git format-patch 对多个项目进行 patch 和构建的框架。
 
 ## 目录结构
 
 ```
 .
 ├── scripts/
-│   └── common.sh              # 公共 patch 逻辑
+│   └── common.sh              # 公共 patch 逻辑 (git am --3way)
 ├── zeroclaw/                   # zeroclaw 项目
 │   └── patches/
-│       ├── finalize_draft.sh
-│       ├── fix_memory.sh
-│       └── remove_debug.sh
-├── other-project/              # 其他项目（示例）
+│       ├── 01-disable-high-entropy-redaction/
+│       │   └── 0001-*.patch
+│       ├── 02-matrix-partial-draft-thinking/
+│       │   └── 0001-*.patch
+│       └── 03-matrix-partial-finalize/
+│           └── 0001-*.patch
+├── netbird/                    # netbird 项目
 │   └── patches/
+│       └── 01-android-anet/
+│           └── 0001-*.patch
 ├── .github/workflows/
 │   ├── zeroclaw-docker.yml    # zeroclaw: Docker 构建
-│   └── other-build.yml        # 其他项目: 二进制构建
+│   └── netbird-build.yml      # netbird: 二进制构建
 └── README.md
 ```
 
-## 添加新项目
+## Patch 格式
+
+Patch 文件使用标准 git format-patch 格式，放在 `{project}/patches/{patch-name}/` 目录中。
+
+### 生成新的 patch ���件
+
+1. 克隆上游仓库并创建分支:
+   ```bash
+   git clone https://github.com/zeroclaw-labs/zeroclaw.git zeroclaw-src
+   cd zeroclaw-src
+   git checkout -b my-patch
+   ```
+
+2. 手动修改代码
+
+3. 生成 patch 文件:
+   ```bash
+   git format-patch <base-commit>..HEAD -o /path/to/project/patches/01-my-patch/
+   ```
+
+4. patch 目录名前缀 (`01-`, `02-`) 控制应用顺序
+
+### 添加新项目
 
 1. 创建项目目录和 patches 子目录：
    ```bash
    mkdir -p new-project/patches
    ```
 
-2. 在 `patches/` 添加 patch 脚本（见下文）
+2. 在 `patches/` 添加 patch 目录（包含 .patch 文件）
 
-3. 创建对应的 workflow 文件：
-   ```bash
-   # .github/workflows/newproject.yml
-   ```
-
-## Patch 脚本格式
-
-```bash
-#!/bin/bash
-DESCRIPTION="\
-详细描述 patch 的用途和实现方式:
-- 第一点说明
-- 第二点说明"
-
-# 对单个文件应用 sed/perl 替换
-sed -i '' 's/old/new/' "$1/src/file.rs"
-
-# 对多个文件应用替换
-for f in "$1"/*.c; do
-    sed -i '' 's/old/new/' "$f"
-done
-```
+3. 创建对应的 workflow 文件
 
 ## 已有项目
 
@@ -59,13 +65,15 @@ done
 
 | Patch | 描述 |
 |-------|------|
-| `finalize_draft` | Partial 模式下删除 draft 并发送最终消息 |
-| `fix_memory` | malloc/calloc 替换为 xmalloc/xcalloc |
-| `remove_debug` | 移除调试 printf 语句 |
+| `01-disable-high-entropy-redaction` | 禁用 LeakDetector 高熵 token 审查 |
+| `02-matrix-partial-draft-thinking` | Matrix Partial 初始 draft 占位符 |
+| `03-matrix-partial-finalize` | Matrix Partial finalize_draft 优化 |
 
-### other-project
+### netbird
 
-占位示例，请根据实际项目添加 patch。
+| Patch | 描述 |
+|-------|------|
+| `01-android-anet` | Android 网络接口访问修复 |
 
 ## 使用方法
 
@@ -76,9 +84,9 @@ source scripts/common.sh
 apply_patch <patch_name> <target_dir>
 
 # 示例
-git clone https://github.com/zeroclaw-labs/zeroclaw.git zeroclaw
-apply_patch finalize_draft zeroclaw
-git diff zeroclaw
+git clone https://github.com/zeroclaw-labs/zeroclaw.git zeroclaw-src
+apply_patch 01-disable-high-entropy-redaction zeroclaw-src
+git diff zeroclaw-src
 ```
 
 ### GitHub Actions
@@ -99,7 +107,14 @@ apply_patch <patch_name> <target_dir>
 
 | 参数 | 说明 |
 |------|------|
-| `patch_name` | patches 目录下的 .sh 文件名（不含后缀） |
-| `target_dir` | 目标项目目录 |
+| `patch_name` | patches 目录下的 patch 目录名（如 `01-disable-high-entropy-redaction`）|
+| `target_dir` | 目标项目目录（必须是 git 仓库）|
 
-自动搜索所有 `{project}/patches/` 目录查找 patch 文件。
+自动搜索所有 `{project}/patches/` 目录查找 patch 目录。
+
+### 3-way Merge
+
+使用 `git am --3way` 进行 3-way merge，能够：
+- 自动处理上游的空白变化和行偏移
+- 失败时提供清晰的冲突标记
+- 通过 `git am --abort` 原子回滚
