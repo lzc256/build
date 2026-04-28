@@ -2,8 +2,8 @@
 # common.sh - 公共 patch 逻辑
 # Usage: source scripts/common.sh && apply_patch <patch_name> <target_dir>
 #
-# 新格式: patch 目录包含 .patch 文件 (git format-patch 格式)
-# 使用 git apply 进行应用，更简洁且不需要 git 用户身份
+# 新格式: patch 目录包含 .patch 文件
+# 使用 git apply --3way 进行应用
 
 set -e
 
@@ -63,7 +63,7 @@ apply_patch() {
     echo "Patches: ${#patches[@]} file(s)"
     echo "========================================="
 
-    # 打印 DESCRIPTION (从第一个 .patch 文件中读取 Subject)
+    # 打印 DESCRIPTION
     local first_patch="${patches[0]}"
     local description=$(grep -m1 '^Subject:' "$first_patch" | sed 's/^Subject: \[PATCH\] //')
     if [ -n "$description" ]; then
@@ -75,14 +75,10 @@ apply_patch() {
     # 进入目标目录
     cd "$target_dir"
 
-    # 应用 patches (使用 git apply，不创建 commit)
+    # 应用 patches
     for p in "${patches[@]}"; do
         echo "Applying: $(basename "$p")"
-        if ! git apply --3way "$p"; then
-            echo "ERROR: Failed to apply $(basename "$p")"
-            git apply --reverse "$p" 2>/dev/null || true
-            return 1
-        fi
+        git apply --3way "$p"
     done
 
     echo "========================================="
