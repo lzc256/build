@@ -31,8 +31,6 @@ jobs:
       - name: Apply patch
         run: |
           set -e
-          git config --global user.email "ci@build.local"
-          git config --global user.name "CI Build"
           source scripts/common.sh
           apply_patch "${{ github.event.inputs.patch_name }}" other-project
 

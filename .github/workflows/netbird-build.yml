@@ -69,8 +69,6 @@ jobs:
 
       - name: Apply patch
         run: |
-          git config --global user.email "ci@build.local"
-          git config --global user.name "CI Build"
           source scripts/common.sh
           apply_patch 01-android-anet netbird-src
 
