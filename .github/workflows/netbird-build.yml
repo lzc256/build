@@ -73,7 +73,7 @@ jobs:
           apply_patch 01-android-anet netbird-src
 
       - name: Show patched files
-        run: git -C netbird-src diff --stat
+        run: git -C netbird-src status --short
 
       - name: Setup Go
         uses: actions/setup-go@v4

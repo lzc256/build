@@ -93,7 +93,7 @@ jobs:
           done
 
       - name: Show patched files
-        run: git -C zeroclaw-src diff --stat
+        run: git -C zeroclaw-src status --short
 
       - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7
         with:

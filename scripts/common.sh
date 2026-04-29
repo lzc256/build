@@ -15,11 +15,6 @@ apply_patch() {
     local patch_name="$1"
     local target_dir="$2"
 
-    echo "DEBUG: SCRIPT_PATH=$SCRIPT_PATH"
-    echo "DEBUG: BUILD_DIR=$BUILD_DIR"
-    echo "DEBUG: patch_name=$patch_name"
-    echo "DEBUG: target_dir=$target_dir"
-
     if [ -z "$patch_name" ] || [ -z "$target_dir" ]; then
         echo "Usage: apply_patch <patch_name> <target_dir>"
         echo "  patch_name : patches 目录下的 patch 目录名"
@@ -31,8 +26,6 @@ apply_patch() {
     if [[ "$target_dir" != /* ]]; then
         target_dir="$BUILD_DIR/$target_dir"
     fi
-
-    echo "DEBUG: resolved target_dir=$target_dir"
 
     # 查找 patch 目录
     local patch_dir=""
