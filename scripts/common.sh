@@ -7,8 +7,8 @@
 
 set -e
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# build 目录的绝对路径
+BUILD_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 apply_patch() {
     local patch_name="$1"
@@ -21,11 +21,16 @@ apply_patch() {
         return 1
     fi
 
+    # 如果 target_dir 是相对路径，基于 BUILD_DIR 转换
+    if [[ "$target_dir" != /* ]]; then
+        target_dir="$BUILD_DIR/$target_dir"
+    fi
+
     # 查找 patch 目录
     local patch_dir=""
     local found_dirs=""
 
-    for proj_dir in "$REPO_ROOT"/*/; do
+    for proj_dir in "$BUILD_DIR"/*/; do
         local patches_dir="${proj_dir}patches"
         if [ -d "$patches_dir" ]; then
             local candidate="${patches_dir}/${patch_name}"
@@ -72,13 +77,10 @@ apply_patch() {
         echo "-----------------------------------------"
     fi
 
-    # 进入目标目录
-    cd "$target_dir"
-
-    # 应用 patches
+    # 应用 patches（使用 git -C）
     for p in "${patches[@]}"; do
         echo "Applying: $(basename "$p")"
-        git apply --3way "$p"
+        git -C "$target_dir" apply --3way "$p"
     done
 
     echo "========================================="
