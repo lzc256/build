@@ -7,8 +7,9 @@
 
 set -e
 
-# build 目录的绝对路径
-BUILD_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# 使用 $0 的位置来动态计算 build 目录（CI 和本地都适用）
+SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BUILD_DIR="$(cd "$SCRIPT_PATH/.." && pwd)"
 
 apply_patch() {
     local patch_name="$1"
