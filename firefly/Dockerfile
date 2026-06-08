@@ -1,3 +1,4 @@
+# ---------------- Build Phase (Source Cleanup) ---------------- 
 ARG ALPINE_VERSION=3.23.3
 FROM alpine:${ALPINE_VERSION} AS builder
 
@@ -15,7 +16,7 @@ RUN <<EOF
     ROOT="/app"
 
     SIZE_BEFORE=$(du -sm . | cut -f1)
-    
+
     cd $ROOT/vendor
     PKGS="
     phpstan/phpstan/phpstan.phar:
@@ -53,6 +54,13 @@ RUN <<EOF
     echo "  Saved: $((SIZE_BEFORE - SIZE_AFTER)) MB"
     echo "------------------------------------------------"
 EOF
+
+# Patch: Add X-Webhook-Signature header for Hermes webhook compatibility
+# Hermes expects: X-Webhook-Signature = raw HMAC-SHA256 hex digest of the body
+RUN sed -i "/'Signature'       => \$signature,/a\\
+            'X-Webhook-Signature' => hash_hmac('sha256', \$json, (string) \$this->message->webhook->secret)," /app/app/Services/Webhook/StandardWebhookSender.php
+
+# ---------------- Run Phase ---------------- 
 
 FROM alpine:${ALPINE_VERSION}
 
