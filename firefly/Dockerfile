@@ -57,8 +57,10 @@ EOF
 
 # Patch: Add X-Webhook-Signature header for Hermes webhook compatibility
 # Hermes expects: X-Webhook-Signature = raw HMAC-SHA256 hex digest of the body
-RUN sed -i "/'Signature'       => \$signature,/a\\
-            'X-Webhook-Signature' => hash_hmac('sha256', \$json, (string) \$this->message->webhook->secret)," /app/app/Services/Webhook/StandardWebhookSender.php
+RUN <<EOF
+    sed -i "/'Signature'       => \\\$signature,/a\\
+                'X-Webhook-Signature' => hash_hmac('sha256', \\\$json, (string) \\\$this->message->webhook->secret)," /app/app/Services/Webhook/StandardWebhookSender.php
+EOF
 
 # ---------------- Run Phase ---------------- 
 
