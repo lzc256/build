@@ -2,8 +2,9 @@
 # common.sh - 公共 patch 逻辑
 # Usage: source scripts/common.sh && apply_patch <patch_name> <target_dir>
 #
-# 新格式: patch 目录包含 .patch 文件
-# 使用 git apply --3way 进行应用
+# 支持两种 patch 格式:
+# 1. .patch 文件: 使用 git apply --3way 应用
+# 2. .sh 脚本文件: 直接调用脚本，传入 target_dir 作为参数
 
 set -e
 
@@ -55,34 +56,51 @@ apply_patch() {
         return 1
     fi
 
-    # 查找 .patch 文件
-    local patches=($(ls "$patch_dir"/*.patch 2>/dev/null | sort))
-    if [ ${#patches[@]} -eq 0 ]; then
-        echo "Error: No .patch files found in $patch_dir"
-        return 1
-    fi
-
     echo "========================================="
     echo "Patch: $patch_name"
     echo "Dir: $patch_dir"
     echo "Target: $target_dir"
-    echo "Patches: ${#patches[@]} file(s)"
     echo "========================================="
 
-    # 打印 DESCRIPTION
-    local first_patch="${patches[0]}"
-    local description=$(grep -m1 '^Subject:' "$first_patch" | sed 's/^Subject: \[PATCH\] //')
-    if [ -n "$description" ]; then
-        echo ""
-        echo "$description"
-        echo "-----------------------------------------"
-    fi
+    # 检查 patch 类型
+    local patches=($(ls "$patch_dir"/*.patch 2>/dev/null | sort))
+    local scripts=($(ls "$patch_dir"/*.sh 2>/dev/null | sort))
 
-    # 应用 patches（使用 git -C）
-    for p in "${patches[@]}"; do
-        echo "Applying: $(basename "$p")"
-        git -C "$target_dir" apply --3way "$p"
-    done
+    # 优先使用 .patch 文件
+    if [ ${#patches[@]} -gt 0 ]; then
+        echo "Patches: ${#patches[@]} file(s)"
+        echo "-----------------------------------------"
+
+        # 打印 DESCRIPTION
+        local first_patch="${patches[0]}"
+        local description=$(grep -m1 '^Subject:' "$first_patch" | sed 's/^Subject: \[PATCH\] //')
+        if [ -n "$description" ]; then
+            echo "$description"
+            echo "-----------------------------------------"
+        fi
+
+        # 应用 patches（使用 git -C）
+        for p in "${patches[@]}"; do
+            echo "Applying: $(basename "$p")"
+            git -C "$target_dir" apply --3way "$p"
+        done
+
+    # 如果没有 .patch 文件，检查 .sh 脚本
+    elif [ ${#scripts[@]} -gt 0 ]; then
+        echo "Scripts: ${#scripts[@]} file(s)"
+        echo "-----------------------------------------"
+
+        # 执行脚本
+        for s in "${scripts[@]}"; do
+            echo "Executing: $(basename "$s")"
+            chmod +x "$s"
+            "$s" "$target_dir"
+        done
+
+    else
+        echo "Error: No .patch or .sh files found in $patch_dir"
+        return 1
+    fi
 
     echo "========================================="
     echo "Patch applied successfully!"
