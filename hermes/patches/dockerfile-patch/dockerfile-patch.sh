@@ -39,8 +39,8 @@ sed -i '\|^COPY ui-tui/packages/hermes-ink/|d' "$DOCKERFILE"
 # Delete from "# ---------- Frontend build" comment block to end of RUN command
 sed -i '/^# ---------- Frontend build/,/^    cd \.\.\/ui-tui && npm run build$/d' "$DOCKERFILE"
 
-# 6. Reduce uv extras: remove all --extra flags from uv sync command
-sed -i 's/--extra all --extra messaging --extra anthropic --extra bedrock --extra azure-identity --extra hindsight --extra matrix//' "$DOCKERFILE"
+# 6. Reduce uv extras: remove --extra flags but keep matrix
+sed -i 's/--extra all --extra messaging --extra anthropic --extra bedrock --extra azure-identity --extra hindsight //' "$DOCKERFILE"
 
 # 7. Add extra packages after uv sync
 # Insert RUN uv pip install after the uv sync line (may have trailing whitespace)
