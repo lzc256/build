@@ -10,6 +10,7 @@
 # 5. Reduce uv extras (keep matrix)
 # 6. Add extra packages: requests dashscope gradio-client
 # 7. Single RUN for uv sync: install build deps, sync, remove build deps
+# 8. Remove Node.js stage and binaries (Matrix doesn't need Node.js)
 
 set -e
 
@@ -25,7 +26,7 @@ echo "Patching Dockerfile: $DOCKERFILE"
 # 1. Base image: debian:13.4 -> debian:13.4-slim
 sed -i 's|^FROM debian:13\.4$|FROM debian:13.4-slim|' "$DOCKERFILE"
 
-# 2. Remove build packages from initial apt-get (will be installed temporarily later)
+# 2. Remove build packages from initial apt-get
 sed -i 's/ gcc g++ make cmake//' "$DOCKERFILE"
 
 # 3. Remove openssh-client docker-cli
@@ -43,9 +44,6 @@ sed -i '/^# ---------- Frontend build/,/^    cd \.\.\/ui-tui && npm run build$/d
 sed -i 's/--extra all --extra messaging --extra anthropic --extra bedrock --extra azure-identity --extra hindsight //' "$DOCKERFILE"
 
 # 7. Replace uv sync line with multi-command RUN
-# First reduce extras, then replace the whole line
-# The line after step 6 becomes: RUN uv sync --frozen --no-install-project --extra matrix
-# Use awk for multi-line replacement
 awk '
 /^RUN uv sync --frozen --no-install-project --extra matrix$/ {
     print "RUN apt-get update && apt-get install -y --no-install-recommends gcc g++ make cmake \\"
@@ -58,5 +56,31 @@ awk '
 }
 { print }
 ' "$DOCKERFILE" > "$DOCKERFILE.tmp" && mv "$DOCKERFILE.tmp" "$DOCKERFILE"
+
+# 8. Remove Node.js stage and all related components (Matrix doesn't need Node.js)
+# Remove node:22-bookworm-slim stage and its comment block
+sed -i '/^# Node 22 LTS source stage/,/^FROM debian:13\.4-slim$/d' "$DOCKERFILE"
+
+# Remove Node.js binary copies
+sed -i '/^COPY --chmod=0755 --from=node_source/d' "$DOCKERFILE"
+sed -i '/^COPY --from=node_source/d' "$DOCKERFILE"
+sed -i '/ln -sf.*npm-cli.js/d' "$DOCKERFILE"
+sed -i '/ln -sf.*npx-cli.js/d' "$DOCKERFILE"
+sed -i '/ln -sf.*corepack.js/d' "$DOCKERFILE"
+
+# Remove npm related
+sed -i '/^ENV npm_config_install_links=false$/d' "$DOCKERFILE"
+sed -i '/^COPY package\.json package-lock\.json \.\//d' "$DOCKERFILE"
+sed -i '/npm install --prefer-offline/d' "$DOCKERFILE"
+sed -i '/npx playwright install.*chromium/d' "$DOCKERFILE"
+sed -i '/npm cache clean/d' "$DOCKERFILE"
+
+# Remove unused env vars
+sed -i '/^ENV PLAYWRIGHT_BROWSERS_PATH=/d' "$DOCKERFILE"
+sed -i '/^ENV HERMES_WEB_DIST=/d' "$DOCKERFILE"
+sed -i '/^ENV HERMES_TUI_DIR=/d' "$DOCKERFILE"
+
+# Remove node_source comment references
+sed -i '/# See node_source stage/d' "$DOCKERFILE"
 
 echo "Dockerfile patched successfully"
