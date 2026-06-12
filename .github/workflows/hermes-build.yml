@@ -7,6 +7,8 @@ on:
   push:
     paths:
       - 'hermes/**'
+      - '.github/workflows/hermes-build.yml'
+      - 'scripts/common.sh'
 
 env:
   REGISTRY: ghcr.io
