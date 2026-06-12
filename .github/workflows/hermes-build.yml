@@ -1,0 +1,113 @@
+name: Hermes - Custom Build
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'  # Check every 6 hours
+  workflow_dispatch:
+  push:
+    paths:
+      - 'hermes/**'
+
+env:
+  REGISTRY: ghcr.io
+  UPSTREAM_IMAGE: nousresearch/hermes-agent
+
+jobs:
+  check-update:
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.compare.outputs.should_build }}
+      digest: ${{ steps.digest.outputs.digest }}
+    steps:
+      - name: Get upstream digest
+        id: digest
+        run: |
+          # Get amd64 digest from Docker Hub
+          DIGEST=$(docker manifest inspect ${{ env.UPSTREAM_IMAGE }}:latest 2>/dev/null | jq -r '.manifests[] | select(.platform.architecture=="amd64") | .digest')
+          if [ -z "$DIGEST" ] || [ "$DIGEST" = "null" ]; then
+            echo "Failed to get upstream digest"
+            exit 1
+          fi
+          echo "digest=$DIGEST" >> $GITHUB_OUTPUT
+          echo "combined_key=hermes-${DIGEST}" >> $GITHUB_OUTPUT
+          echo "Upstream amd64 digest: $DIGEST"
+
+      - name: Cache check
+        if: github.event_name != 'push'
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: .build_success
+          key: ${{ steps.digest.outputs.combined_key }}
+
+      - name: Compare
+        id: compare
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "Push triggered. Building."
+            echo "should_build=true" >> $GITHUB_OUTPUT
+          elif [ -f .build_success ]; then
+            echo "No updates detected. Skipping."
+            echo "should_build=false" >> $GITHUB_OUTPUT
+          else
+            echo "Updates detected. Proceeding to build."
+            echo "should_build=true" >> $GITHUB_OUTPUT
+            echo "done" > .build_success
+          fi
+
+  build:
+    needs: check-update
+    if: needs.check-update.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout patch framework
+        uses: actions/checkout@v4
+
+      - name: Clone hermes-agent
+        uses: actions/checkout@v4
+        with:
+          repository: NousResearch/hermes-agent
+          path: hermes-src
+          ref: main
+
+      - name: Apply Dockerfile patch
+        run: |
+          source scripts/common.sh
+          apply_patch dockerfile-patch hermes-src
+
+      - name: Show patched Dockerfile diff
+        run: |
+          echo "=== Dockerfile Changes ==="
+          git -C hermes-src diff Dockerfile | head -150
+
+      - name: Login to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build and Push
+        uses: docker/build-push-action@v6
+        with:
+          context: hermes-src
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ github.repository }}:hermes
+            ${{ env.REGISTRY }}/${{ github.repository }}:hermes-${{ needs.check-update.outputs.digest }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Summary
+        run: |
+          echo "## Hermes Build Summary"
+          echo "| Item | Value |"
+          echo "|------|-------|"
+          echo "| Upstream Digest | \`${{ needs.check-update.outputs.digest }}\` |"
+          echo "| Image | \`${{ env.REGISTRY }}/${{ github.repository }}:hermes\` |"
