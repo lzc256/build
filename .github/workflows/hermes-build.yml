@@ -28,8 +28,11 @@ jobs:
             echo "Failed to get upstream digest"
             exit 1
           fi
+          # Extract just the hash part (remove sha256: prefix) for use in tag
+          DIGEST_HASH=$(echo "$DIGEST" | sed 's/sha256://')
           echo "digest=$DIGEST" >> $GITHUB_OUTPUT
-          echo "combined_key=hermes-${DIGEST}" >> $GITHUB_OUTPUT
+          echo "digest_hash=$DIGEST_HASH" >> $GITHUB_OUTPUT
+          echo "combined_key=hermes-${DIGEST_HASH}" >> $GITHUB_OUTPUT
           echo "Upstream amd64 digest: $DIGEST"
 
       - name: Cache check
@@ -100,7 +103,7 @@ jobs:
           push: true
           tags: |
             ${{ env.REGISTRY }}/${{ github.repository }}:hermes
-            ${{ env.REGISTRY }}/${{ github.repository }}:hermes-${{ needs.check-update.outputs.digest }}
+            ${{ env.REGISTRY }}/${{ github.repository }}:hermes-${{ needs.check-update.outputs.digest_hash }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -110,4 +113,4 @@ jobs:
           echo "| Item | Value |"
           echo "|------|-------|"
           echo "| Upstream Digest | \`${{ needs.check-update.outputs.digest }}\` |"
-          echo "| Image | \`${{ env.REGISTRY }}/${{ github.repository }}:hermes\` |"
+          echo "| Image | \`${{ env.REGISTRY }}/${{ github.repository }}:hermes-${{ needs.check-update.outputs.digest_hash }}\` |"
