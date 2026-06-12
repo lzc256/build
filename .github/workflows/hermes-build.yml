@@ -103,9 +103,7 @@ jobs:
         with:
           context: hermes-src
           push: true
-          tags: |
-            ${{ env.REGISTRY }}/${{ github.repository }}:hermes
-            ${{ env.REGISTRY }}/${{ github.repository }}:hermes-${{ needs.check-update.outputs.digest_hash }}
+          tags: ${{ env.REGISTRY }}/${{ github.repository }}:hermes
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -115,4 +113,4 @@ jobs:
           echo "| Item | Value |"
           echo "|------|-------|"
           echo "| Upstream Digest | \`${{ needs.check-update.outputs.digest }}\` |"
-          echo "| Image | \`${{ env.REGISTRY }}/${{ github.repository }}:hermes-${{ needs.check-update.outputs.digest_hash }}\` |"
+          echo "| Image | \`${{ env.REGISTRY }}/${{ github.repository }}:hermes\` |"
