@@ -1,15 +1,20 @@
-From 586c85cd011fa5e205ecdd7f86ab19be8b791446 Mon Sep 17 00:00:00 2001
+From 7414b39de84580676e6e79724045b392da479aed Mon Sep 17 00:00:00 2001
 From: lzc256 <i@lzc256.com>
 Date: Sun, 14 Jun 2026 22:24:56 +0800
 Subject: [PATCH] feat: add custom balance script support for channels
 
 ---
- Dockerfile                           |  2 +-
- controller/channel-billing.go        |  4 ++
- controller/channel_balance_script.go | 60 ++++++++++++++++++++++++++++
- dto/channel_settings.go              |  1 +
- 4 files changed, 66 insertions(+), 1 deletion(-)
+ Dockerfile                                    |   2 +-
+ controller/channel-billing.go                 |   6 ++
+ controller/channel_balance_script.go          |  60 +++++++++++
+ dto/channel_settings.go                       |   1 +
+ .../drawers/channel-mutate-drawer.tsx         |   9 +-
+ .../sections/balance-script-section.tsx       | 102 ++++++++++++++++++
+ .../src/features/channels/lib/channel-form.ts |  12 +++
+ web/default/src/features/channels/types.ts    |   1 +
+ 8 files changed, 191 insertions(+), 2 deletions(-)
  create mode 100644 controller/channel_balance_script.go
+ create mode 100644 web/default/src/features/channels/components/drawers/sections/balance-script-section.tsx
 
 diff --git a/Dockerfile b/Dockerfile
 index d01ab3f0..13e52033 100644
@@ -25,20 +30,22 @@ index d01ab3f0..13e52033 100644
      && update-ca-certificates
  
 diff --git a/controller/channel-billing.go b/controller/channel-billing.go
-index 751ee360..3d3cc8c8 100644
+index 751ee360..ea0b6315 100644
 --- a/controller/channel-billing.go
 +++ b/controller/channel-billing.go
-@@ -387,6 +387,10 @@ func updateChannelBalance(channel *model.Channel) (float64, error) {
- 	case constant.ChannelTypeMoonshot:
- 		return updateChannelMoonshotBalance(channel)
- 	default:
-+		settings := channel.GetOtherSettings()
-+		if settings.BalanceScript != "" {
-+			return updateChannelBalanceScript(channel, settings.BalanceScript)
-+		}
- 		return 0, errors.New("尚未实现")
- 	}
- 	url := fmt.Sprintf("%s/v1/dashboard/billing/subscription", baseURL)
+@@ -357,6 +357,12 @@ func updateChannelMoonshotBalance(channel *model.Channel) (float64, error) {
+ }
+ 
+ func updateChannelBalance(channel *model.Channel) (float64, error) {
++	// Custom balance script takes priority over built-in balance fetchers
++	settings := channel.GetOtherSettings()
++	if settings.BalanceScript != "" {
++		return updateChannelBalanceScript(channel, settings.BalanceScript)
++	}
++
+ 	baseURL := constant.ChannelBaseURLs[channel.Type]
+ 	if channel.GetBaseURL() == "" {
+ 		channel.BaseURL = &baseURL
 diff --git a/controller/channel_balance_script.go b/controller/channel_balance_script.go
 new file mode 100644
 index 00000000..c262098f
@@ -117,6 +124,218 @@ index b6a1ab9f..c4617bc5 100644
  }
  
  func (s *ChannelOtherSettings) IsOpenRouterEnterprise() bool {
+diff --git a/web/default/src/features/channels/components/drawers/channel-mutate-drawer.tsx b/web/default/src/features/channels/components/drawers/channel-mutate-drawer.tsx
+index 87dcc84a..12615ef2 100644
+--- a/web/default/src/features/channels/components/drawers/channel-mutate-drawer.tsx
++++ b/web/default/src/features/channels/components/drawers/channel-mutate-drawer.tsx
+@@ -163,6 +163,7 @@ import {
+   ChannelEditorLoadingState,
+   ChannelModelsSection,
+ } from './sections'
++import { BalanceScriptField } from './sections/balance-script-section'
+ 
+ type ChannelMutateDrawerProps = {
+   open: boolean
+@@ -219,7 +220,8 @@ function hasAdvancedSettingsValues(values: ChannelFormValues): boolean {
+     values.claude_beta_query ||
+     values.upstream_model_update_check_enabled ||
+     values.upstream_model_update_auto_sync_enabled ||
+-    values.upstream_model_update_ignored_models?.trim()
++    values.upstream_model_update_ignored_models?.trim() ||
++    values.balance_script?.trim()
+   )
+ }
+ 
+@@ -2887,6 +2889,11 @@ export function ChannelMutateDrawer({
+                             </FormItem>
+                           )}
+                         />
++
++                        <BalanceScriptField
++                          control={form.control}
++                          name='balance_script'
++                        />
+                       </div>
+                     </div>
+ 
+diff --git a/web/default/src/features/channels/components/drawers/sections/balance-script-section.tsx b/web/default/src/features/channels/components/drawers/sections/balance-script-section.tsx
+new file mode 100644
+index 00000000..44904362
+--- /dev/null
++++ b/web/default/src/features/channels/components/drawers/sections/balance-script-section.tsx
+@@ -0,0 +1,102 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/
++import { useTranslation } from 'react-i18next'
++import { Button } from '@/components/ui/button'
++import { Textarea } from '@/components/ui/textarea'
++import {
++  FormControl,
++  FormDescription,
++  FormItem,
++  FormLabel,
++  FormMessage,
++} from '@/components/ui/form'
++import type { FieldPath, FieldValues } from 'react-hook-form'
++import type { Control } from 'react-hook-form'
++import { FormField } from '@/components/ui/form'
++
++const BALANCE_SCRIPT_TEMPLATE = `import urllib.request, json, os
++
++url = os.environ["CHANNEL_BASE_URL"] + "/v1/user/balance"
++req = urllib.request.Request(url, headers={
++    "Authorization": "Bearer " + os.environ["CHANNEL_KEY"]
++})
++with urllib.request.urlopen(req, timeout=15) as resp:
++    data = json.loads(resp.read())
++print(data["balance"])
++`
++
++interface BalanceScriptFieldProps<TFieldValues extends FieldValues> {
++  control: Control<TFieldValues>
++  name: FieldPath<TFieldValues>
++}
++
++export function BalanceScriptField<TFieldValues extends FieldValues>({
++  control,
++  name,
++}: BalanceScriptFieldProps<TFieldValues>) {
++  const { t } = useTranslation()
++
++  return (
++    <FormField
++      control={control}
++      name={name}
++      render={({ field }) => (
++        <FormItem className='space-y-3 border-t pt-4'>
++          <div className='flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between'>
++            <div className='space-y-1'>
++              <FormLabel>{t('Custom Balance Script (Python)')}</FormLabel>
++              <FormDescription>
++                {t(
++                  'Python script to fetch channel balance. Stdlib only. Read CHANNEL_BASE_URL/CHANNEL_KEY env vars, print balance number to stdout.'
++                )}
++              </FormDescription>
++            </div>
++            <div className='flex flex-wrap gap-2'>
++              <Button
++                type='button'
++                variant='outline'
++                size='sm'
++                onClick={() => field.onChange(BALANCE_SCRIPT_TEMPLATE)}
++              >
++                {t('Fill Template')}
++              </Button>
++              <Button
++                type='button'
++                variant='ghost'
++                size='sm'
++                onClick={() => field.onChange('')}
++              >
++                {t('Clear')}
++              </Button>
++            </div>
++          </div>
++          <FormControl>
++            <Textarea
++              {...field}
++              rows={10}
++              className='font-mono text-xs'
++              placeholder={t('Leave empty to use the default balance API')}
++            />
++          </FormControl>
++          <FormMessage />
++        </FormItem>
++      )}
++    />
++  )
++}
+diff --git a/web/default/src/features/channels/lib/channel-form.ts b/web/default/src/features/channels/lib/channel-form.ts
+index 4f0e5042..b7368eb4 100644
+--- a/web/default/src/features/channels/lib/channel-form.ts
++++ b/web/default/src/features/channels/lib/channel-form.ts
+@@ -199,6 +199,7 @@ export const channelFormSchema = z
+     upstream_model_update_check_enabled: z.boolean().optional(),
+     upstream_model_update_auto_sync_enabled: z.boolean().optional(),
+     upstream_model_update_ignored_models: z.string().optional(),
++    balance_script: z.string().optional(),
+   })
+   .superRefine((data, ctx) => {
+     if ([3, 8, 36, 45].includes(data.type) && !data.base_url?.trim()) {
+@@ -316,6 +317,7 @@ export const CHANNEL_FORM_DEFAULT_VALUES: ChannelFormValues = {
+   upstream_model_update_check_enabled: false,
+   upstream_model_update_auto_sync_enabled: false,
+   upstream_model_update_ignored_models: '',
++  balance_script: '',
+ }
+ 
+ // ============================================================================
+@@ -370,6 +372,7 @@ export function transformChannelToFormDefaults(
+   let upstreamModelUpdateCheckEnabled = false
+   let upstreamModelUpdateAutoSyncEnabled = false
+   let upstreamModelUpdateIgnoredModels = ''
++  let balanceScript = ''
+ 
+   if (channel.settings) {
+     try {
+@@ -394,6 +397,7 @@ export function transformChannelToFormDefaults(
+       )
+         ? parsed.upstream_model_update_ignored_models.join(',')
+         : ''
++      balanceScript = parsed.balance_script || ''
+     } catch (error) {
+       // eslint-disable-next-line no-console
+       console.error('Failed to parse channel settings:', error)
+@@ -443,6 +447,7 @@ export function transformChannelToFormDefaults(
+     upstream_model_update_check_enabled: upstreamModelUpdateCheckEnabled,
+     upstream_model_update_auto_sync_enabled: upstreamModelUpdateAutoSyncEnabled,
+     upstream_model_update_ignored_models: upstreamModelUpdateIgnoredModels,
++    balance_script: balanceScript,
+   }
+ }
+ 
+@@ -567,6 +572,13 @@ function buildSettingsJSON(formData: ChannelFormValues): string {
+     }
+   }
+ 
++  // Custom balance script (Python) — applies to any channel type
++  if (formData.balance_script && formData.balance_script.trim()) {
++    settingsObj.balance_script = formData.balance_script
++  } else if ('balance_script' in settingsObj) {
++    delete settingsObj.balance_script
++  }
++
+   return JSON.stringify(settingsObj)
+ }
+ 
+diff --git a/web/default/src/features/channels/types.ts b/web/default/src/features/channels/types.ts
+index a282053a..f00b2adb 100644
+--- a/web/default/src/features/channels/types.ts
++++ b/web/default/src/features/channels/types.ts
+@@ -105,6 +105,7 @@ export interface ChannelOtherSettings {
+   upstream_model_update_ignored_models?: string[]
+   upstream_model_update_last_check_time?: number
+   upstream_model_update_last_detected_models?: string[]
++  balance_script?: string
+ }
+ 
+ // ============================================================================
 -- 
 2.54.0
 
