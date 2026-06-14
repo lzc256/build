@@ -39,12 +39,9 @@ sed -i '\|^COPY ui-tui/packages/hermes-ink/|d' "$DOCKERFILE"
 # 5. Remove frontend build section
 sed -i '/^# ---------- Frontend build/,/^    cd \.\.\/ui-tui && npm run build$/d' "$DOCKERFILE"
 
-# 6. Reduce uv extras: keep matrix
-sed -i 's/--extra all --extra messaging --extra anthropic --extra bedrock --extra azure-identity --extra hindsight //' "$DOCKERFILE"
-
-# 7. Replace uv sync line with multi-command RUN
+# 6. Replace uv sync line: reduce extras to matrix, add build deps install + cleanup
 awk '
-/^RUN uv sync --frozen --no-install-project --extra matrix$/ {
+/RUN uv sync --frozen --no-install-project --extra all/ {
     print "RUN apt-get update && apt-get install -y --no-install-recommends gcc g++ make cmake \\"
     print "    && uv sync --frozen --no-install-project --extra matrix \\"
     print "    && uv pip install requests dashscope gradio-client \\"
