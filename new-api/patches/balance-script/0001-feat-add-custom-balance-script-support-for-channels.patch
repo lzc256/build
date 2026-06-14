@@ -1,0 +1,122 @@
+From 586c85cd011fa5e205ecdd7f86ab19be8b791446 Mon Sep 17 00:00:00 2001
+From: lzc256 <i@lzc256.com>
+Date: Sun, 14 Jun 2026 22:24:56 +0800
+Subject: [PATCH] feat: add custom balance script support for channels
+
+---
+ Dockerfile                           |  2 +-
+ controller/channel-billing.go        |  4 ++
+ controller/channel_balance_script.go | 60 ++++++++++++++++++++++++++++
+ dto/channel_settings.go              |  1 +
+ 4 files changed, 66 insertions(+), 1 deletion(-)
+ create mode 100644 controller/channel_balance_script.go
+
+diff --git a/Dockerfile b/Dockerfile
+index d01ab3f0..13e52033 100644
+--- a/Dockerfile
++++ b/Dockerfile
+@@ -41,7 +41,7 @@ RUN go build -ldflags "-s -w -X 'github.com/QuantumNous/new-api/common.Version=$
+ FROM debian:bookworm-slim@sha256:f06537653ac770703bc45b4b113475bd402f451e85223f0f2837acbf89ab020a
+ 
+ RUN apt-get update \
+-    && apt-get install -y --no-install-recommends ca-certificates tzdata libasan8 wget \
++    && apt-get install -y --no-install-recommends ca-certificates tzdata libasan8 wget python3 \
+     && rm -rf /var/lib/apt/lists/* \
+     && update-ca-certificates
+ 
+diff --git a/controller/channel-billing.go b/controller/channel-billing.go
+index 751ee360..3d3cc8c8 100644
+--- a/controller/channel-billing.go
++++ b/controller/channel-billing.go
+@@ -387,6 +387,10 @@ func updateChannelBalance(channel *model.Channel) (float64, error) {
+ 	case constant.ChannelTypeMoonshot:
+ 		return updateChannelMoonshotBalance(channel)
+ 	default:
++		settings := channel.GetOtherSettings()
++		if settings.BalanceScript != "" {
++			return updateChannelBalanceScript(channel, settings.BalanceScript)
++		}
+ 		return 0, errors.New("尚未实现")
+ 	}
+ 	url := fmt.Sprintf("%s/v1/dashboard/billing/subscription", baseURL)
+diff --git a/controller/channel_balance_script.go b/controller/channel_balance_script.go
+new file mode 100644
+index 00000000..c262098f
+--- /dev/null
++++ b/controller/channel_balance_script.go
+@@ -0,0 +1,60 @@
++package controller
++
++import (
++	"context"
++	"fmt"
++	"os"
++	"os/exec"
++	"strconv"
++	"strings"
++	"time"
++
++	"github.com/QuantumNous/new-api/model"
++)
++
++// updateChannelBalanceScript executes a user-defined Python script to fetch channel balance.
++// The script receives channel info via environment variables:
++//   - CHANNEL_BASE_URL: the channel's base URL
++//   - CHANNEL_KEY: the channel's API key
++//   - CHANNEL_TYPE: the channel type integer
++//   - CHANNEL_ID: the channel ID
++//
++// The script must print a single number to stdout (the balance value).
++// Only Python standard library is available (urllib.request, json, os, etc.).
++// Execution timeout is 30 seconds.
++//
++// Example script:
++//
++//	import urllib.request, json, os
++//	url = os.environ["CHANNEL_BASE_URL"] + "/v1/user/balance"
++//	req = urllib.request.Request(url, headers={"Authorization": "Bearer " + os.environ["CHANNEL_KEY"]})
++//	with urllib.request.urlopen(req, timeout=15) as resp:
++//	    data = json.loads(resp.read())
++//	print(data["balance"])
++func updateChannelBalanceScript(channel *model.Channel, script string) (float64, error) {
++	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
++	defer cancel()
++
++	cmd := exec.CommandContext(ctx, "python3", "-c", script)
++	cmd.Env = append(os.Environ(),
++		"CHANNEL_BASE_URL="+channel.GetBaseURL(),
++		"CHANNEL_KEY="+channel.Key,
++		"CHANNEL_TYPE="+strconv.Itoa(channel.Type),
++		"CHANNEL_ID="+strconv.Itoa(channel.Id),
++	)
++
++	output, err := cmd.Output()
++	if err != nil {
++		if exitErr, ok := err.(*exec.ExitError); ok {
++			return 0, fmt.Errorf("balance script error: %s", string(exitErr.Stderr))
++		}
++		return 0, err
++	}
++
++	balance, err := strconv.ParseFloat(strings.TrimSpace(string(output)), 64)
++	if err != nil {
++		return 0, fmt.Errorf("balance script output invalid (expected number): %s", string(output))
++	}
++	channel.UpdateBalance(balance)
++	return balance, nil
++}
+diff --git a/dto/channel_settings.go b/dto/channel_settings.go
+index b6a1ab9f..c4617bc5 100644
+--- a/dto/channel_settings.go
++++ b/dto/channel_settings.go
+@@ -41,6 +41,7 @@ type ChannelOtherSettings struct {
+ 	UpstreamModelUpdateLastDetectedModels []string      `json:"upstream_model_update_last_detected_models,omitempty"` // 上次检测到的可加入模型
+ 	UpstreamModelUpdateLastRemovedModels  []string      `json:"upstream_model_update_last_removed_models,omitempty"`  // 上次检测到的可删除模型
+ 	UpstreamModelUpdateIgnoredModels      []string      `json:"upstream_model_update_ignored_models,omitempty"`       // 手动忽略的模型
++	BalanceScript                         string        `json:"balance_script,omitempty"`                             // 自定义余额查询 Python 脚本（最后 print 数字即为余额）
+ }
+ 
+ func (s *ChannelOtherSettings) IsOpenRouterEnterprise() bool {
+-- 
+2.54.0
+

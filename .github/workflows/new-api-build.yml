@@ -1,0 +1,116 @@
+name: New-API - Custom Build
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'  # Check every 6 hours
+  workflow_dispatch:
+  push:
+    paths:
+      - 'new-api/**'
+      - '.github/workflows/new-api-build.yml'
+      - 'scripts/common.sh'
+
+env:
+  REGISTRY: ghcr.io
+  UPSTREAM_REPO: QuantumNous/new-api
+
+jobs:
+  check-update:
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.compare.outputs.should_build }}
+      sha: ${{ steps.sha.outputs.sha }}
+    steps:
+      - name: Get upstream SHA
+        id: sha
+        run: |
+          SHA=$(curl -sfL "https://api.github.com/repos/${{ env.UPSTREAM_REPO }}/commits/main" | jq -r '.sha')
+          if [ -z "$SHA" ] || [ "$SHA" = "null" ]; then
+            echo "Failed to get upstream SHA"
+            exit 1
+          fi
+          SHA_SHORT=$(echo "$SHA" | cut -c1-7)
+          echo "sha=$SHA" >> $GITHUB_OUTPUT
+          echo "sha_short=$SHA_SHORT" >> $GITHUB_OUTPUT
+          echo "combined_key=newapi-${SHA_SHORT}" >> $GITHUB_OUTPUT
+          echo "Upstream SHA: $SHA"
+
+      - name: Cache check
+        if: github.event_name != 'push'
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: .build_success
+          key: ${{ steps.sha.outputs.combined_key }}
+
+      - name: Compare
+        id: compare
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "Push triggered. Building."
+            echo "should_build=true" >> $GITHUB_OUTPUT
+          elif [ -f .build_success ]; then
+            echo "No updates detected. Skipping."
+            echo "should_build=false" >> $GITHUB_OUTPUT
+          else
+            echo "Updates detected. Proceeding to build."
+            echo "should_build=true" >> $GITHUB_OUTPUT
+            echo "done" > .build_success
+          fi
+
+  build:
+    needs: check-update
+    if: needs.check-update.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout patch framework
+        uses: actions/checkout@v4
+
+      - name: Clone new-api upstream
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.UPSTREAM_REPO }}
+          path: new-api-src
+          ref: main
+
+      - name: Apply balance-script patch
+        run: |
+          source scripts/common.sh
+          apply_patch balance-script new-api-src
+
+      - name: Verify patch applied
+        run: |
+          echo "=== Patch verification ==="
+          git -C new-api-src diff --stat
+          echo "=== New file ==="
+          test -f new-api-src/controller/channel_balance_script.go && echo "channel_balance_script.go: OK" || echo "channel_balance_script.go: MISSING"
+
+      - name: Login to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build and Push
+        uses: docker/build-push-action@v6
+        with:
+          context: new-api-src
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ github.repository }}:new-api
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Summary
+        run: |
+          echo "## New-API Build Summary"
+          echo "| Item | Value |"
+          echo "|------|-------|"
+          echo "| Upstream SHA | \`${{ needs.check-update.outputs.sha }}\` |"
+          echo "| Image | \`${{ env.REGISTRY }}/${{ github.repository }}:new-api\` |"
