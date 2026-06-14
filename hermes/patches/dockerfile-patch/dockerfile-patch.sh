@@ -10,7 +10,6 @@
 # 5. Reduce uv extras (keep matrix)
 # 6. Add extra packages: requests dashscope gradio-client
 # 7. Single RUN for uv sync: install build deps, sync, remove build deps
-# 8. Remove Node.js stage and binaries (Matrix doesn't need Node.js)
 
 set -e
 
@@ -57,46 +56,8 @@ awk '
 { print }
 ' "$DOCKERFILE" > "$DOCKERFILE.tmp" && mv "$DOCKERFILE.tmp" "$DOCKERFILE"
 
-# 8. Keep node_source stage for Playwright install, but don't copy Node.js to final image
-# Remove node:22-bookworm-slim stage comment block, but keep the FROM line
-sed -i '/^# Node 22 LTS source stage/,/^FROM node:22-bookworm-slim/{ /^FROM node:22-bookworm-slim/!d }' "$DOCKERFILE"
-
-# Remove Node.js binary copies from final image (but stage still exists for --mount)
-sed -i '/^COPY --chmod=0755 --from=node_source/d' "$DOCKERFILE"
-sed -i '/^COPY --from=node_source/d' "$DOCKERFILE"
-# Remove the symlink lines that were for permanent install
-sed -i '/ln -sf.*npm-cli.js/d' "$DOCKERFILE"
-sed -i '/ln -sf.*npx-cli.js/d' "$DOCKERFILE"
-sed -i '/ln -sf.*corepack.js/d' "$DOCKERFILE"
-
-# Remove npm env and package.json copy
-sed -i '/^ENV npm_config_install_links=false$/d' "$DOCKERFILE"
-sed -i '/^COPY package\.json package-lock\.json \.\//d' "$DOCKERFILE"
-
-# Replace npm RUN with: copy node from stage, install playwright firefox, cleanup
-awk '
-/^RUN npm install --prefer-offline --no-audit/ {
-    print "RUN --mount=from=node_source,src=/usr/local/bin/node,dst=/usr/local/bin/node \\"
-    print "    --mount=from=node_source,src=/usr/local/lib/node_modules,dst=/usr/local/lib/node_modules \\"
-    print "    ln -sf /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm && \\"
-    print "    ln -sf /usr/local/lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx && \\"
-    print "    npm install --prefer-offline --no-audit && \\"
-    print "    npx playwright install firefox && \\"
-    print "    rm -rf node_modules package-lock.json && \\"
-    print "    rm -f /usr/local/bin/npm /usr/local/bin/npx"
-    # Skip next 2 lines (npx playwright and npm cache)
-    getline; getline
-    next
-}
-{ print }
-' "$DOCKERFILE" > "$DOCKERFILE.tmp" && mv "$DOCKERFILE.tmp" "$DOCKERFILE"
-
 # Remove unused env vars
-sed -i '/^ENV PLAYWRIGHT_BROWSERS_PATH=/d' "$DOCKERFILE"
 sed -i '/^ENV HERMES_WEB_DIST=/d' "$DOCKERFILE"
 sed -i '/^ENV HERMES_TUI_DIR=/d' "$DOCKERFILE"
-
-# Remove node_source comment references
-sed -i '/# See node_source stage/d' "$DOCKERFILE"
 
 echo "Dockerfile patched successfully"
