@@ -1,18 +1,18 @@
-From 7414b39de84580676e6e79724045b392da479aed Mon Sep 17 00:00:00 2001
+From 7c7321bbd7334e9d5575d025420d7260026a43e2 Mon Sep 17 00:00:00 2001
 From: lzc256 <i@lzc256.com>
 Date: Sun, 14 Jun 2026 22:24:56 +0800
 Subject: [PATCH] feat: add custom balance script support for channels
 
 ---
  Dockerfile                                    |   2 +-
- controller/channel-billing.go                 |   6 ++
- controller/channel_balance_script.go          |  60 +++++++++++
+ controller/channel-billing.go                 |  10 +-
+ controller/channel_balance_script.go          |  70 ++++++++++++
  dto/channel_settings.go                       |   1 +
  .../drawers/channel-mutate-drawer.tsx         |   9 +-
  .../sections/balance-script-section.tsx       | 102 ++++++++++++++++++
  .../src/features/channels/lib/channel-form.ts |  12 +++
  web/default/src/features/channels/types.ts    |   1 +
- 8 files changed, 191 insertions(+), 2 deletions(-)
+ 8 files changed, 203 insertions(+), 4 deletions(-)
  create mode 100644 controller/channel_balance_script.go
  create mode 100644 web/default/src/features/channels/components/drawers/sections/balance-script-section.tsx
 
@@ -30,7 +30,7 @@ index d01ab3f0..13e52033 100644
      && update-ca-certificates
  
 diff --git a/controller/channel-billing.go b/controller/channel-billing.go
-index 751ee360..ea0b6315 100644
+index 751ee360..d582af76 100644
 --- a/controller/channel-billing.go
 +++ b/controller/channel-billing.go
 @@ -357,6 +357,12 @@ func updateChannelMoonshotBalance(channel *model.Channel) (float64, error) {
@@ -46,12 +46,30 @@ index 751ee360..ea0b6315 100644
  	baseURL := constant.ChannelBaseURLs[channel.Type]
  	if channel.GetBaseURL() == "" {
  		channel.BaseURL = &baseURL
+@@ -432,7 +438,7 @@ func UpdateChannelBalance(c *gin.Context) {
+ 		common.ApiError(c, err)
+ 		return
+ 	}
+-	if channel.ChannelInfo.IsMultiKey {
++	if channel.ChannelInfo.IsMultiKey && channel.GetOtherSettings().BalanceScript == "" {
+ 		c.JSON(http.StatusOK, gin.H{
+ 			"success": false,
+ 			"message": "多密钥渠道不支持余额查询",
+@@ -460,7 +466,7 @@ func updateAllChannelsBalance() error {
+ 		if channel.Status != common.ChannelStatusEnabled {
+ 			continue
+ 		}
+-		if channel.ChannelInfo.IsMultiKey {
++		if channel.ChannelInfo.IsMultiKey && channel.GetOtherSettings().BalanceScript == "" {
+ 			continue // skip multi-key channels
+ 		}
+ 		// TODO: support Azure
 diff --git a/controller/channel_balance_script.go b/controller/channel_balance_script.go
 new file mode 100644
-index 00000000..c262098f
+index 00000000..2dc84439
 --- /dev/null
 +++ b/controller/channel_balance_script.go
-@@ -0,0 +1,60 @@
+@@ -0,0 +1,70 @@
 +package controller
 +
 +import (
@@ -69,9 +87,10 @@ index 00000000..c262098f
 +// updateChannelBalanceScript executes a user-defined Python script to fetch channel balance.
 +// The script receives channel info via environment variables:
 +//   - CHANNEL_BASE_URL: the channel's base URL
-+//   - CHANNEL_KEY: the channel's API key
++//   - CHANNEL_KEY: the channel's API key (for multi-key channels: all keys joined by ",")
 +//   - CHANNEL_TYPE: the channel type integer
 +//   - CHANNEL_ID: the channel ID
++//   - CHANNEL_IS_MULTI_KEY: "1" if multi-key, "0" otherwise
 +//
 +// The script must print a single number to stdout (the balance value).
 +// Only Python standard library is available (urllib.request, json, os, etc.).
@@ -89,12 +108,21 @@ index 00000000..c262098f
 +	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 +	defer cancel()
 +
++	// For multi-key channels, join all keys with ","; otherwise use the single key.
++	keyEnv := channel.Key
++	isMultiKey := "0"
++	if channel.ChannelInfo.IsMultiKey {
++		keyEnv = strings.Join(channel.GetKeys(), ",")
++		isMultiKey = "1"
++	}
++
 +	cmd := exec.CommandContext(ctx, "python3", "-c", script)
 +	cmd.Env = append(os.Environ(),
 +		"CHANNEL_BASE_URL="+channel.GetBaseURL(),
-+		"CHANNEL_KEY="+channel.Key,
++		"CHANNEL_KEY="+keyEnv,
 +		"CHANNEL_TYPE="+strconv.Itoa(channel.Type),
 +		"CHANNEL_ID="+strconv.Itoa(channel.Id),
++		"CHANNEL_IS_MULTI_KEY="+isMultiKey,
 +	)
 +
 +	output, err := cmd.Output()
