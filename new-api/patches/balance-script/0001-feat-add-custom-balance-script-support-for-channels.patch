@@ -1,4 +1,4 @@
-From c0d30ab21a4b50a4f06efcc908f02fa8840917ea Mon Sep 17 00:00:00 2001
+From bfeb42f80462cac64aeac601287d9733c907f30c Mon Sep 17 00:00:00 2001
 From: lzc256 <i@lzc256.com>
 Date: Sun, 14 Jun 2026 22:24:56 +0800
 Subject: [PATCH] feat: add custom balance script support for channels
@@ -6,13 +6,13 @@ Subject: [PATCH] feat: add custom balance script support for channels
 ---
  Dockerfile                                    |   2 +-
  controller/channel-billing.go                 |  10 +-
- controller/channel_balance_script.go          | 129 ++++++++++++++++++
+ controller/channel_balance_script.go          | 141 ++++++++++++++++++
  dto/channel_settings.go                       |   1 +
  .../drawers/channel-mutate-drawer.tsx         |   9 +-
- .../sections/balance-script-section.tsx       | 102 ++++++++++++++
+ .../sections/balance-script-section.tsx       | 102 +++++++++++++
  .../src/features/channels/lib/channel-form.ts |  12 ++
  web/default/src/features/channels/types.ts    |   1 +
- 8 files changed, 262 insertions(+), 4 deletions(-)
+ 8 files changed, 274 insertions(+), 4 deletions(-)
  create mode 100644 controller/channel_balance_script.go
  create mode 100644 web/default/src/features/channels/components/drawers/sections/balance-script-section.tsx
 
@@ -66,10 +66,10 @@ index 751ee360..d582af76 100644
  		// TODO: support Azure
 diff --git a/controller/channel_balance_script.go b/controller/channel_balance_script.go
 new file mode 100644
-index 00000000..02a5df28
+index 00000000..32a46989
 --- /dev/null
 +++ b/controller/channel_balance_script.go
-@@ -0,0 +1,129 @@
+@@ -0,0 +1,141 @@
 +package controller
 +
 +import (
@@ -90,7 +90,10 @@ index 00000000..02a5df28
 +
 +const (
 +	balanceScriptTimeout      = 30 * time.Second
-+	balanceScriptMaxOutputLen = 64 * 1024 // 64KB cap on script stdout/stderr
++	balanceScriptMaxOutputLen = 64 * 1024         // 64KB cap on script stdout/stderr
++	balanceScriptMemoryLimit  = 128 * 1024 * 1024 // 128MB virtual address space
++	balanceScriptCPULimit     = 25                // 25s CPU time (wall clock is 30s)
++	balanceScriptNprocLimit   = 64                // max processes/threads
 +)
 +
 +// updateChannelBalanceScript executes a user-defined Python script to fetch channel balance.
@@ -103,8 +106,13 @@ index 00000000..02a5df28
 +//
 +// The script must print a single number to stdout (the balance value).
 +// Only Python standard library is available (urllib.request, json, os, etc.).
-+// Execution timeout is 30 seconds; stdout/stderr are each capped at 64KB.
-+// On timeout the entire process group is killed so HTTP/subprocess children don't leak.
++//
++// Resource limits enforced via prlimit (util-linux, ships with debian:bookworm-slim):
++//   - 30s wall-clock timeout (process group killed on expiry)
++//   - 25s CPU time (RLIMIT_CPU)
++//   - 128MB virtual address space (RLIMIT_AS)
++//   - 64 max processes/threads (RLIMIT_NPROC)
++//   - 64KB stdout/stderr cap each
 +//
 +// Example script:
 +//
@@ -126,7 +134,12 @@ index 00000000..02a5df28
 +		isMultiKey = "1"
 +	}
 +
-+	cmd := exec.CommandContext(ctx, "python3", "-c", script)
++	// prlimit applies RLIMIT_* before exec; child python3 inherits the limits.
++	cmd := exec.CommandContext(ctx, "prlimit",
++		fmt.Sprintf("--as=%d", balanceScriptMemoryLimit),
++		fmt.Sprintf("--cpu=%d", balanceScriptCPULimit),
++		fmt.Sprintf("--nproc=%d", balanceScriptNprocLimit),
++		"--", "python3", "-c", script)
 +	cmd.Env = append(os.Environ(),
 +		"CHANNEL_BASE_URL="+channel.GetBaseURL(),
 +		"CHANNEL_KEY="+keyEnv,
@@ -134,8 +147,7 @@ index 00000000..02a5df28
 +		"CHANNEL_ID="+strconv.Itoa(channel.Id),
 +		"CHANNEL_IS_MULTI_KEY="+isMultiKey,
 +	)
-+	// Run python3 in its own process group so we can kill any subprocesses it spawns
-+	// (e.g. urllib's connection helpers) on timeout.
++	// Run in its own process group so we can kill any subprocesses on timeout.
 +	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 +
 +	// Cap stdout/stderr at 64KB each so a runaway print doesn't blow up our memory.
