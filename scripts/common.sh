@@ -80,9 +80,32 @@ apply_patch() {
         fi
 
         # 应用 patches（使用 git -C）
+        local apply_failed=0
         for p in "${patches[@]}"; do
             echo "Applying: $(basename "$p")"
-            git -C "$target_dir" apply --3way "$p"
+            # Capture output; --3way returns 1 on conflict but files are partially applied
+            local apply_output
+            if ! apply_output=$(git -C "$target_dir" apply --3way "$p" 2>&1); then
+                # Check for merge conflicts left in working tree
+                local conflict_files
+                conflict_files=$(git -C "$target_dir" diff --name-only --diff-filter=U 2>/dev/null)
+                if [ -n "$conflict_files" ]; then
+                    echo "ERROR: 3-way merge conflict in:"
+                    echo "$conflict_files"
+                    echo "Resolve conflicts manually or update the patch."
+                    # Restore to clean state so re-runs are safe
+                    git -C "$target_dir" checkout -- . 2>/dev/null || true
+                    git -C "$target_dir" clean -fd 2>/dev/null || true
+                    return 1
+                fi
+                # If no conflict markers but still failed, it's a hard reject
+                echo "ERROR: Failed to apply patch: $(basename "$p")"
+                echo "$apply_output"
+                git -C "$target_dir" checkout -- . 2>/dev/null || true
+                git -C "$target_dir" clean -fd 2>/dev/null || true
+                return 1
+            fi
+            echo "$apply_output"
         done
 
     # 如果没有 .patch 文件，检查 .sh 脚本
