@@ -1,4 +1,4 @@
-From 7c7321bbd7334e9d5575d025420d7260026a43e2 Mon Sep 17 00:00:00 2001
+From c0d30ab21a4b50a4f06efcc908f02fa8840917ea Mon Sep 17 00:00:00 2001
 From: lzc256 <i@lzc256.com>
 Date: Sun, 14 Jun 2026 22:24:56 +0800
 Subject: [PATCH] feat: add custom balance script support for channels
@@ -6,13 +6,13 @@ Subject: [PATCH] feat: add custom balance script support for channels
 ---
  Dockerfile                                    |   2 +-
  controller/channel-billing.go                 |  10 +-
- controller/channel_balance_script.go          |  70 ++++++++++++
+ controller/channel_balance_script.go          | 129 ++++++++++++++++++
  dto/channel_settings.go                       |   1 +
  .../drawers/channel-mutate-drawer.tsx         |   9 +-
- .../sections/balance-script-section.tsx       | 102 ++++++++++++++++++
- .../src/features/channels/lib/channel-form.ts |  12 +++
+ .../sections/balance-script-section.tsx       | 102 ++++++++++++++
+ .../src/features/channels/lib/channel-form.ts |  12 ++
  web/default/src/features/channels/types.ts    |   1 +
- 8 files changed, 203 insertions(+), 4 deletions(-)
+ 8 files changed, 262 insertions(+), 4 deletions(-)
  create mode 100644 controller/channel_balance_script.go
  create mode 100644 web/default/src/features/channels/components/drawers/sections/balance-script-section.tsx
 
@@ -66,22 +66,31 @@ index 751ee360..d582af76 100644
  		// TODO: support Azure
 diff --git a/controller/channel_balance_script.go b/controller/channel_balance_script.go
 new file mode 100644
-index 00000000..2dc84439
+index 00000000..02a5df28
 --- /dev/null
 +++ b/controller/channel_balance_script.go
-@@ -0,0 +1,70 @@
+@@ -0,0 +1,129 @@
 +package controller
 +
 +import (
++	"bytes"
 +	"context"
++	"errors"
 +	"fmt"
++	"io"
 +	"os"
 +	"os/exec"
 +	"strconv"
 +	"strings"
++	"syscall"
 +	"time"
 +
 +	"github.com/QuantumNous/new-api/model"
++)
++
++const (
++	balanceScriptTimeout      = 30 * time.Second
++	balanceScriptMaxOutputLen = 64 * 1024 // 64KB cap on script stdout/stderr
 +)
 +
 +// updateChannelBalanceScript executes a user-defined Python script to fetch channel balance.
@@ -94,7 +103,8 @@ index 00000000..2dc84439
 +//
 +// The script must print a single number to stdout (the balance value).
 +// Only Python standard library is available (urllib.request, json, os, etc.).
-+// Execution timeout is 30 seconds.
++// Execution timeout is 30 seconds; stdout/stderr are each capped at 64KB.
++// On timeout the entire process group is killed so HTTP/subprocess children don't leak.
 +//
 +// Example script:
 +//
@@ -105,7 +115,7 @@ index 00000000..2dc84439
 +//	    data = json.loads(resp.read())
 +//	print(data["balance"])
 +func updateChannelBalanceScript(channel *model.Channel, script string) (float64, error) {
-+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
++	ctx, cancel := context.WithTimeout(context.Background(), balanceScriptTimeout)
 +	defer cancel()
 +
 +	// For multi-key channels, join all keys with ","; otherwise use the single key.
@@ -124,21 +134,70 @@ index 00000000..2dc84439
 +		"CHANNEL_ID="+strconv.Itoa(channel.Id),
 +		"CHANNEL_IS_MULTI_KEY="+isMultiKey,
 +	)
++	// Run python3 in its own process group so we can kill any subprocesses it spawns
++	// (e.g. urllib's connection helpers) on timeout.
++	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 +
-+	output, err := cmd.Output()
-+	if err != nil {
-+		if exitErr, ok := err.(*exec.ExitError); ok {
-+			return 0, fmt.Errorf("balance script error: %s", string(exitErr.Stderr))
-+		}
-+		return 0, err
++	// Cap stdout/stderr at 64KB each so a runaway print doesn't blow up our memory.
++	var stdout, stderr bytes.Buffer
++	cmd.Stdout = &limitWriter{w: &stdout, n: balanceScriptMaxOutputLen}
++	cmd.Stderr = &limitWriter{w: &stderr, n: balanceScriptMaxOutputLen}
++
++	if err := cmd.Start(); err != nil {
++		return 0, fmt.Errorf("balance script start failed: %w", err)
 +	}
 +
-+	balance, err := strconv.ParseFloat(strings.TrimSpace(string(output)), 64)
++	// On context timeout, signal the whole process group (negative pid).
++	done := make(chan error, 1)
++	go func() { done <- cmd.Wait() }()
++
++	var waitErr error
++	select {
++	case <-ctx.Done():
++		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
++		<-done
++		return 0, fmt.Errorf("balance script timed out after %s", balanceScriptTimeout)
++	case waitErr = <-done:
++	}
++
++	if waitErr != nil {
++		var exitErr *exec.ExitError
++		if errors.As(waitErr, &exitErr) {
++			return 0, fmt.Errorf("balance script error: %s", strings.TrimSpace(stderr.String()))
++		}
++		return 0, waitErr
++	}
++
++	balance, err := strconv.ParseFloat(strings.TrimSpace(stdout.String()), 64)
 +	if err != nil {
-+		return 0, fmt.Errorf("balance script output invalid (expected number): %s", string(output))
++		return 0, fmt.Errorf("balance script output invalid (expected number): %s", stdout.String())
 +	}
 +	channel.UpdateBalance(balance)
 +	return balance, nil
++}
++
++// limitWriter writes to w until n bytes have been written, then silently discards the rest.
++// This caps script output without erroring (we still want to surface partial output for debugging).
++type limitWriter struct {
++	w io.Writer
++	n int64
++}
++
++func (lw *limitWriter) Write(p []byte) (int, error) {
++	if lw.n <= 0 {
++		return len(p), nil
++	}
++	if int64(len(p)) > lw.n {
++		_, err := lw.w.Write(p[:lw.n])
++		lw.n = 0
++		if err != nil {
++			return 0, err
++		}
++		return len(p), nil
++	}
++	n, err := lw.w.Write(p)
++	lw.n -= int64(n)
++	return n, err
 +}
 diff --git a/dto/channel_settings.go b/dto/channel_settings.go
 index b6a1ab9f..c4617bc5 100644
