@@ -22,9 +22,11 @@ services:
       # This encrypts your API keys in the database
       - OPEN_NOTEBOOK_ENCRYPTION_KEY=change-me-to-a-secret-string
 
-      # Database (single-container has built-in SurrealDB with root/root)
+      # Database (single-container has built-in SurrealDB)
       - SURREAL_USER=root
       - SURREAL_PASSWORD=root
+      - SURREAL_NAMESPACE=open_notebook
+      - SURREAL_DATABASE=open_notebook
 
       # LLM Provider - configure one of the following:
       # OpenAI:
