@@ -101,22 +101,13 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
-      - name: Build and Push (multi-container)
-        uses: docker/build-push-action@v6
-        with:
-          context: open-notebook-src
-          push: true
-          tags: ${{ env.REGISTRY }}/${{ github.repository }}:open-notebook
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Build and Push (single-container)
+      - name: Build and Push
         uses: docker/build-push-action@v6
         with:
           context: open-notebook-src
           file: open-notebook-src/Dockerfile.single
           push: true
-          tags: ${{ env.REGISTRY }}/${{ github.repository }}:open-notebook-single
+          tags: ${{ env.REGISTRY }}/${{ github.repository }}:open-notebook
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -126,5 +117,4 @@ jobs:
           echo "| Item | Value |"
           echo "|------|-------|"
           echo "| Upstream Digest | \`${{ needs.check-update.outputs.digest }}\` |"
-          echo "| Image (multi) | \`${{ env.REGISTRY }}/${{ github.repository }}:open-notebook\` |"
-          echo "| Image (single) | \`${{ env.REGISTRY }}/${{ github.repository }}:open-notebook-single\` |"
+          echo "| Image | \`${{ env.REGISTRY }}/${{ github.repository }}:open-notebook\` |"
