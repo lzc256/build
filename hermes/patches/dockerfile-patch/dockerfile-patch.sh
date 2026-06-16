@@ -8,7 +8,11 @@
 # 3. Remove openssh-client docker-cli
 # 4. Remove web/ui-tui COPY statements and frontend build
 # 5. Reduce uv extras (keep matrix)
-# 6. Add extra packages: requests dashscope gradio-client
+# 6. Add extra packages:
+#    - requests dashscope gradio-client (general utilities)
+#    - aiohttp==3.13.4 qrcode==7.4.2 (weixin/personal WeChat gateway: HTTP client + scan-login QR rendering)
+#    - defusedxml==0.7.1 (wecom callback gateway: safe XML parsing for untrusted WeCom POST bodies)
+#    These are pinned to match upstream pyproject.toml's [messaging] / [wecom] extras.
 # 7. Single RUN for uv sync: install build deps, sync, remove build deps
 
 set -e
@@ -45,6 +49,9 @@ awk '
     print "RUN apt-get update && apt-get install -y --no-install-recommends gcc g++ make cmake \\"
     print "    && uv sync --frozen --no-install-project --extra matrix \\"
     print "    && uv pip install requests dashscope gradio-client \\"
+    # WeChat gateway deps — versions pinned to upstream pyproject.toml extras
+    # (aiohttp/qrcode from [messaging], defusedxml from [wecom]).
+    print "    && uv pip install aiohttp==3.13.4 qrcode==7.4.2 defusedxml==0.7.1 \\"
     print "    && apt-get remove -y gcc g++ make cmake \\"
     print "    && apt-get autoremove -y \\"
     print "    && rm -rf /var/lib/apt/lists/*"
