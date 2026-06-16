@@ -1,0 +1,54 @@
+# Open-Notebook (slim single-container build)
+#
+# Usage:
+#   docker compose up -d
+#
+# Access:
+#   - Web UI: http://localhost:8502
+#   - API: http://localhost:5055
+#
+# Image: ghcr.io/lzc256/build:open-notebook (slim build from Dockerfile.single)
+
+services:
+  open-notebook:
+    image: ghcr.io/lzc256/build:open-notebook
+    container_name: open-notebook
+    restart: unless-stopped
+    ports:
+      - "8502:8502"  # Web UI
+      - "5055:5055"  # REST API
+    environment:
+      # REQUIRED: Change this to your own secret string
+      # This encrypts your API keys in the database
+      - OPEN_NOTEBOOK_ENCRYPTION_KEY=change-me-to-a-secret-string
+
+      # LLM Provider - configure one of the following:
+      # OpenAI:
+      # - OPENAI_API_KEY=sk-...
+      # Anthropic:
+      # - ANTHROPIC_API_KEY=sk-ant-...
+      # Ollama (local):
+      # - OLLAMA_BASE_URL=http://host.docker.internal:11434
+      # Google Gemini:
+      # - GOOGLE_API_KEY=...
+      # Groq:
+      # - GROQ_API_KEY=...
+      # Mistral:
+      # - MISTRAL_API_KEY=...
+      # DeepSeek:
+      # - DEEPSEEK_API_KEY=...
+
+      # Optional: Custom API URL for reverse proxy setups
+      # - API_URL=https://your-domain.com/api
+
+    volumes:
+      - open-notebook-data:/app/data
+      - open-notebook-db:/mydata
+
+    # For Ollama access from container
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  open-notebook-data:
+  open-notebook-db:

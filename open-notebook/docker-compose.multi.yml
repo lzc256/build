@@ -1,0 +1,59 @@
+# Open-Notebook (multi-container build with external SurrealDB)
+#
+# Usage:
+#   docker compose up -d
+#
+# Access:
+#   - Web UI: http://localhost:8502
+#   - API: http://localhost:5055
+#
+# Image: ghcr.io/lzc256/build:open-notebook-multi (build via workflow_dispatch with build_multi=true)
+
+services:
+  surrealdb:
+    image: surrealdb/surrealdb:v2
+    container_name: open-notebook-db
+    command: start --log info --user root --pass root rocksdb:/mydata/mydatabase.db
+    user: root
+    restart: unless-stopped
+    volumes:
+      - open-notebook-db:/mydata
+    environment:
+      - SURREAL_EXPERIMENTAL_GRAPHQL=true
+
+  open-notebook:
+    image: ghcr.io/lzc256/build:open-notebook-multi
+    container_name: open-notebook
+    restart: unless-stopped
+    ports:
+      - "8502:8502"  # Web UI
+      - "5055:5055"  # REST API
+    environment:
+      # REQUIRED: Change this to your own secret string
+      - OPEN_NOTEBOOK_ENCRYPTION_KEY=change-me-to-a-secret-string
+
+      # Database connection
+      - SURREAL_URL=ws://surrealdb:8000/rpc
+      - SURREAL_USER=root
+      - SURREAL_PASSWORD=root
+      - SURREAL_NAMESPACE=open_notebook
+      - SURREAL_DATABASE=open_notebook
+
+      # LLM Provider - configure one of the following:
+      # - OPENAI_API_KEY=sk-...
+      # - ANTHROPIC_API_KEY=sk-ant-...
+      # - OLLAMA_BASE_URL=http://host.docker.internal:11434
+      # etc.
+
+    volumes:
+      - open-notebook-data:/app/data
+
+    depends_on:
+      - surrealdb
+
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  open-notebook-data:
+  open-notebook-db:
