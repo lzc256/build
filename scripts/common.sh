@@ -1,6 +1,9 @@
 #!/bin/bash
 # common.sh - 公共 patch 逻辑
-# Usage: source scripts/common.sh && apply_patch <patch_name> <target_dir>
+# Usage:
+#   source scripts/common.sh
+#   apply_patch <patch_name> <target_dir>           # 应用单个 patch
+#   apply_all_patches <project_name> <target_dir>   # 按目录名排序应用项目下所有 patch
 #
 # 支持两种 patch 格式:
 # 1. .patch 文件: 使用 git apply --3way 应用
@@ -104,4 +107,48 @@ apply_patch() {
 
     echo "========================================="
     echo "Patch applied successfully!"
+}
+
+# 按目录名排序，依次应用某个项目 patches/ 下的所有 patch
+apply_all_patches() {
+    local project_name="$1"
+    local target_dir="$2"
+
+    if [ -z "$project_name" ] || [ -z "$target_dir" ]; then
+        echo "Usage: apply_all_patches <project_name> <target_dir>"
+        echo "  project_name : 项目目录名（如 hermes, new-api）"
+        echo "  target_dir   : 目标项目目录"
+        return 1
+    fi
+
+    if [[ "$target_dir" != /* ]]; then
+        target_dir="$BUILD_DIR/$target_dir"
+    fi
+
+    local patches_root="$BUILD_DIR/$project_name/patches"
+    if [ ! -d "$patches_root" ]; then
+        echo "Error: Patches directory not found: $patches_root"
+        return 1
+    fi
+
+    # 收集所有 patch 子目录，按目录名排序
+    local patch_dirs=($(ls -d "$patches_root"/*/ 2>/dev/null | sort))
+    if [ ${#patch_dirs[@]} -eq 0 ]; then
+        echo "Error: No patch directories found under $patches_root"
+        return 1
+    fi
+
+    echo "========================================="
+    echo "Applying all patches for: $project_name"
+    echo "Patch count: ${#patch_dirs[@]}"
+    echo "Target: $target_dir"
+    echo "========================================="
+
+    for pd in "${patch_dirs[@]}"; do
+        local patch_name=$(basename "$pd")
+        apply_patch "$patch_name" "$target_dir"
+    done
+
+    echo "========================================="
+    echo "All ${#patch_dirs[@]} patches applied successfully!"
 }

@@ -78,10 +78,10 @@ jobs:
           path: hermes-src
           ref: main
 
-      - name: Apply Dockerfile patch
+      - name: Apply patches
         run: |
           source scripts/common.sh
-          apply_patch dockerfile-patch hermes-src
+          apply_all_patches hermes hermes-src
 
       - name: Show patched Dockerfile diff
         run: |
