@@ -1,12 +1,12 @@
 #!/bin/bash
-# Replace NodeSource Node.js install with a multi-stage binary copy from
-# `node:20-slim`.
+# Replace NodeSource Node.js install in the **runtime stage** with a multi-stage
+# binary copy from `node:20-slim`.
 #
-# Upstream installs Node 20.x from NodeSource via `apt-get install -y nodejs`,
-# which pulls ~150 MB into the runtime layer (full toolchain incl. headers,
-# npm, manpages, etc.). The standalone Next.js bundle only needs the `node`
-# runtime to execute `server.js`. Copying the binary out of the official
-# `node:20-slim` image gives us the same Node version with ~70 MB on disk.
+# Upstream installs Node 20.x from NodeSource via `apt-get install -y nodejs`
+# in BOTH the builder and runtime stages. The builder needs the full node+npm
+# toolchain to run `npm ci` and `npm run build`, so we leave that untouched.
+# The runtime only needs the `node` binary to execute the standalone Next.js
+# `server.js`, so we replace the NodeSource install with a ~70 MB binary copy.
 #
 # Files affected:
 #   - Dockerfile
@@ -49,22 +49,17 @@ patch_dockerfile() {
         { print }
     ' "$dockerfile" > "$dockerfile.tmp" && mv "$dockerfile.tmp" "$dockerfile"
 
-    # 2. Strip the NodeSource install lines. Upstream form (line-continued):
-    #        ... \
-    #        && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
-    #        && apt-get install -y nodejs \
-    #        && rm -rf /var/lib/apt/lists/*
-    sed -i.bak \
-        -e '/curl -fsSL https:\/\/deb\.nodesource\.com\/setup_20\.x | bash -/d' \
-        -e '/&& apt-get install -y nodejs/d' \
-        "$dockerfile"
-    rm -f "$dockerfile.bak"
+    # 2. Strip the NodeSource install lines ONLY in the runtime stage.
+    #    We detect the runtime stage by tracking when we've seen `FROM ... AS runtime`
+    #    and delete the nodesource lines that appear after it.
+    awk '
+        /^FROM .* AS runtime$/ { in_runtime = 1 }
+        in_runtime && /curl -fsSL https:\/\/deb\.nodesource\.com\/setup_20\.x/ { next }
+        in_runtime && /&& apt-get install -y nodejs/ { next }
+        { print }
+    ' "$dockerfile" > "$dockerfile.tmp" && mv "$dockerfile.tmp" "$dockerfile"
 
     # 3. Inject the binary copy just before the first runtime-stage `WORKDIR /app`.
-    #    `WORKDIR /app` is a stable anchor that appears once per Dockerfile in
-    #    the runtime stage (the builder stages also have one, but we only inject
-    #    on the *first occurrence after* `FROM ... AS runtime` — done by tracking
-    #    a flag that flips when we see the runtime FROM line).
     awk '
         /^FROM .* AS runtime$/ { in_runtime = 1 }
         in_runtime && /^WORKDIR \/app$/ && !injected {
