@@ -4,6 +4,12 @@ on:
   schedule:
     - cron: '0 */6 * * *'  # Check every 6 hours
   workflow_dispatch:
+    inputs:
+      build_multi:
+        description: 'Also build multi-container image (Dockerfile)'
+        required: false
+        default: false
+        type: boolean
   push:
     paths:
       - 'open-notebook/**'
@@ -101,7 +107,7 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
-      - name: Build and Push
+      - name: Build and Push (single-container)
         uses: docker/build-push-action@v6
         with:
           context: open-notebook-src
@@ -111,10 +117,23 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Build and Push (multi-container)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_multi == true }}
+        uses: docker/build-push-action@v6
+        with:
+          context: open-notebook-src
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ github.repository }}:open-notebook-multi
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
       - name: Summary
         run: |
           echo "## Open-Notebook Build Summary"
           echo "| Item | Value |"
           echo "|------|-------|"
           echo "| Upstream Digest | \`${{ needs.check-update.outputs.digest }}\` |"
-          echo "| Image | \`${{ env.REGISTRY }}/${{ github.repository }}:open-notebook\` |"
+          echo "| Image (single) | \`${{ env.REGISTRY }}/${{ github.repository }}:open-notebook\` |"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.build_multi }}" = "true" ]; then
+            echo "| Image (multi) | \`${{ env.REGISTRY }}/${{ github.repository }}:open-notebook-multi\` |"
+          fi
