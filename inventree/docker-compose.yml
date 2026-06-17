@@ -1,0 +1,57 @@
+# InvenTree - SQLite-only Deployment
+#
+# Usage:
+#   docker compose up -d
+#
+# Access:
+#   - Web UI: http://localhost:8000
+#   - API: http://localhost:8000/api/
+#
+# Image: ghcr.io/lzc256/build:inventree
+#
+# Note: This is a minimal setup using SQLite database.
+# For production use with PostgreSQL/Redis, use docker-compose.full.yml.
+
+services:
+  inventree:
+    image: ghcr.io/lzc256/build:inventree
+    container_name: inventree
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      # REQUIRED: Change this to your own secret string
+      - INVENTREE_SECRET_KEY=change-me-to-a-random-secret-string
+
+      # Debug mode (set to 0 for production)
+      - INVENTREE_DEBUG=0
+
+      # Database configuration - SQLite (built-in, no external DB needed)
+      - INVENTREE_DATABASE_ENGINE=sqlite3
+      - INVENTREE_DATABASE_NAME=/home/inventree/data/database.sqlite3
+
+      # Optional: Admin user creation on first run
+      # - INVENTREE_ADMIN_USER=admin
+      # - INVENTREE_ADMIN_PASSWORD=adminpassword
+      # - INVENTREE_ADMIN_EMAIL=admin@example.com
+
+      # Background workers (for async tasks)
+      # Note: Without Redis, django-q uses SQLite as broker
+      - INVENTREE_BACKGROUND_WORKERS=2
+
+    volumes:
+      - inventree-data:/home/inventree/data
+      - inventree-static:/home/inventree/static
+      - inventree-media:/home/inventree/media
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+volumes:
+  inventree-data:
+  inventree-static:
+  inventree-media:

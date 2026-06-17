@@ -1,0 +1,91 @@
+# InvenTree - Full Deployment with PostgreSQL and Redis
+#
+# Usage:
+#   docker compose -f docker-compose.full.yml up -d
+#
+# Access:
+#   - Web UI: http://localhost:8000
+#   - API: http://localhost:8000/api/
+#
+# Image: ghcr.io/lzc256/build:inventree
+#
+# Note: This setup uses external PostgreSQL and Redis containers.
+# The image still works because it has psycopg (PostgreSQL driver)
+# built in, just without the postgresql-client CLI tools.
+
+services:
+  inventree-db:
+    image: postgres:17-alpine
+    container_name: inventree-db
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=inventree
+      - POSTGRES_USER=inventree
+      - POSTGRES_PASSWORD=inventree_password_change_me
+    volumes:
+      - inventree-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U inventree"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  inventree-cache:
+    image: redis:7-alpine
+    container_name: inventree-cache
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  inventree:
+    image: ghcr.io/lzc256/build:inventree
+    container_name: inventree
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      # REQUIRED: Change this to your own secret string
+      - INVENTREE_SECRET_KEY=change-me-to-a-random-secret-string
+
+      # Debug mode (set to 0 for production)
+      - INVENTREE_DEBUG=0
+
+      # Database configuration - PostgreSQL
+      - INVENTREE_DATABASE_ENGINE=postgresql
+      - INVENTREE_DATABASE_HOST=inventree-db
+      - INVENTREE_DATABASE_PORT=5432
+      - INVENTREE_DATABASE_NAME=inventree
+      - INVENTREE_DATABASE_USER=inventree
+      - INVENTREE_DATABASE_PASSWORD=inventree_password_change_me
+
+      # Cache configuration - Redis
+      - INVENTREE_CACHE_HOST=inventree-cache
+      - INVENTREE_CACHE_PORT=6379
+
+      # Background workers
+      - INVENTREE_BACKGROUND_WORKERS=4
+
+    volumes:
+      - inventree-static:/home/inventree/static
+      - inventree-media:/home/inventree/media
+
+    depends_on:
+      inventree-db:
+        condition: service_healthy
+      inventree-cache:
+        condition: service_healthy
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+volumes:
+  inventree-db:
+  inventree-static:
+  inventree-media:
