@@ -1,0 +1,153 @@
+name: InvenTree App - Custom Build
+
+on:
+  schedule:
+    - cron: '0 0 */2 * *'  # Check every 2 days
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Upstream ref to build (branch/tag/commit, e.g. master, v1.0.0)'
+        required: false
+        type: string
+  push:
+    paths:
+      - 'inventree-app/**'
+      - '.github/workflows/inventree-app-build.yml'
+      - 'scripts/common.sh'
+
+env:
+  UPSTREAM_REPO: inventree/inventree-app
+
+jobs:
+  check-update:
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.compare.outputs.should_build }}
+      commit_sha: ${{ steps.commit.outputs.sha }}
+      commit_short: ${{ steps.commit.outputs.short }}
+    steps:
+      - name: Get latest upstream commit
+        id: commit
+        run: |
+          if [ -n "${{ github.event.inputs.ref }}" ]; then
+            REF="${{ github.event.inputs.ref }}"
+          else
+            REF="master"
+          fi
+
+          # Get the commit SHA for the ref
+          SHA=$(curl -sfL "https://api.github.com/repos/${{ env.UPSTREAM_REPO }}/commits?sha=${REF}&per_page=1" \
+            | jq -r '.[0].sha // empty')
+
+          if [ -z "$SHA" ] || [ "$SHA" = "null" ]; then
+            echo "Failed to get upstream commit for ref: $REF"
+            exit 1
+          fi
+
+          SHORT_SHA=$(echo "$SHA" | cut -c1-7)
+          echo "sha=$SHA" >> $GITHUB_OUTPUT
+          echo "short=$SHORT_SHA" >> $GITHUB_OUTPUT
+          echo "combined_key=inventree-${SHORT_SHA}" >> $GITHUB_OUTPUT
+          echo "Upstream commit: $SHA ($SHORT_SHA)"
+
+      - name: Cache check
+        if: github.event_name != 'push'
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: .build_success
+          key: ${{ steps.commit.outputs.combined_key }}
+
+      - name: Compare
+        id: compare
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "Push triggered. Building."
+            echo "should_build=true" >> $GITHUB_OUTPUT
+          elif [ -f .build_success ]; then
+            echo "Already built for ${{ steps.commit.outputs.short }}. Skipping."
+            echo "should_build=false" >> $GITHUB_OUTPUT
+          else
+            echo "New commit ${{ steps.commit.outputs.short }} detected. Building."
+            echo "should_build=true" >> $GITHUB_OUTPUT
+            echo "done" > .build_success
+          fi
+
+  build-android:
+    needs: check-update
+    if: needs.check-update.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout patch framework
+        uses: actions/checkout@v4
+
+      - name: Clone inventree-app upstream
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.UPSTREAM_REPO }}
+          path: inventree-app-src
+          ref: ${{ needs.check-update.outputs.commit_sha }}
+
+      - name: Apply patches
+        run: |
+          source scripts/common.sh
+          apply_all_patches inventree-app inventree-app-src || echo "No patches to apply"
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.x'
+          channel: 'stable'
+          cache: true
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install invoke
+        run: pip install invoke
+
+      - name: Install FVM
+        run: |
+          dart pub global activate fvm
+          echo "$HOME/.pub-cache/bin" >> $GITHUB_PATH
+
+      - name: Configure Flutter
+        working-directory: inventree-app-src
+        run: |
+          fvm use
+          fvm flutter pub get
+
+      - name: Generate translations
+        working-directory: inventree-app-src
+        run: invoke translate
+
+      - name: Build Android APK
+        working-directory: inventree-app-src
+        run: |
+          fvm flutter build apk --release
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: inventree-app-${{ needs.check-update.outputs.commit_short }}
+          path: inventree-app-src/build/app/outputs/flutter-apk/*.apk
+          retention-days: 30
+
+      - name: Summary
+        run: |
+          echo "## InvenTree App Build Summary"
+          echo "| Item | Value |"
+          echo "|------|-------|"
+          echo "| Upstream Commit | \`${{ needs.check-update.outputs.commit_sha }}\` |"
+          echo "| APK Artifact | \`inventree-app-${{ needs.check-update.outputs.commit_short }}\` |"
