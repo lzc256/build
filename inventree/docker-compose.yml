@@ -33,26 +33,18 @@ services:
       - INVENTREE_DB_ENGINE=sqlite3
       - INVENTREE_DB_NAME=/home/inventree/data/database.sqlite3
 
+      # Auto-run migrations on startup
+      - INVENTREE_AUTO_UPDATE=True
+
       # Optional: Admin user creation on first run
       # - INVENTREE_ADMIN_USER=admin
       # - INVENTREE_ADMIN_PASSWORD=adminpassword
       # - INVENTREE_ADMIN_EMAIL=admin@example.com
 
-      # Background workers (for async tasks)
-      # Note: Without Redis, django-q uses SQLite as broker
-      - INVENTREE_BACKGROUND_WORKERS=2
-
     volumes:
       - inventree-data:/home/inventree/data
       - inventree-static:/home/inventree/static
       - inventree-media:/home/inventree/media
-
-    # Run migrations on first start
-    command: >
-      bash -c "
-        invoke migrate &&
-        exec ./init.sh
-      "
 
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/"]
@@ -60,6 +52,28 @@ services:
       timeout: 10s
       retries: 3
       start_period: 60s
+
+  worker:
+    image: ghcr.io/lzc256/build:inventree
+    container_name: inventree-worker
+    restart: unless-stopped
+    command: invoke worker
+    depends_on:
+      - inventree
+    environment:
+      # Same as main server
+      - INVENTREE_SECRET_KEY=change-me-to-a-random-secret-string
+      - INVENTREE_SITE_URL=http://localhost:8000
+      - INVENTREE_DEBUG=0
+      - INVENTREE_DB_ENGINE=sqlite3
+      - INVENTREE_DB_NAME=/home/inventree/data/database.sqlite3
+      - INVENTREE_AUTO_UPDATE=True
+
+    volumes:
+      # Share data directory with main server
+      - inventree-data:/home/inventree/data
+      - inventree-static:/home/inventree/static
+      - inventree-media:/home/inventree/media
 
 volumes:
   inventree-data:
