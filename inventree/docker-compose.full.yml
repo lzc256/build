@@ -54,12 +54,12 @@ services:
       - INVENTREE_DEBUG=0
 
       # Database configuration - PostgreSQL
-      - INVENTREE_DATABASE_ENGINE=postgresql
-      - INVENTREE_DATABASE_HOST=inventree-db
-      - INVENTREE_DATABASE_PORT=5432
-      - INVENTREE_DATABASE_NAME=inventree
-      - INVENTREE_DATABASE_USER=inventree
-      - INVENTREE_DATABASE_PASSWORD=inventree_password_change_me
+      - INVENTREE_DB_ENGINE=postgresql
+      - INVENTREE_DB_HOST=inventree-db
+      - INVENTREE_DB_PORT=5432
+      - INVENTREE_DB_NAME=inventree
+      - INVENTREE_DB_USER=inventree
+      - INVENTREE_DB_PASSWORD=inventree_password_change_me
 
       # Cache configuration - Redis
       - INVENTREE_CACHE_HOST=inventree-cache
