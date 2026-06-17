@@ -40,6 +40,9 @@ sed -i.bak '/python-ldap/d' "$REQ_FILE"
 # Remove MariaDB connector (requires libmariadb-dev which we removed)
 sed -i.bak '/^mariadb==/d' "$REQ_FILE"
 
+# Remove mysqlclient (requires MySQL/MariaDB client libraries which we removed)
+sed -i.bak '/^mysqlclient==/d' "$REQ_FILE"
+
 rm -f "$REQ_FILE.bak"
 
 echo "Slim requirements patch applied:"
@@ -47,3 +50,4 @@ echo "  - Removed: weasyprint"
 echo "  - Removed: django-auth-ldap"
 echo "  - Removed: python-ldap"
 echo "  - Removed: mariadb"
+echo "  - Removed: mysqlclient"
