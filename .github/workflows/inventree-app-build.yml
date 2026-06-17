@@ -114,9 +114,6 @@ jobs:
         with:
           python-version: '3.x'
 
-      - name: Install invoke
-        run: pip install invoke
-
       - name: Install FVM
         run: |
           dart pub global activate fvm
@@ -126,16 +123,21 @@ jobs:
         working-directory: inventree-app-src
         run: |
           fvm use
-          fvm flutter pub get
 
-      - name: Generate translations
+      - name: Collect translations
         working-directory: inventree-app-src
-        run: invoke translate
+        run: |
+          cd lib/l10n
+          python3 collect_translations.py
+
+      - name: Get dependencies
+        working-directory: inventree-app-src
+        run: fvm flutter pub get
 
       - name: Build Android APK
         working-directory: inventree-app-src
         run: |
-          fvm flutter build apk --release
+          fvm flutter build apk --release --no-tree-shake-icons
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
