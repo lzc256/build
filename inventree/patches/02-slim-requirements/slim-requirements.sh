@@ -5,6 +5,7 @@
 #   - weasyprint (PDF generation, depends on pango/cairo)
 #   - django-auth-ldap (LDAP authentication)
 #   - python-ldap (LDAP library)
+#   - mariadb (MariaDB connector, requires libmariadb-dev)
 #
 # Files affected:
 #   - contrib/container/requirements.txt
@@ -36,9 +37,13 @@ sed -i.bak '/weasyprint/d' "$REQ_FILE"
 sed -i.bak '/django-auth-ldap/d' "$REQ_FILE"
 sed -i.bak '/python-ldap/d' "$REQ_FILE"
 
+# Remove MariaDB connector (requires libmariadb-dev which we removed)
+sed -i.bak '/^mariadb==/d' "$REQ_FILE"
+
 rm -f "$REQ_FILE.bak"
 
 echo "Slim requirements patch applied:"
 echo "  - Removed: weasyprint"
 echo "  - Removed: django-auth-ldap"
 echo "  - Removed: python-ldap"
+echo "  - Removed: mariadb"
