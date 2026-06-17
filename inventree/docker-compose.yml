@@ -23,6 +23,9 @@ services:
       # REQUIRED: Change this to your own secret string
       - INVENTREE_SECRET_KEY=change-me-to-a-random-secret-string
 
+      # Site URL (required for CSRF protection)
+      - INVENTREE_SITE_URL=http://localhost:8000
+
       # Debug mode (set to 0 for production)
       - INVENTREE_DEBUG=0
 
@@ -44,12 +47,19 @@ services:
       - inventree-static:/home/inventree/static
       - inventree-media:/home/inventree/media
 
+    # Run migrations on first start
+    command: >
+      bash -c "
+        invoke migrate &&
+        exec ./init.sh
+      "
+
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 40s
+      start_period: 60s
 
 volumes:
   inventree-data:

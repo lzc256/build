@@ -50,6 +50,9 @@ services:
       # REQUIRED: Change this to your own secret string
       - INVENTREE_SECRET_KEY=change-me-to-a-random-secret-string
 
+      # Site URL (required for CSRF protection)
+      - INVENTREE_SITE_URL=http://localhost:8000
+
       # Debug mode (set to 0 for production)
       - INVENTREE_DEBUG=0
 
