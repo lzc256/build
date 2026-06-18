@@ -1,14 +1,16 @@
 #!/bin/bash
 # Fix frontend static files path for production image.
 #
-# InvenTree's production Dockerfile copies frontend files to:
-#   ${INVENTREE_BACKEND_DIR}/InvenTree/web/static/web/
+# Problem: Dockerfile copies frontend files but the directory may be empty if
+# frontend compilation failed. spa_helper.py expects manifest.json at:
+#   ${INVENTREE_BACKEND_DIR}/InvenTree/web/static/web/.vite/manifest.json
 #
-# But Django's collectstatic needs to run to collect them into STATIC_ROOT.
-# This patch modifies init.sh to run collectstatic on first startup.
+# This patch modifies the Dockerfile to:
+# 1. Verify frontend files exist after COPY
+# 2. Fail build if frontend is missing
 #
 # Files affected:
-#   - contrib/container/init.sh
+#   - contrib/container/Dockerfile
 #
 # Usage: apply_patch 04-fix-frontend-path <target_dir>
 
@@ -20,26 +22,19 @@ if [ -z "$TARGET_DIR" ]; then
     exit 1
 fi
 
-INIT_FILE="$TARGET_DIR/contrib/container/init.sh"
+DOCKERFILE="$TARGET_DIR/contrib/container/Dockerfile"
 
-if [ -f "$INIT_FILE" ]; then
-    echo "Patching: $INIT_FILE"
+if [ -f "$DOCKERFILE" ]; then
+    echo "Patching: $DOCKERFILE"
 
-    # Add collectstatic before the final exec
-    # Insert before the last line (exec "$@")
-    sed -i.bak '/^# Launch the CMD/i\
-# Collect static files if frontend exists but STATIC_ROOT is empty\
-if [[ -d "${INVENTREE_BACKEND_DIR}/InvenTree/web/static/web" ]] && [[ ! -f "${INVENTREE_STATIC_ROOT}/web/index.html" ]]; then\
-    echo "Collecting static files..."\
-    cd ${INVENTREE_BACKEND_DIR}/InvenTree\
-    python3 manage.py collectstatic --no-input --verbosity 0\
-    cd ${INVENTREE_HOME}\
-fi\
-' "$INIT_FILE"
+    # Add verification after the COPY command for frontend files
+    # The COPY puts files at ${INVENTREE_BACKEND_DIR}/InvenTree/web/static/web
+    # We verify that .vite/manifest.json exists
+    perl -i.bak -0pe 's/(COPY --from=builder_stage \$\{INVENTREE_BACKEND_DIR\}\/InvenTree\/web\/static\/web \$\{INVENTREE_BACKEND_DIR\}\/InvenTree\/web\/static\/web\nCOPY --from=builder_stage \/root\/\.local \/root\/\.local)/$1\n\n# Verify frontend files are present\nRUN test -f \${INVENTREE_BACKEND_DIR}\/InvenTree\/web\/static\/web\/.vite\/manifest.json || \\\n    (echo "ERROR: Frontend manifest.json not found. Frontend compilation may have failed." \&\& exit 1)/g' "$DOCKERFILE"
 
-    rm -f "$INIT_FILE.bak"
-    echo "  - Patched $INIT_FILE"
+    rm -f "$DOCKERFILE.bak"
+    echo "  - Patched $DOCKERFILE"
 fi
 
 echo "Frontend path fix applied:"
-echo "  - init.sh: Added collectstatic on first startup"
+echo "  - Dockerfile: Added verification for frontend manifest.json"
