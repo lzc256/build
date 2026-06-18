@@ -2,7 +2,7 @@ name: New-API - Custom Build
 
 on:
   schedule:
-    - cron: '0 */6 * * *'  # Check every 6 hours
+    - cron: '0 5 * * *'  # Check once daily at 5:00 UTC
   workflow_dispatch:
     inputs:
       tag:
