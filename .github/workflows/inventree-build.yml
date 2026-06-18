@@ -4,6 +4,12 @@ on:
   schedule:
     - cron: '0 2 * * *'  # Check once daily at 2:00 UTC
   workflow_dispatch:
+    inputs:
+      no_s3:
+        description: 'Remove S3/SAML/gRPC dependencies (smaller image)'
+        required: false
+        default: true
+        type: boolean
   push:
     paths:
       - 'inventree/**'
@@ -94,6 +100,8 @@ jobs:
       - name: Apply patches
         run: |
           source scripts/common.sh
+          # Remove S3/SAML/gRPC dependencies by default
+          export SLIM_NO_S3=${{ inputs.no_s3 || '1' }}
           apply_all_patches inventree inventree-src
 
       - name: Show patched Dockerfile diff
