@@ -27,6 +27,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gosu \
     ca-certificates \
     procps \
+    redsocks \
+    iptables \
     && rm -rf /var/lib/apt/lists/*
 
 # Create user

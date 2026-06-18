@@ -8,9 +8,15 @@ services:
       - NAPCAT_GID=1000
       - WEBUI_TOKEN=your-token-here
       - MODE=ws
+      # 透明代理配置 (可选)
+      # - PROXY_ADDR=192.168.1.1:1080  # 代理地址
+      # - PROXY_TYPE=socks5             # socks5 或 http-connect
     ports:
       - "6099:6099"   # WebUI
       - "3001:3001"   # WebSocket
     volumes:
       - ./data/napcat:/app/napcat/config
       - ./data/qq:/app/.config/QQ
+    # 透明代理需要 NET_ADMIN 能力
+    cap_add:
+      - NET_ADMIN

@@ -213,6 +213,46 @@ groupmod -o -g ${NAPCAT_GID} napcat
 usermod -g ${NAPCAT_GID} napcat
 chown -R ${NAPCAT_UID}:${NAPCAT_GID} /app
 
+# 配置 redsocks 透明代理 (可选)
+if [ -n "${PROXY_ADDR}" ]; then
+    echo "配置 redsocks 透明代理: ${PROXY_ADDR}"
+    PROXY_TYPE="${PROXY_TYPE:-socks5}"
+    PROXY_IP=$(echo "${PROXY_ADDR}" | cut -d: -f1)
+    PROXY_PORT=$(echo "${PROXY_ADDR}" | cut -d: -f2)
+
+    cat > /etc/redsocks.conf << EOF
+base {
+    log_debug = off;
+    log_info = on;
+    log = "stderr";
+    daemon = off;
+    redirector = iptables;
+}
+redsocks {
+    local_ip = 127.0.0.1;
+    local_port = 12345;
+    ip = ${PROXY_IP};
+    port = ${PROXY_PORT};
+    type = ${PROXY_TYPE};
+}
+EOF
+
+    # 启动 redsocks
+    redsocks &
+    sleep 1
+
+    # 配置 iptables 将 QQ 流量重定向到 redsocks
+    # QQ 服务器 IP 段 (腾讯)
+    for net in 101.32.0.0/14 109.244.0.0/16 111.30.0.0/16 112.64.0.0/11 113.64.0.0/10 119.147.0.0/16 121.14.0.0/16 140.206.0.0/15 157.255.0.0/16 180.96.0.0/11 182.254.0.0/17 203.205.128.0/17 210.22.128.0/17; do
+        iptables -t nat -A OUTPUT -d ${net} -p tcp -j REDIRECT --to-ports 12345 2>/dev/null || true
+    done
+    # 也重定向所有到 8080/443 的流量
+    iptables -t nat -A OUTPUT -p tcp --dport 8080 -j REDIRECT --to-ports 12345 2>/dev/null || true
+    iptables -t nat -A OUTPUT -p tcp --dport 443 -j REDIRECT --to-ports 12345 2>/dev/null || true
+
+    echo "redsocks 透明代理已启动"
+fi
+
 gosu napcat Xvfb :1 -screen 0 1080x760x16 +extension GLX +render > /dev/null 2>&1 &
 sleep 2
 
