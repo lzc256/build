@@ -1,3 +1,7 @@
+# Stage 1: Extract Linux QQ from upstream base image
+FROM mlikiowa/napcat-docker:base AS qq-source
+
+# Stage 2: Build slim image
 FROM debian:bookworm-slim
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -30,12 +34,8 @@ RUN useradd --no-log-init -d /app napcat
 
 WORKDIR /app
 
-# Download and install Linux QQ
-RUN arch=$(arch | sed 's/aarch64/arm64/' | sed 's/x86_64/amd64/') && \
-    QQ_URL="https://dldir1.qq.com/qqfile/qq/QQNT/Ad687dd2/linuxqq_3.2.17-29689_${arch}.deb" && \
-    curl -fL --retry 3 -o linuxqq.deb "$QQ_URL" && \
-    dpkg -i --force-depends linuxqq.deb && \
-    rm linuxqq.deb
+# Copy Linux QQ from upstream base image
+COPY --from=qq-source /opt/QQ /opt/QQ
 
 # Download NapCat latest release
 RUN NAPCAT_URL=$(curl -s https://api.github.com/repos/NapNeko/NapCatQQ/releases/latest | \
