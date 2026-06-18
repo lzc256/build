@@ -12,19 +12,13 @@
 #   - fonttools (weasyprint dependency)
 #   - pyphen (weasyprint dependency)
 #
-# Optional removals (controlled by SLIM_NO_S3 env var):
-#   - boto3, botocore, s3transfer (AWS S3 storage)
-#   - xmlsec, python3-saml (SAML authentication)
-#   - grpcio, opentelemetry-exporter-otlp-proto-grpc (gRPC telemetry export)
+# Also removes opentelemetry-exporter-otlp chain due to missing hashes for grpc variant.
 #
 # Files affected:
 #   - contrib/container/requirements.txt
 #   - src/backend/requirements.txt
 #
 # Usage: apply_patch 02-slim-requirements <target_dir>
-#
-# Environment variables:
-#   SLIM_NO_S3=1  Also remove AWS S3/SAML/gRPC dependencies (default: 0)
 
 set -e
 
@@ -57,17 +51,12 @@ if [ -f "$REQ_FILE" ]; then
     sed -i.bak '/^fonttools/d' "$REQ_FILE"
     sed -i.bak '/^pyphen/d' "$REQ_FILE"
 
-    # Optional: remove S3/SAML/gRPC dependencies
-    if [ "${SLIM_NO_S3:-0}" = "1" ]; then
-        echo "  SLIM_NO_S3=1: Removing S3/SAML/gRPC dependencies"
-        sed -i.bak '/^boto3==/d' "$REQ_FILE"
-        sed -i.bak '/^botocore==/d' "$REQ_FILE"
-        sed -i.bak '/^s3transfer==/d' "$REQ_FILE"
-        sed -i.bak '/^xmlsec==/d' "$REQ_FILE"
-        sed -i.bak '/^python3-saml==/d' "$REQ_FILE"
-        sed -i.bak '/^grpcio==/d' "$REQ_FILE"
-        sed -i.bak '/^opentelemetry-exporter-otlp-proto-grpc==/d' "$REQ_FILE"
-    fi
+    # Remove opentelemetry-exporter-otlp chain (grpc variant has no hash)
+    sed -i.bak '/^opentelemetry-exporter-otlp==/d' "$REQ_FILE"
+    sed -i.bak '/^opentelemetry-exporter-otlp-proto-grpc==/d' "$REQ_FILE"
+    sed -i.bak '/^opentelemetry-exporter-otlp-proto-common==/d' "$REQ_FILE"
+    sed -i.bak '/^opentelemetry-exporter-otlp-proto-http==/d' "$REQ_FILE"
+    sed -i.bak '/^grpcio==/d' "$REQ_FILE"
 
     rm -f "$REQ_FILE.bak"
     echo "  - Patched $REQ_FILE"
@@ -86,17 +75,12 @@ if [ -f "$BACKEND_REQ" ]; then
     sed -i.bak '/^fonttools\[woff\]==/d' "$BACKEND_REQ"
     sed -i.bak '/^pyphen==/d' "$BACKEND_REQ"
 
-    # Optional: remove S3/SAML/gRPC dependencies
-    if [ "${SLIM_NO_S3:-0}" = "1" ]; then
-        echo "  SLIM_NO_S3=1: Removing S3/SAML/gRPC dependencies"
-        sed -i.bak '/^boto3==/d' "$BACKEND_REQ"
-        sed -i.bak '/^botocore==/d' "$BACKEND_REQ"
-        sed -i.bak '/^s3transfer==/d' "$BACKEND_REQ"
-        sed -i.bak '/^xmlsec==/d' "$BACKEND_REQ"
-        sed -i.bak '/^python3-saml==/d' "$BACKEND_REQ"
-        sed -i.bak '/^grpcio==/d' "$BACKEND_REQ"
-        sed -i.bak '/^opentelemetry-exporter-otlp-proto-grpc==/d' "$BACKEND_REQ"
-    fi
+    # Remove opentelemetry-exporter-otlp chain (grpc variant has no hash)
+    sed -i.bak '/^opentelemetry-exporter-otlp==/d' "$BACKEND_REQ"
+    sed -i.bak '/^opentelemetry-exporter-otlp-proto-grpc==/d' "$BACKEND_REQ"
+    sed -i.bak '/^opentelemetry-exporter-otlp-proto-common==/d' "$BACKEND_REQ"
+    sed -i.bak '/^opentelemetry-exporter-otlp-proto-http==/d' "$BACKEND_REQ"
+    sed -i.bak '/^grpcio==/d' "$BACKEND_REQ"
 
     rm -f "$BACKEND_REQ.bak"
     echo "  - Patched $BACKEND_REQ"
@@ -107,8 +91,4 @@ echo "  - Removed: weasyprint"
 echo "  - Removed: django-auth-ldap, python-ldap"
 echo "  - Removed: mariadb, mysqlclient"
 echo "  - Removed: fonttools, pyphen (weasyprint deps)"
-if [ "${SLIM_NO_S3:-0}" = "1" ]; then
-    echo "  - Removed: boto3, botocore, s3transfer (S3)"
-    echo "  - Removed: xmlsec, python3-saml (SAML)"
-    echo "  - Removed: grpcio, opentelemetry-exporter-otlp-proto-grpc (gRPC)"
-fi
+echo "  - Removed: grpcio, opentelemetry-exporter-otlp (telemetry)"
