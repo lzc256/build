@@ -1,0 +1,16 @@
+services:
+  napcat:
+    build: .
+    container_name: napcat
+    restart: unless-stopped
+    environment:
+      - NAPCAT_UID=1000
+      - NAPCAT_GID=1000
+      - WEBUI_TOKEN=your-token-here
+      - MODE=ws
+    ports:
+      - "6099:6099"   # WebUI
+      - "3001:3001"   # WebSocket
+    volumes:
+      - ./data/napcat:/app/napcat/config
+      - ./data/qq:/app/.config/QQ
