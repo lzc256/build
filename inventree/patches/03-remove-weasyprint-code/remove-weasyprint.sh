@@ -3,6 +3,7 @@
 #
 # This patch modifies Python source files to remove weasyprint dependencies
 # so the application can start without weasyprint installed.
+# When PDF rendering is requested, a clear error is raised instead of crashing.
 #
 # Note: PDF generation will not work after this patch.
 #
@@ -21,24 +22,26 @@ if [ -z "$TARGET_DIR" ]; then
     exit 1
 fi
 
-# 1. Patch report/models.py - remove weasyprint import and exit
+# 1. Patch report/models.py
 MODELS_FILE="$TARGET_DIR/src/backend/InvenTree/report/models.py"
 if [ -f "$MODELS_FILE" ]; then
     echo "Patching: $MODELS_FILE"
-    # Replace the try/except block that imports weasyprint
+    # Replace weasyprint import with None
     sed -i.bak 's/from weasyprint import HTML/HTML = None  # weasyprint removed/' "$MODELS_FILE"
     sed -i.bak 's/from report.fetcher import InvenTreeURLFetcher/InvenTreeURLFetcher = None/' "$MODELS_FILE"
     sed -i.bak 's/sys.exit(1)/pass/' "$MODELS_FILE"
+    # Replace the entire HTML().write_pdf() call with a guard + None
+    # Original: pdf = HTML(string=html, url_fetcher=InvenTreeURLFetcher()).write_pdf(\n            pdf_forms=True\n        )
+    perl -i.bak -0pe 's/pdf = HTML\(string=html, url_fetcher=InvenTreeURLFetcher\(\)\)\.write_pdf\(\s*pdf_forms=True\s*\)/if HTML is None:\n            raise NotImplementedError("PDF generation requires weasyprint which is not installed in this slim image")\n        pdf = None/g' "$MODELS_FILE"
     rm -f "$MODELS_FILE.bak"
 fi
 
-# 2. Patch report/fetcher.py - remove URLFetcher inheritance
+# 2. Patch report/fetcher.py
 FETCHER_FILE="$TARGET_DIR/src/backend/InvenTree/report/fetcher.py"
 if [ -f "$FETCHER_FILE" ]; then
     echo "Patching: $FETCHER_FILE"
     sed -i.bak 's/from weasyprint.urls import URLFetcher/URLFetcher = object  # weasyprint removed/' "$FETCHER_FILE"
     sed -i.bak 's/class InvenTreeURLFetcher(URLFetcher):/class InvenTreeURLFetcher:/' "$FETCHER_FILE"
-    # Note: super().__init__ call will fail, but the class won't be used
     rm -f "$FETCHER_FILE.bak"
 fi
 
@@ -48,10 +51,14 @@ if [ -f "$LABEL_FILE" ]; then
     echo "Patching: $LABEL_FILE"
     sed -i.bak 's/^import weasyprint$/weasyprint = None  # weasyprint removed/' "$LABEL_FILE"
     sed -i.bak 's/from report.fetcher import InvenTreeURLFetcher/InvenTreeURLFetcher = None/' "$LABEL_FILE"
+    # Replace weasyprint.HTML() call
+    perl -i.bak -0pe 's/html = weasyprint\.HTML\(string=html_data, url_fetcher=InvenTreeURLFetcher\(\)\)/raise NotImplementedError("PDF generation requires weasyprint which is not installed in this slim image")/g' "$LABEL_FILE"
+    # Replace document = html.render().write_pdf() with None
+    perl -i.bak -0pe 's/document = html\.render\(\)\.write_pdf\(\)/document = None  # SLIM: weasyprint removed/g' "$LABEL_FILE"
     rm -f "$LABEL_FILE.bak"
 fi
 
 echo "Weasyprint code removal applied:"
-echo "  - report/models.py: Removed weasyprint import"
+echo "  - report/models.py: Removed weasyprint import, added guard"
 echo "  - report/fetcher.py: Removed URLFetcher inheritance"
-echo "  - plugin/builtin/labels/label_sheet.py: Removed weasyprint import"
+echo "  - plugin/builtin/labels/label_sheet.py: Removed weasyprint import, added guard"
