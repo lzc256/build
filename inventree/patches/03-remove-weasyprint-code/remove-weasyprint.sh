@@ -3,7 +3,7 @@
 #
 # This patch modifies Python source files to remove weasyprint dependencies
 # so the application can start without weasyprint installed.
-# When PDF rendering is requested, a clear error is raised instead of crashing.
+# When PDF rendering is requested, it silently returns empty bytes instead of crashing.
 #
 # Note: PDF generation will not work after this patch.
 #
@@ -30,9 +30,8 @@ if [ -f "$MODELS_FILE" ]; then
     sed -i.bak 's/from weasyprint import HTML/HTML = None  # weasyprint removed/' "$MODELS_FILE"
     sed -i.bak 's/from report.fetcher import InvenTreeURLFetcher/InvenTreeURLFetcher = None/' "$MODELS_FILE"
     sed -i.bak 's/sys.exit(1)/pass/' "$MODELS_FILE"
-    # Replace the entire HTML().write_pdf() call with a guard + None
-    # Original: pdf = HTML(string=html, url_fetcher=InvenTreeURLFetcher()).write_pdf(\n            pdf_forms=True\n        )
-    perl -i.bak -0pe 's/pdf = HTML\(string=html, url_fetcher=InvenTreeURLFetcher\(\)\)\.write_pdf\(\s*pdf_forms=True\s*\)/if HTML is None:\n            raise NotImplementedError("PDF generation requires weasyprint which is not installed in this slim image")\n        pdf = None/g' "$MODELS_FILE"
+    # Replace the HTML().write_pdf() call with a silent fallback returning empty bytes
+    perl -i.bak -0pe 's/pdf = HTML\(string=html, url_fetcher=InvenTreeURLFetcher\(\)\)\.write_pdf\(\s*pdf_forms=True\s*\)/pdf = b""  # SLIM: weasyprint removed, PDF unavailable/g' "$MODELS_FILE"
     rm -f "$MODELS_FILE.bak"
 fi
 
@@ -51,14 +50,14 @@ if [ -f "$LABEL_FILE" ]; then
     echo "Patching: $LABEL_FILE"
     sed -i.bak 's/^import weasyprint$/weasyprint = None  # weasyprint removed/' "$LABEL_FILE"
     sed -i.bak 's/from report.fetcher import InvenTreeURLFetcher/InvenTreeURLFetcher = None/' "$LABEL_FILE"
-    # Replace weasyprint.HTML() call
-    perl -i.bak -0pe 's/html = weasyprint\.HTML\(string=html_data, url_fetcher=InvenTreeURLFetcher\(\)\)/raise NotImplementedError("PDF generation requires weasyprint which is not installed in this slim image")/g' "$LABEL_FILE"
-    # Replace document = html.render().write_pdf() with None
-    perl -i.bak -0pe 's/document = html\.render\(\)\.write_pdf\(\)/document = None  # SLIM: weasyprint removed/g' "$LABEL_FILE"
+    # Replace weasyprint.HTML() call + document generation with silent fallback
+    perl -i.bak -0pe 's/html = weasyprint\.HTML\(string=html_data, url_fetcher=InvenTreeURLFetcher\(\)\)\n\s*document = html\.render\(\)\.write_pdf\(\)/document = b""  # SLIM: weasyprint removed, PDF unavailable/g' "$LABEL_FILE"
+    # Fix generated_file assignment since document is now bytes not a PDF object
+    sed -i.bak 's/generated_file = ContentFile(document,/generated_file = ContentFile(html_data.encode() if isinstance(html_data, str) else html_data,/g' "$LABEL_FILE"
     rm -f "$LABEL_FILE.bak"
 fi
 
 echo "Weasyprint code removal applied:"
-echo "  - report/models.py: Removed weasyprint import, added guard"
+echo "  - report/models.py: Removed weasyprint import, PDF returns empty bytes"
 echo "  - report/fetcher.py: Removed URLFetcher inheritance"
-echo "  - plugin/builtin/labels/label_sheet.py: Removed weasyprint import, added guard"
+echo "  - plugin/builtin/labels/label_sheet.py: Removed weasyprint import, PDF returns empty bytes"
