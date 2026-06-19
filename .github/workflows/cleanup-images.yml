@@ -17,11 +17,11 @@ jobs:
         with:
           package-name: build
           package-type: container
-          min-aged-days: 7
-          delete-untagged-versions: true
+          delete-only-untagged-versions: true
+          num-old-versions-to-delete: 100
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Summary
         run: |
           echo "## Image Cleanup Summary"
-          echo "Deleted untagged images older than 7 days"
+          echo "Deleted up to 100 untagged images"
