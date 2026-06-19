@@ -1,0 +1,26 @@
+name: Cleanup Untagged Images
+
+on:
+  schedule:
+    - cron: '0 4 * * *'  # Run daily at 4:00 UTC
+  workflow_dispatch:
+
+permissions:
+  packages: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete untagged images older than 7 days
+        uses: actions/delete-package-versions@v5
+        with:
+          package-name: build
+          package-type: container
+          min-aged-days: 7
+          delete-untagged-versions: true
+
+      - name: Summary
+        run: |
+          echo "## Image Cleanup Summary"
+          echo "Deleted untagged images older than 7 days"
