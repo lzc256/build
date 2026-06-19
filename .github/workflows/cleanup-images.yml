@@ -12,16 +12,15 @@ jobs:
   cleanup:
     runs-on: ubuntu-latest
     steps:
-      - name: Delete untagged images older than 7 days
+      - name: Delete untagged images
         uses: actions/delete-package-versions@v5
         with:
           package-name: build
           package-type: container
           delete-only-untagged-versions: true
-          num-old-versions-to-delete: 100
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Summary
         run: |
           echo "## Image Cleanup Summary"
-          echo "Deleted up to 100 untagged images"
+          echo "Deleted untagged images (tagged versions are preserved)"
