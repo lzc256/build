@@ -19,6 +19,7 @@ jobs:
           package-type: container
           min-aged-days: 7
           delete-untagged-versions: true
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Summary
         run: |
