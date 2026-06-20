@@ -169,7 +169,7 @@ jobs:
           cd fjordlauncher-src
           cmake --build --preset "$CMAKE_PRESET" --config "$BUILD_TYPE"
 
-      # Package
+      # Package - use cmake --install instead of cpack
       - name: Get short version
         id: short-version
         run: |
@@ -178,39 +178,49 @@ jobs:
       - name: Package (Linux)
         if: runner.os == 'Linux'
         run: |
-          cd fjordlauncher-src/build
-          cpack -G TGZ -C "$BUILD_TYPE"
+          cd fjordlauncher-src
+          cmake --install build --config "$BUILD_TYPE" --prefix install
+          cd install
+          tar -czvf ../FjordLauncher-Linux-${{ steps.short-version.outputs.version }}.tar.gz .
 
       - name: Package (macOS)
         if: runner.os == 'macOS'
         run: |
-          cd fjordlauncher-src/build
-          cpack -G DragNDrop -C "$BUILD_TYPE"
+          cd fjordlauncher-src
+          cmake --install build --config "$BUILD_TYPE" --prefix install
+          cd install
+          zip -r ../FjordLauncher-macOS-${{ steps.short-version.outputs.version }}.zip .
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
+        shell: pwsh
         run: |
-          cd fjordlauncher-src/build
-          cpack -G ZIP -C "$BUILD_TYPE"
+          cd fjordlauncher-src
+          cmake --install build --config "$BUILD_TYPE" --prefix install
+          Compress-Archive -Path install/* -DestinationPath FjordLauncher-Windows-${{ steps.short-version.outputs.version }}.zip
 
-      - name: Find artifacts
-        id: find_artifacts
-        run: |
-          if [ "${{ runner.os }}" = "Linux" ]; then
-            ARTIFACT=$(find fjordlauncher-src/build -name "*.tar.gz" -type f | head -1)
-          elif [ "${{ runner.os }}" = "Windows" ]; then
-            ARTIFACT=$(find fjordlauncher-src/build -name "*.zip" -type f | head -1)
-          else
-            ARTIFACT=$(find fjordlauncher-src/build -name "*.dmg" -type f | head -1)
-          fi
-          echo "artifact_path=$ARTIFACT" >> $GITHUB_OUTPUT
-          echo "Found: $ARTIFACT"
-
-      - name: Upload artifact
+      - name: Upload artifact (Linux)
+        if: runner.os == 'Linux'
         uses: actions/upload-artifact@v4
         with:
-          name: fjordlauncher-${{ matrix.artifact-name }}-${{ steps.short-version.outputs.version }}
-          path: ${{ steps.find_artifacts.outputs.artifact_path }}
+          name: fjordlauncher-Linux-${{ steps.short-version.outputs.version }}
+          path: fjordlauncher-src/FjordLauncher-Linux-${{ steps.short-version.outputs.version }}.tar.gz
+          retention-days: 30
+
+      - name: Upload artifact (macOS)
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: fjordlauncher-macOS-${{ steps.short-version.outputs.version }}
+          path: fjordlauncher-src/FjordLauncher-macOS-${{ steps.short-version.outputs.version }}.zip
+          retention-days: 30
+
+      - name: Upload artifact (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: fjordlauncher-Windows-${{ steps.short-version.outputs.version }}
+          path: fjordlauncher-src/FjordLauncher-Windows-${{ steps.short-version.outputs.version }}.zip
           retention-days: 30
 
       - name: Summary
