@@ -105,13 +105,20 @@ jobs:
       - name: Update vendorHash after merge
         run: |
           cd drasl-src
+
+          echo "=== Current vendorHash ==="
+          grep vendorHash flake.nix
+
           # Try building; nix will fail with a hash mismatch telling us the correct hash
+          echo "=== Attempting nix build to detect vendorHash mismatch ==="
           nix build .#drasl 2>&1 | tee /tmp/nix-output.txt || true
+
           NEW_HASH=$(grep -oP 'got:\s+\Ksha256-\S+' /tmp/nix-output.txt | head -1)
           if [ -n "$NEW_HASH" ]; then
-            # Convert nix hash format: sha256-xxx → SRI format for sed
             echo "Updating vendorHash to: $NEW_HASH"
             sed -i "s|vendorHash = \".*\"|vendorHash = \"$NEW_HASH\"|" flake.nix
+            echo "=== Updated vendorHash ==="
+            grep vendorHash flake.nix
           else
             echo "No vendorHash update needed (or unexpected nix output)"
             cat /tmp/nix-output.txt
@@ -130,9 +137,19 @@ jobs:
         run: |
           cd drasl-src
 
-          # Build OCI archive (native x86_64-linux, runs on ubuntu-latest)
-          oci_archive="$(nix build --no-link --print-out-paths '.#oci')"
+          # Debug: show flake.nix vendorHash
+          echo "=== Current vendorHash in flake.nix ==="
+          grep vendorHash flake.nix
 
+          # Build OCI archive (native x86_64-linux, runs on ubuntu-latest)
+          echo "=== Building OCI image with nix ==="
+          nix build --no-link --print-out-paths '.#oci' 2>&1 | tee /tmp/nix-build.log || {
+            echo "=== Nix build failed ==="
+            cat /tmp/nix-build.log
+            exit 1
+          }
+
+          oci_archive="$(nix build --no-link --print-out-paths '.#oci')"
           echo "OCI archive: $oci_archive"
 
           # Push to GHCR using skopeo (available in nix profile or install)
@@ -141,8 +158,8 @@ jobs:
           TAG_LATEST="${{ env.REGISTRY }}/${{ github.repository }}:drasl"
           TAG_VERSION="${{ env.REGISTRY }}/${{ github.repository }}:drasl-${VERSION}"
 
-          skopeo copy "docker-archive:$oci_archive" "$TAG_LATEST"
-          skopeo copy "docker-archive:$oci_archive" "$TAG_VERSION"
+          skopeo copy --dest-creds="${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}" "docker-archive:$oci_archive" "$TAG_LATEST"
+          skopeo copy --dest-creds="${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}" "docker-archive:$oci_archive" "$TAG_VERSION"
 
       - name: Summary
         run: |
