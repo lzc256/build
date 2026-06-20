@@ -57,18 +57,36 @@ jobs:
     needs: check-update
     if: needs.check-update.outputs.should_build == 'true'
     strategy:
+      fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            target: linux
-            artifact: fjordlauncher-linux-x86_64
-          - os: macos-latest
-            target: macos
-            artifact: fjordlauncher-macos
-          - os: windows-latest
-            target: windows
-            artifact: fjordlauncher-windows-x86_64
+          - os: ubuntu-24.04
+            artifact-name: Linux
+            cmake-preset: linux
+            qt-version: 6.10.2
+
+          - os: macos-14
+            artifact-name: macOS
+            cmake-preset: macos_universal
+            qt-version: 6.9.3
+
+          - os: windows-2022
+            artifact-name: Windows-MSVC
+            cmake-preset: windows_msvc
+            qt-version: 6.10.2
+
     runs-on: ${{ matrix.os }}
+
+    defaults:
+      run:
+        shell: bash
+
+    env:
+      ARTIFACT_NAME: ${{ matrix.artifact-name }}-Qt6
+      BUILD_PLATFORM: official
+      BUILD_TYPE: Release
+      CMAKE_PRESET: ${{ matrix.cmake-preset }}
+
     steps:
       - name: Checkout patch framework
         uses: actions/checkout@v4
@@ -82,14 +100,6 @@ jobs:
           submodules: recursive
 
       - name: Apply patch
-        if: matrix.target != 'windows'
-        run: |
-          source scripts/common.sh
-          apply_patch 01-remove-msa-requirement fjordlauncher-src
-
-      - name: Apply patch (Windows)
-        if: matrix.target == 'windows'
-        shell: bash
         run: |
           source scripts/common.sh
           apply_patch 01-remove-msa-requirement fjordlauncher-src
@@ -97,80 +107,98 @@ jobs:
       - name: Show patched files
         run: git -C fjordlauncher-src status --short
 
-      # Linux build
-      - name: Install dependencies (Linux)
-        if: matrix.target == 'linux'
+      # Linux dependencies
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y cmake ninja-build extra-cmake-modules \
-            qt6-base-dev qt6-base-dev-tools qt6-declarative-dev qt6-declarative-dev-tools \
-            qt6-tools-dev qt6-tools-dev-tools qt6-networkauth-dev \
-            libqt6svg6-dev libqt6charts6-dev libgl1-mesa-dev libxkbcommon-dev \
-            libcmark-dev libarchive-dev libtomlplusplus-dev
+          sudo apt-get -y update
+          sudo apt-get -y install \
+            dpkg-dev \
+            ninja-build extra-cmake-modules pkg-config scdoc \
+            cmark gamemode-dev libarchive-dev libcmark-dev libqrencode-dev zlib1g-dev \
+            libxcb-cursor-dev libtomlplusplus-dev libvulkan-dev
 
-      - name: Build (Linux)
-        if: matrix.target == 'linux'
+      # macOS dependencies
+      - name: Install macOS dependencies
+        if: runner.os == 'macOS'
         run: |
-          cd fjordlauncher-src
-          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-          cmake --build build --parallel
-          cd build
-          cpack -G TGZ
+          brew update
+          brew install ninja extra-cmake-modules temurin@17 mono
 
-      # macOS build
-      - name: Install dependencies (macOS)
-        if: matrix.target == 'macos'
+      - name: Set JAVA_HOME (macOS)
+        if: runner.os == 'macOS'
         run: |
-          brew install cmake ninja extra-cmake-modules qt@6
-          echo "Qt6_DIR=$(brew --prefix qt@6)/lib/cmake/Qt6" >> $GITHUB_ENV
+          echo "JAVA_HOME=$(/usr/libexec/java_home -v 17)" >> "$GITHUB_ENV"
 
-      - name: Build (macOS)
-        if: matrix.target == 'macos'
+      - name: Setup vcpkg environment (macOS/Windows MSVC)
+        if: runner.os == 'macOS' || (runner.os == 'Windows' && matrix.cmake-preset == 'windows_msvc')
         run: |
-          cd fjordlauncher-src
-          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$(brew --prefix qt@6)"
-          cmake --build build --parallel
-          cd build
-          cpack -G DragNDrop
+          echo "VCPKG_ROOT=$VCPKG_INSTALLATION_ROOT" >> "$GITHUB_ENV"
 
-      # Windows build
-      - name: Install Qt (Windows)
-        if: matrix.target == 'windows'
+      # Windows MSVC setup
+      - name: Enter VS Developer shell (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64
+          vsversion: 2022
+
+      - name: Setup Java (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/setup-java@v5
+        with:
+          distribution: zulu
+          java-version: 17
+
+      # Install Qt
+      - name: Install Qt
         uses: jurplel/install-qt-action@v4
         with:
-          version: '6.6.*'
-          host: 'windows'
-          target: 'desktop'
-          arch: 'win64_msvc2019_64'
-          modules: 'qt5compat qtimageformats'
+          aqtversion: "==3.1.*"
+          version: ${{ matrix.qt-version }}
+          modules: qtimageformats qtnetworkauth
 
-      - name: Setup MSVC (Windows)
-        if: matrix.target == 'windows'
-        uses: ilammy/msvc-dev-cmd@v1
-
-      - name: Install dependencies (Windows)
-        if: matrix.target == 'windows'
-        shell: bash
-        run: |
-          choco install ninja -y
-
-      - name: Build (Windows)
-        if: matrix.target == 'windows'
-        shell: cmd
+      # Build
+      - name: Configure project
         run: |
           cd fjordlauncher-src
-          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="%Qt6_DIR%"
-          cmake --build build --parallel
-          cd build
-          cpack -G ZIP
+          cmake --preset "$CMAKE_PRESET"
+
+      - name: Build
+        run: |
+          cd fjordlauncher-src
+          cmake --build --preset "$CMAKE_PRESET" --config "$BUILD_TYPE"
+
+      # Package
+      - name: Get short version
+        id: short-version
+        run: |
+          echo "version=$(cd fjordlauncher-src && git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          cd fjordlauncher-src/build
+          cpack -G TGZ -C "$BUILD_TYPE"
+
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          cd fjordlauncher-src/build
+          cpack -G DragNDrop -C "$BUILD_TYPE"
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          cd fjordlauncher-src/build
+          cpack -G ZIP -C "$BUILD_TYPE"
 
       - name: Find artifacts
         id: find_artifacts
-        shell: bash
         run: |
-          if [ "${{ matrix.target }}" = "linux" ]; then
+          if [ "${{ runner.os }}" = "Linux" ]; then
             ARTIFACT=$(find fjordlauncher-src/build -name "*.tar.gz" -type f | head -1)
-          elif [ "${{ matrix.target }}" = "windows" ]; then
+          elif [ "${{ runner.os }}" = "Windows" ]; then
             ARTIFACT=$(find fjordlauncher-src/build -name "*.zip" -type f | head -1)
           else
             ARTIFACT=$(find fjordlauncher-src/build -name "*.dmg" -type f | head -1)
@@ -181,7 +209,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}-${{ needs.check-update.outputs.fjord_sha }}
+          name: fjordlauncher-${{ matrix.artifact-name }}-${{ steps.short-version.outputs.version }}
           path: ${{ steps.find_artifacts.outputs.artifact_path }}
           retention-days: 30
 
@@ -191,5 +219,5 @@ jobs:
           echo "| Item | Value |"
           echo "|------|-------|"
           echo "| Upstream SHA | \`${{ needs.check-update.outputs.fjord_sha }}\` |"
-          echo "| Target | ${{ matrix.target }} |"
-          echo "| Artifact | \`${{ matrix.artifact }}\` |"
+          echo "| Platform | ${{ matrix.artifact-name }} |"
+          echo "| Qt Version | ${{ matrix.qt-version }} |"
