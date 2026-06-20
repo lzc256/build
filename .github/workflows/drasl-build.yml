@@ -148,9 +148,11 @@ jobs:
           # Login via buildah
           echo "${{ secrets.GITHUB_TOKEN }}" | buildah login -u "${{ github.actor }}" --password-stdin ${{ env.REGISTRY }}
 
-          # Push - use docker-archive format for nix OCI output
-          buildah push "docker-archive:$oci_archive" "$TAG_LATEST"
-          buildah push "docker-archive:$oci_archive" "$TAG_VERSION"
+          # Create manifest and push (same as upstream workflow)
+          buildah manifest create drasl
+          buildah manifest add drasl "docker-archive:$oci_archive"
+          buildah manifest push --all -f v2s2 drasl "docker://$TAG_LATEST"
+          buildah manifest push --all -f v2s2 drasl "docker://$TAG_VERSION"
 
       - name: Summary
         run: |
