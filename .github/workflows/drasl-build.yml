@@ -143,18 +143,25 @@ jobs:
 
           # Build OCI archive (native x86_64-linux, runs on ubuntu-latest)
           echo "=== Building OCI image with nix ==="
-          set -o pipefail
-          nix build --no-link --print-out-paths '.#oci' 2>&1 | tee /tmp/nix-build.log
-          oci_archive=$(cat /tmp/nix-build.log | tail -1)
+          nix build '.#oci' --no-link --print-out-paths 2>&1 | tee /tmp/nix-build-output.txt
+          NIX_EXIT_CODE=$?
 
-          echo "=== OCI archive path ==="
-          echo "$oci_archive"
+          echo "=== Nix exit code: $NIX_EXIT_CODE ==="
+          echo "=== Full nix output ==="
+          cat /tmp/nix-build-output.txt
 
-          if [ ! -d "$oci_archive" ]; then
-            echo "ERROR: nix build did not produce valid output"
-            cat /tmp/nix-build.log
+          if [ $NIX_EXIT_CODE -ne 0 ]; then
+            echo "ERROR: nix build failed with exit code $NIX_EXIT_CODE"
             exit 1
           fi
+
+          oci_archive=$(tail -1 /tmp/nix-build-output.txt)
+          echo "=== OCI archive path: $oci_archive ==="
+
+          # The nix output is a path to a file, not a directory
+          # For dockerTools.buildLayeredImage, it outputs a path that contains the image
+          ls -la "$oci_archive" 2>/dev/null || echo "Path is not a directory, checking as file"
+          file "$oci_archive" 2>/dev/null || true
 
           # Push to GHCR using skopeo (available in nix profile or install)
           nix profile install nixpkgs#skopeo
