@@ -2,6 +2,13 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Global Constraints
+
+- **NEVER use `git push --force` or `git push --force-with-lease`**. Always use plain `git push`.
+- If push is rejected, ask the user how to proceed instead of force pushing.
+- When creating or modifying patches, automatically monitor GitHub Action status. If CI fails, analyze the error and fix it iteratively until CI passes and meets user requirements.
+- When creating or modifying patches, automatically monitor GitHub Action status. If CI fails, analyze the error and fix it iteratively until CI passes and meets user requirements.
+
 ## Project Overview
 
 This is a **Multi-Project Patch Framework** — a build/CI system for managing patches across multiple projects. It clones target repositories, applies patch scripts, and runs builds via GitHub Actions.
