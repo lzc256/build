@@ -163,8 +163,8 @@ jobs:
           ls -la "$oci_archive" 2>/dev/null || echo "Path is not a directory, checking as file"
           file "$oci_archive" 2>/dev/null || true
 
-          # Push to GHCR using skopeo (available in nix profile or install)
-          nix profile install nixpkgs#skopeo
+          # Push to GHCR using crane (simpler than skopeo for this use case)
+          nix profile install nixpkgs#crane
 
           TAG_LATEST="${{ env.REGISTRY }}/${{ github.repository }}:drasl"
           TAG_VERSION="${{ env.REGISTRY }}/${{ github.repository }}:drasl-${VERSION}"
@@ -172,8 +172,12 @@ jobs:
           echo "=== Pushing to GHCR ==="
           echo "Tags: $TAG_LATEST, $TAG_VERSION"
 
-          skopeo copy --dest-creds="${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}" "docker-archive:$oci_archive" "docker://$TAG_LATEST"
-          skopeo copy --dest-creds="${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}" "docker-archive:$oci_archive" "docker://$TAG_VERSION"
+          # Login to GHCR with crane
+          crane auth login ${{ env.REGISTRY }} -u ${{ github.actor }} -p ${{ secrets.GITHUB_TOKEN }}
+
+          # Push the OCI archive
+          crane push "$oci_archive" "$TAG_LATEST"
+          crane push "$oci_archive" "$TAG_VERSION"
 
           echo "=== Done ==="
 
