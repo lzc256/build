@@ -172,8 +172,8 @@ jobs:
           echo "=== Pushing to GHCR ==="
           echo "Tags: $TAG_LATEST, $TAG_VERSION"
 
-          skopeo copy --dest-creds="${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}" "docker-archive:$oci_archive" "$TAG_LATEST"
-          skopeo copy --dest-creds="${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}" "docker-archive:$oci_archive" "$TAG_VERSION"
+          skopeo copy --dest-creds="${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}" "docker-archive:$oci_archive" "docker://$TAG_LATEST"
+          skopeo copy --dest-creds="${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}" "docker-archive:$oci_archive" "docker://$TAG_VERSION"
 
           echo "=== Done ==="
 
