@@ -10,4 +10,4 @@ Builds [unmojang/drasl](https://github.com/unmojang/drasl) with [PR #278](https:
 ## Patches
 
 - **merge-pr-278**: Merges PR #278 (`catfromplan9/drasl:implement-p2p-multiplayer`) into master
-- **add-friends-webui**: Adds `FriendsEnabled` / `AcceptInvitesEnabled` checkboxes to player Web UI (4 patch files: player.tmpl, front.go, player.go, api.go+authlib_injector.go)
+- **add-friends-webui**: Adds `FriendsEnabled` / `AcceptInvitesEnabled` checkboxes to player Web UI (5 patch files: player.tmpl, front.go, player.go, api.go+authlib_injector.go, auth_test.go)
