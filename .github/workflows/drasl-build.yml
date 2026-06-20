@@ -1,0 +1,155 @@
+name: Drasl - Custom Build
+
+on:
+  schedule:
+    - cron: '0 4 * * *'  # Check once daily at 4:00 UTC
+  workflow_dispatch:
+  push:
+    paths:
+      - 'drasl/**'
+      - '.github/workflows/drasl-build.yml'
+      - 'scripts/common.sh'
+
+env:
+  REGISTRY: ghcr.io
+  UPSTREAM_REPO: unmojang/drasl
+  UPSTREAM_REF: master
+
+jobs:
+  check-update:
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.compare.outputs.should_build }}
+      commit: ${{ steps.commit.outputs.commit }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Get upstream commit and version
+        id: commit
+        run: |
+          COMMIT=$(curl -s "https://api.github.com/repos/${{ env.UPSTREAM_REPO }}/commits/${{ env.UPSTREAM_REF }}" | jq -r '.sha')
+          if [ -z "$COMMIT" ] || [ "$COMMIT" = "null" ]; then
+            echo "Failed to get upstream commit"
+            exit 1
+          fi
+          SHORT_COMMIT=$(echo "$COMMIT" | cut -c1-7)
+          echo "commit=$COMMIT" >> $GITHUB_OUTPUT
+          echo "short_commit=$SHORT_COMMIT" >> $GITHUB_OUTPUT
+          echo "combined_key=drasl-${SHORT_COMMIT}" >> $GITHUB_OUTPUT
+          echo "Upstream commit: $COMMIT"
+
+      - name: Get version from build_config.go
+        id: version
+        run: |
+          VERSION=$(curl -s "https://raw.githubusercontent.com/${{ env.UPSTREAM_REPO }}/${{ env.UPSTREAM_REF }}/build_config.go" \
+            | grep -oP 'const VERSION = "\K[^"]+')
+          if [ -z "$VERSION" ] || [ "$VERSION" = "null" ]; then
+            VERSION="${{ steps.commit.outputs.short_commit }}"
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Version: $VERSION"
+
+      - name: Cache check
+        if: github.event_name != 'push'
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: .build_success
+          key: ${{ steps.commit.outputs.combined_key }}
+
+      - name: Compare
+        id: compare
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "Push triggered. Building."
+            echo "should_build=true" >> $GITHUB_OUTPUT
+          elif [ -f .build_success ]; then
+            echo "No updates detected. Skipping."
+            echo "should_build=false" >> $GITHUB_OUTPUT
+          else
+            echo "Updates detected. Proceeding to build."
+            echo "should_build=true" >> $GITHUB_OUTPUT
+            echo "done" > .build_success
+          fi
+
+  build:
+    needs: check-update
+    if: needs.check-update.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout patch framework
+        uses: actions/checkout@v4
+
+      - name: Clone drasl upstream
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.UPSTREAM_REPO }}
+          path: drasl-src
+          ref: ${{ env.UPSTREAM_REF }}
+
+      - name: Apply patches (merge PR #278)
+        run: |
+          source scripts/common.sh
+          apply_all_patches drasl drasl-src
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v30
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+          extra_nix_config: |
+            extra-platforms = aarch64-linux
+
+      - name: Update vendorHash after merge
+        run: |
+          cd drasl-src
+          # Try building; nix will fail with a hash mismatch telling us the correct hash
+          nix build .#drasl 2>&1 | tee /tmp/nix-output.txt || true
+          NEW_HASH=$(grep -oP 'got:\s+\Ksha256-\S+' /tmp/nix-output.txt | head -1)
+          if [ -n "$NEW_HASH" ]; then
+            # Convert nix hash format: sha256-xxx → SRI format for sed
+            echo "Updating vendorHash to: $NEW_HASH"
+            sed -i "s|vendorHash = \".*\"|vendorHash = \"$NEW_HASH\"|" flake.nix
+          else
+            echo "No vendorHash update needed (or unexpected nix output)"
+            cat /tmp/nix-output.txt
+          fi
+
+      - name: Login to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and Push OCI image
+        env:
+          VERSION: ${{ needs.check-update.outputs.version }}
+        run: |
+          cd drasl-src
+
+          # Build OCI archive (native x86_64-linux, runs on ubuntu-latest)
+          oci_archive="$(nix build --no-link --print-out-paths '.#oci')"
+
+          echo "OCI archive: $oci_archive"
+
+          # Push to GHCR using skopeo (available in nix profile or install)
+          nix profile install nixpkgs#skopeo
+
+          TAG_LATEST="${{ env.REGISTRY }}/${{ github.repository }}:drasl"
+          TAG_VERSION="${{ env.REGISTRY }}/${{ github.repository }}:drasl-${VERSION}"
+
+          skopeo copy "docker-archive:$oci_archive" "$TAG_LATEST"
+          skopeo copy "docker-archive:$oci_archive" "$TAG_VERSION"
+
+      - name: Summary
+        run: |
+          echo "## Drasl Build Summary"
+          echo "| Item | Value |"
+          echo "|------|-------|"
+          echo "| Upstream Commit | \`${{ needs.check-update.outputs.commit }}\` |"
+          echo "| Version | \`${{ needs.check-update.outputs.version }}\` |"
+          echo "| Image (latest) | \`${{ env.REGISTRY }}/${{ github.repository }}:drasl\` |"
+          echo "| Image (version) | \`${{ env.REGISTRY }}/${{ github.repository }}:drasl-${{ needs.check-update.outputs.version }}\` |"
+          echo "| Patches | PR #278 (Friends system, P2P Multiplayer) |"
