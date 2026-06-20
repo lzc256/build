@@ -88,6 +88,7 @@ jobs:
           repository: ${{ env.UPSTREAM_REPO }}
           path: drasl-src
           ref: ${{ env.UPSTREAM_REF }}
+          fetch-depth: 0  # Full history needed for merge
 
       - name: Apply patches (merge PR #278)
         run: |
