@@ -1,0 +1,183 @@
+name: FjordLauncher - Build
+
+on:
+  schedule:
+    - cron: '0 3 */5 * *'  # Check every 5 days at 3:00 UTC
+  workflow_dispatch:
+    inputs:
+      fjord_ref:
+        description: 'FjordLauncher branch/tag/commit'
+        required: false
+        default: 'develop'
+  push:
+    paths:
+      - 'fjordlauncher/**'
+      - '.github/workflows/fjordlauncher-build.yml'
+      - 'scripts/common.sh'
+
+jobs:
+  check-update:
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.compare.outputs.should_build }}
+      fjord_sha: ${{ steps.hashes.outputs.fjord_sha }}
+    steps:
+      - name: Get Latest Hash
+        id: hashes
+        run: |
+          FJORD_SHA=$(curl -s https://api.github.com/repos/unmojang/FjordLauncher/commits/develop | jq -r .sha)
+          echo "fjord_sha=$FJORD_SHA" >> $GITHUB_OUTPUT
+          echo "combined_key=fjordlauncher-${FJORD_SHA}" >> $GITHUB_OUTPUT
+          echo "FjordLauncher SHA: $FJORD_SHA"
+
+      - name: Cache Check
+        if: github.event_name != 'push'
+        id: cache_check
+        uses: actions/cache@v4
+        with:
+          path: build_status.txt
+          key: ${{ steps.hashes.outputs.combined_key }}
+
+      - name: Compare
+        id: compare
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "Push triggered. Building."
+            echo "should_build=true" >> $GITHUB_OUTPUT
+          elif [ -f build_status.txt ]; then
+            echo "No updates detected. Skipping."
+            echo "should_build=false" >> $GITHUB_OUTPUT
+          else
+            echo "Updates detected. Proceeding to build."
+            echo "should_build=true" >> $GITHUB_OUTPUT
+            echo "done" > build_status.txt
+          fi
+
+  build:
+    needs: check-update
+    if: needs.check-update.outputs.should_build == 'true'
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: linux
+            artifact: fjordlauncher-linux-x86_64
+          - os: macos-latest
+            target: macos
+            artifact: fjordlauncher-macos
+          - os: windows-latest
+            target: windows
+            artifact: fjordlauncher-windows-x86_64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout patch framework
+        uses: actions/checkout@v4
+
+      - name: Clone FjordLauncher
+        uses: actions/checkout@v4
+        with:
+          repository: unmojang/FjordLauncher
+          ref: ${{ github.event.inputs.fjord_ref || 'develop' }}
+          path: fjordlauncher-src
+          submodules: recursive
+
+      - name: Apply patch
+        run: |
+          source scripts/common.sh
+          apply_patch 01-remove-msa-requirement fjordlauncher-src
+
+      - name: Show patched files
+        run: git -C fjordlauncher-src status --short
+
+      # Linux build
+      - name: Install dependencies (Linux)
+        if: matrix.target == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build extra-cmake-modules qt6-base-dev qt6-base-dev-tools qt6-declarative-dev qt6-declarative-dev-tools qt6-tools-dev qt6-tools-dev-tools libqt6svg6-dev libqt6charts6-dev libgl1-mesa-dev
+
+      - name: Build (Linux)
+        if: matrix.target == 'linux'
+        run: |
+          cd fjordlauncher-src
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --parallel
+          cd build
+          cpack -G TGZ
+
+      # macOS build
+      - name: Install dependencies (macOS)
+        if: matrix.target == 'macos'
+        run: |
+          brew install cmake ninja extra-cmake-modules qt@6
+          echo "Qt6_DIR=$(brew --prefix qt@6)/lib/cmake/Qt6" >> $GITHUB_ENV
+
+      - name: Build (macOS)
+        if: matrix.target == 'macos'
+        run: |
+          cd fjordlauncher-src
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$(brew --prefix qt@6)"
+          cmake --build build --parallel
+          cd build
+          cpack -G DragNDrop
+
+      # Windows build
+      - name: Install Qt (Windows)
+        if: matrix.target == 'windows'
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.6.*'
+          host: 'windows'
+          target: 'desktop'
+          arch: 'win64_msvc2019_64'
+          modules: 'qt5compat qtimageformats'
+
+      - name: Setup MSVC (Windows)
+        if: matrix.target == 'windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Install dependencies (Windows)
+        if: matrix.target == 'windows'
+        run: |
+          choco install ninja -y
+          scoop install extras/vcpkg
+          vcpkg integrate install
+
+      - name: Build (Windows)
+        if: matrix.target == 'windows'
+        shell: cmd
+        run: |
+          cd fjordlauncher-src
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="%Qt6_DIR%"
+          cmake --build build --parallel
+          cd build
+          cpack -G ZIP
+
+      - name: Find artifacts
+        id: find_artifacts
+        run: |
+          if [ "${{ matrix.target }}" = "linux" ]; then
+            ARTIFACT=$(find fjordlauncher-src/build -name "*.tar.gz" -type f | head -1)
+          elif [ "${{ matrix.target }}" = "windows" ]; then
+            ARTIFACT=$(find fjordlauncher-src/build -name "*.zip" -type f | head -1)
+          else
+            ARTIFACT=$(find fjordlauncher-src/build -name "*.dmg" -type f | head -1)
+          fi
+          echo "artifact_path=$ARTIFACT" >> $GITHUB_OUTPUT
+          echo "Found: $ARTIFACT"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}-${{ needs.check-update.outputs.fjord_sha }}
+          path: ${{ steps.find_artifacts.outputs.artifact_path }}
+          retention-days: 30
+
+      - name: Summary
+        run: |
+          echo "## FjordLauncher Build Summary"
+          echo "| Item | Value |"
+          echo "|------|-------|"
+          echo "| Upstream SHA | \`${{ needs.check-update.outputs.fjord_sha }}\` |"
+          echo "| Target | ${{ matrix.target }} |"
+          echo "| Artifact | \`${{ matrix.artifact }}\` |"
