@@ -1,0 +1,60 @@
+From f491b982c4eac4c493104d30ffaf031312d520dc Mon Sep 17 00:00:00 2001
+From: lzc256 <i@lzc256.com>
+Date: Sat, 20 Jun 2026 17:10:00 +0800
+Subject: [PATCH] api.go + authlib_injector.go: pass friendsEnabled/acceptInvitesEnabled
+ to UpdatePlayer
+
+The UpdatePlayer signature now requires two extra bool params.
+API and authlib_injector callers don't manage friends settings,
+so pass false for both.
+---
+ api.go              | 2 ++
+ authlib_injector.go | 6 ++++++
+ 2 files changed, 8 insertions(+)
+
+diff --git a/api.go b/api.go
+index 6e86fd4..3b9673e 100644
+--- a/api.go
++++ b/api.go
+@@ -845,6 +845,8 @@ func (app *App) APIUpdatePlayer() func(c *echo.Context) error {
+ 			capeReader,
+ 			req.CapeURL,
+ 			req.DeleteCape,
++			false, // friendsEnabled
++			false, // acceptInvitesEnabled
+ 		)
+ 		if err != nil {
+ 			return err
+diff --git a/authlib_injector.go b/authlib_injector.go
+index f25aae3..b3d95e2 100644
+--- a/authlib_injector.go
++++ b/authlib_injector.go
+@@ -138,6 +138,8 @@ func (app *App) AuthlibInjectorUploadTexture(textureType string) func(c *echo.Co
+ 				false,          // deleteSkin
+ 				nil,            // capeReader
+ 				nil,            // capeURL
++				false, // friendsEnabled
++				false, // acceptInvitesEnabled
+ 				false,          // deleteCape
+ 			)
+ 			if err != nil {
+@@ -155,6 +157,8 @@ func (app *App) AuthlibInjectorUploadTexture(textureType string) func(c *echo.Co
+ 				false,          // deleteSkin
+ 				&textureReader, // capeReader
+ 				nil,            // capeURL
++				false, // friendsEnabled
++				false, // acceptInvitesEnabled
+ 				false,          // deleteCape
+ 			)
+ 			if err != nil {
+@@ -191,6 +195,8 @@ func (app *App) AuthlibInjectorDeleteTexture(textureType string) func(c *echo.Co
+ 			textureType == TextureTypeSkin, // deleteSkin
+ 			nil,                            // capeReader
+ 			nil,                            // capeURL
++			false, // friendsEnabled
++			false, // acceptInvitesEnabled
+ 			textureType == TextureTypeCape, // deleteCape
+ 		)
+ 		if err != nil {
+--
+2.54.0
