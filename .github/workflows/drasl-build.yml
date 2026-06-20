@@ -137,49 +137,20 @@ jobs:
         run: |
           cd drasl-src
 
-          # Debug: show flake.nix vendorHash
-          echo "=== Current vendorHash in flake.nix ==="
-          grep vendorHash flake.nix
+          # Build OCI archive
+          oci_archive="$(nix build --no-link --print-out-paths '.#oci')"
+          echo "OCI archive: $oci_archive"
 
-          # Build OCI archive (native x86_64-linux, runs on ubuntu-latest)
-          echo "=== Building OCI image with nix ==="
-          nix build '.#oci' --no-link --print-out-paths 2>&1 | tee /tmp/nix-build-output.txt
-          NIX_EXIT_CODE=$?
-
-          echo "=== Nix exit code: $NIX_EXIT_CODE ==="
-          echo "=== Full nix output ==="
-          cat /tmp/nix-build-output.txt
-
-          if [ $NIX_EXIT_CODE -ne 0 ]; then
-            echo "ERROR: nix build failed with exit code $NIX_EXIT_CODE"
-            exit 1
-          fi
-
-          oci_archive=$(tail -1 /tmp/nix-build-output.txt)
-          echo "=== OCI archive path: $oci_archive ==="
-
-          # The nix output is a path to a file, not a directory
-          # For dockerTools.buildLayeredImage, it outputs a path that contains the image
-          ls -la "$oci_archive" 2>/dev/null || echo "Path is not a directory, checking as file"
-          file "$oci_archive" 2>/dev/null || true
-
-          # Push to GHCR using crane (simpler than skopeo for this use case)
-          nix profile install nixpkgs#crane
-
+          # Push to GHCR using buildah (same as upstream)
           TAG_LATEST="${{ env.REGISTRY }}/${{ github.repository }}:drasl"
           TAG_VERSION="${{ env.REGISTRY }}/${{ github.repository }}:drasl-${VERSION}"
 
-          echo "=== Pushing to GHCR ==="
-          echo "Tags: $TAG_LATEST, $TAG_VERSION"
+          # Login via buildah
+          echo "${{ secrets.GITHUB_TOKEN }}" | buildah login -u "${{ github.actor }}" --password-stdin ${{ env.REGISTRY }}
 
-          # Login to GHCR with crane
-          crane auth login ${{ env.REGISTRY }} -u ${{ github.actor }} -p ${{ secrets.GITHUB_TOKEN }}
-
-          # Push the OCI archive
-          crane push "$oci_archive" "$TAG_LATEST"
-          crane push "$oci_archive" "$TAG_VERSION"
-
-          echo "=== Done ==="
+          # Push
+          buildah push "$oci_archive" "$TAG_LATEST"
+          buildah push "$oci_archive" "$TAG_VERSION"
 
       - name: Summary
         run: |
