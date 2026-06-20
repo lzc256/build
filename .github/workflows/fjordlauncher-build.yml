@@ -105,7 +105,8 @@ jobs:
           sudo apt-get install -y cmake ninja-build extra-cmake-modules \
             qt6-base-dev qt6-base-dev-tools qt6-declarative-dev qt6-declarative-dev-tools \
             qt6-tools-dev qt6-tools-dev-tools qt6-networkauth-dev \
-            libqt6svg6-dev libqt6charts6-dev libgl1-mesa-dev libxkbcommon-dev
+            libqt6svg6-dev libqt6charts6-dev libgl1-mesa-dev libxkbcommon-dev \
+            libcmark-dev libarchive-dev libtomlplusplus-dev
 
       - name: Build (Linux)
         if: matrix.target == 'linux'
