@@ -1,0 +1,37 @@
+From f491b982c4eac4c493104d30ffaf031312d520dc Mon Sep 17 00:00:00 2001
+From: lzc256 <i@lzc256.com>
+Date: Sat, 20 Jun 2026 16:44:48 +0800
+Subject: [PATCH] Add FriendsEnabled/AcceptInvitesEnabled toggles to player
+ Web UI
+
+---
+ view/player.tmpl | 13 ++++++++++++-
+ 1 file changed, 12 insertions(+), 1 deletion(-)
+
+diff --git a/view/player.tmpl b/view/player.tmpl
+index 32c5722..76ab8ed 100644
+--- a/view/player.tmpl
++++ b/view/player.tmpl
+@@ -150,7 +150,18 @@
+         />
+       </p>
+     {{ end }}
+-    <input hidden name="uuid" value="{{ .Player.UUID }}" />
++    {{ if or .App.Config.P2P.Enable .User.IsAdmin }}
++    <h4>Friends</h4>
++    <p>
++      <label for="friends-enabled">Enable Friends</label>
++      <input type="checkbox" name="friendsEnabled" id="friends-enabled" {{ if .Player.FriendsEnabled }}checked{{ end }} />
++    </p>
++    <p>
++      <label for="accept-invites-enabled">Accept Friend Invites</label>
++      <input type="checkbox" name="acceptInvitesEnabled" id="accept-invites-enabled" {{ if .Player.AcceptInvitesEnabled }}checked{{ end }} />
++    </p>
++    {{ end }}
++    <input hidden name="uuid" value="{{ .Player.UUID }}" />
+     <input hidden name="returnUrl" value="{{ .URL }}" />
+     <p style="text-align: center;">
+       <input type="submit" value="{{ call .T "Save changes" }}" />
+
+--
+2.54.0
