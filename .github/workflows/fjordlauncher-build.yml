@@ -216,7 +216,7 @@ jobs:
             ninja-build extra-cmake-modules pkg-config scdoc \
             cmark gamemode-dev libarchive-dev libcmark-dev libqrencode-dev zlib1g-dev \
             libxcb-cursor-dev libtomlplusplus-dev libvulkan-dev \
-            file desktop-file-utils rpm
+            file desktop-file-utils rpm libfuse2
 
       - name: Install AppImage tools (Linux)
         if: steps.check-enabled.outputs.enabled == 'true' && runner.os == 'Linux'
