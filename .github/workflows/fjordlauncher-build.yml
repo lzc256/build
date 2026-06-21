@@ -362,7 +362,7 @@ jobs:
             if [ -f "$f" ]; then
               base=$(basename "$f")
               cp "$f" "release-assets/$base"
-              ((count++))
+              count=$((count + 1))
             fi
           done
 
