@@ -1,0 +1,146 @@
+diff --git a/doc/configuration.md b/doc/configuration.md
+index 2c8e904..20b0453 100644
+--- a/doc/configuration.md
++++ b/doc/configuration.md
+@@ -29,6 +29,11 @@ Loki supports JVM arguments to enable or disable some behaviour.
+   -DLoki.disable_factory=true
+   ```
+ 
++- Disable retransformation of already-loaded classes (for Android/non-standard JVMs, see [troubleshooting](troubleshooting.md#android-crash))
++  ```
++  -DLoki.no_retransform=true
++  ```
++
+ - Disable username-based profile lookups [^1]
+   ```
+   -DLoki.disable_profile_lookup=true
+diff --git a/doc/troubleshooting.md b/doc/troubleshooting.md
+index eb35701..2c9de24 100644
+--- a/doc/troubleshooting.md
++++ b/doc/troubleshooting.md
+@@ -7,6 +7,36 @@ Whenever anyone from a different API server talks in chat, fallback API server p
+ 
+ ## My game immediately crashed!
+ 
++If you're getting a crash on Android or a non-standard JVM like this:
++
++```
++#  SIGSEGV (0xb) at pc=0x..., pid=..., tid=...
++# Problematic frame:
++# C  [libinstrument.so+0x...]
++```
++
++then the JVM's class retransformation implementation has crashed. This is a known issue
++with Android-based JVMs (ZalithLauncher2, PojavLauncher, etc.) on aarch64. To work around
++this, add the following JVM argument:
++
++```
++-DLoki.no_retransform=true
++```
++
++This disables retransformation of already-loaded classes. The following features will not
++apply to classes that were already loaded before Loki started:
++
++- **Authlib-Injector killer** -- authlib-injector classes already loaded will not be
++  neutralised. Simply do not use authlib-injector on Android.
++- **Forge 1.13-1.16 URL factory fix** -- the LegacyFix agent's URL factory override will
++  not be intercepted. Forge does not run on Android.
++- **DNS blocking** -- `InetAddress` DNS lookups for blocked hosts (OptiFine, snooper) will
++  not be intercepted. Snooper and OptiFine cape blocking are handled by Loki's URL factory,
++  which continues to work.
++
++WebSocket signaling support for Minecraft 26.2+ official multiplayer is **not** affected
++by this option.
++
+ If you're getting a crash like this:
+ 
+ ```
+diff --git a/src/main/java/org/unmojang/loki/Loki.java b/src/main/java/org/unmojang/loki/Loki.java
+index ffc0c25..95ae9d2 100644
+--- a/src/main/java/org/unmojang/loki/Loki.java
++++ b/src/main/java/org/unmojang/loki/Loki.java
+@@ -10,6 +10,7 @@ public class Loki {
+ 
+     public static final Boolean chat_restrictions =  Boolean.getBoolean("Loki.chat_restrictions");
+     public static Boolean disable_factory = Boolean.getBoolean("Loki.disable_factory");
++    public static final Boolean no_retransform = Boolean.getBoolean("Loki.no_retransform");
+     public static final Boolean disable_profile_lookup = Boolean.getBoolean("Loki.disable_profile_lookup");
+     public static final Boolean enable_patchy =  Boolean.getBoolean("Loki.enable_patchy");
+     public static final Boolean enable_snooper =  Boolean.getBoolean("Loki.enable_snooper");
+@@ -25,11 +26,13 @@ public class Loki {
+ 
+         // Kill Loki alternatives so that Loki won't break
+         LokiUtil.addRetransformTransformer(new LokiAlternativesTransformer(), inst);
+-        LokiUtil.retransformClass("moe.yushi.authlibinjector.Premain", inst);
+-        LokiUtil.retransformClass("moe.yushi.authlibinjector.javaagent.AuthlibInjectorPremain", inst);
+-        LokiUtil.retransformClass("org.to2mbn.authlibinjector.javaagent.AuthlibInjectorPremain", inst);
+-        LokiUtil.retransformClass("moe.yushi.authlibinjector.transform.ClassTransformer", inst);
+-        LokiUtil.retransformClass("org.to2mbn.authlibinjector.transform.ClassTransformer", inst);
++        if (!no_retransform) {
++            LokiUtil.retransformClass("moe.yushi.authlibinjector.Premain", inst);
++            LokiUtil.retransformClass("moe.yushi.authlibinjector.javaagent.AuthlibInjectorPremain", inst);
++            LokiUtil.retransformClass("org.to2mbn.authlibinjector.javaagent.AuthlibInjectorPremain", inst);
++            LokiUtil.retransformClass("moe.yushi.authlibinjector.transform.ClassTransformer", inst);
++            LokiUtil.retransformClass("org.to2mbn.authlibinjector.transform.ClassTransformer", inst);
++        }
+ 
+         // Authentication & skins/capes
+         RequestInterceptor.setURLFactory();
+@@ -77,7 +80,9 @@ public class Loki {
+         inst.addTransformer(new ReIndevGetSkinTransformer()); // Fix a bug in ReIndev's ThreadGetSkin
+         inst.addTransformer(new MCOSEMultiplayerTransformer()); // Propagate Loki into MCOSE server subprocess
+         LokiUtil.addRetransformTransformer(new SetURLFactoryTransformer(), inst); // Fix 1.13-1.16 Forge, LegacyFix agent
+-        LokiUtil.retransformClass("uk.betacraft.legacyfix.LegacyFixLauncher", inst);
++        if (!no_retransform) {
++            LokiUtil.retransformClass("uk.betacraft.legacyfix.LegacyFixLauncher", inst);
++        }
+         inst.addTransformer(new TitleScreenTransformer()); // Server brand on title screen for 26.1+
+ 
+         // Intercept OptiFine capes to prevent collisions, for whatever reason it isn't caught by Loki's URL factory
+@@ -85,9 +90,17 @@ public class Loki {
+ 
+         // Block some DNS lookups
+         LokiUtil.addRetransformTransformer(new InetAddressTransformer(), inst);
+-        LokiUtil.retransformClass("java.net.InetAddress", inst);
++        if (!no_retransform) {
++            LokiUtil.retransformClass("java.net.InetAddress", inst);
++        }
+ 
+         // Apply 1.21.9+ fixes
+         LokiUtil.apply1219Fixes();
++
++        if (no_retransform) {
++            log.warn("Retransformation of already-loaded classes is disabled.");
++            log.warn("Authlib-Injector killer, Forge 1.13-1.16 URL factory fix, and DNS");
++            log.warn("blocking will only apply to classes loaded after this point.");
++        }
+     }
+ }
+diff --git a/src/main/java/org/unmojang/loki/LokiUtil.java b/src/main/java/org/unmojang/loki/LokiUtil.java
+index fcbe4cc..6fff4df 100644
+--- a/src/main/java/org/unmojang/loki/LokiUtil.java
++++ b/src/main/java/org/unmojang/loki/LokiUtil.java
+@@ -490,6 +490,23 @@ public class LokiUtil {
+             System.setProperty("fabric.debug.disableClassPathIsolation", "true");
+         }
+ 
++        if (!Loki.no_retransform) {
++            String vmVendor = System.getProperty("java.vm.vendor", "");
++            String vmName = System.getProperty("java.vm.name", "");
++            String osName = System.getProperty("os.name", "");
++            if (osName.equalsIgnoreCase("Linux") &&
++                    (vmVendor.toLowerCase().contains("android") ||
++                     vmName.toLowerCase().contains("dalvik") ||
++                     System.getProperty("pojav.path") != null ||
++                     System.getProperty("pojav.path.minecraft") != null)) {
++                Loki.log.warn("**** ANDROID-LIKE RUNTIME DETECTED!");
++                Loki.log.warn("You appear to be running on an Android-based JVM, which is known");
++                Loki.log.warn("to crash during class retransformation. If Loki crashes, add:");
++                Loki.log.warn("  -DLoki.no_retransform=true");
++                Loki.log.warn("to the JVM arguments to skip retransformation of already-loaded classes.");
++            }
++        }
++
+         initManifestAttributes();
+ 
+         String[] proxyProps = {"http.proxyHost", "http.proxyPort", "https.proxyHost", "https.proxyPort"};
