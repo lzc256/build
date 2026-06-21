@@ -6,10 +6,6 @@ on:
       upstream_ref:
         description: 'Upstream ref (tag/branch/commit). Leave empty to use latest release.'
         required: false
-      create_release:
-        description: 'Create GitHub release'
-        type: boolean
-        default: true
   push:
     paths:
       - 'loki/**'
@@ -21,81 +17,10 @@ env:
   UPSTREAM_REF: master
 
 jobs:
-  check-update:
+  build:
     runs-on: ubuntu-latest
     outputs:
-      should_build: ${{ steps.compare.outputs.should_build }}
       version: ${{ steps.version.outputs.version }}
-      upstream_sha: ${{ steps.hashes.outputs.upstream_sha }}
-    steps:
-      - name: Get upstream info
-        id: hashes
-        run: |
-          if [ -n "${{ github.event.inputs.upstream_ref }}" ]; then
-            REF="${{ github.event.inputs.upstream_ref }}"
-          else
-            # Get latest release tag
-            RELEASE=$(curl -s "https://api.github.com/repos/${{ env.UPSTREAM_REPO }}/releases/latest")
-            REF=$(echo "$RELEASE" | jq -r .tag_name)
-            if [ -z "$REF" ] || [ "$REF" = "null" ]; then
-              REF="${{ env.UPSTREAM_REF }}"
-            fi
-          fi
-
-          UPSTREAM_SHA=$(curl -s "https://api.github.com/repos/${{ env.UPSTREAM_REPO }}/commits/${REF}" | jq -r .sha \
-            || echo "unknown")
-
-          echo "ref=$REF" >> $GITHUB_OUTPUT
-          echo "upstream_sha=$UPSTREAM_SHA" >> $GITHUB_OUTPUT
-          echo "combined_key=loki-${REF}" >> $GITHUB_OUTPUT
-          echo "Upstream ref: $REF (SHA: $UPSTREAM_SHA)"
-
-      - name: Get version
-        id: version
-        run: |
-          REF="${{ steps.hashes.outputs.ref }}"
-          # Strip 'v' prefix if present
-          VERSION="${REF#v}"
-          # Fallback: read from build.xml if not a version tag
-          if ! [[ "$VERSION" =~ ^[0-9]+ ]]; then
-            VERSION=$(curl -s "https://raw.githubusercontent.com/${{ env.UPSTREAM_REPO }}/${{ env.UPSTREAM_REF }}/build.xml" \
-              | grep -oP 'name="version" value="\K[^"]+' || echo "unknown")
-          fi
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "Version: $VERSION"
-
-      - name: Cache check
-        if: github.event_name != 'workflow_dispatch' && github.event_name != 'push'
-        id: cache
-        uses: actions/cache@v4
-        with:
-          path: .build_success
-          key: ${{ steps.hashes.outputs.combined_key }}
-
-      - name: Compare
-        id: compare
-        run: |
-          if [ "${{ github.event_name }}" = "push" ]; then
-            echo "Push triggered. Building."
-            echo "should_build=true" >> $GITHUB_OUTPUT
-          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "Manual dispatch triggered. Building."
-            echo "should_build=true" >> $GITHUB_OUTPUT
-          elif [ -f .build_success ]; then
-            echo "No updates detected. Skipping."
-            echo "should_build=false" >> $GITHUB_OUTPUT
-          else
-            echo "New release detected. Proceeding to build."
-            echo "should_build=true" >> $GITHUB_OUTPUT
-            echo "done" > .build_success
-          fi
-
-  build:
-    needs: check-update
-    if: needs.check-update.outputs.should_build == 'true'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
       - name: Checkout patch framework
         uses: actions/checkout@v4
@@ -104,7 +29,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: ${{ env.UPSTREAM_REPO }}
-          ref: ${{ env.UPSTREAM_REF }}
+          ref: ${{ inputs.upstream_ref || env.UPSTREAM_REF }}
           path: loki-src
           fetch-depth: 0
 
@@ -134,10 +59,16 @@ jobs:
           cd loki-src
           ant -DjavaTarget=1.8
 
+      - name: Get version
+        id: version
+        run: |
+          VERSION=$(grep 'name="version"' loki-src/build.xml | grep -oP 'value="\K[^"]+')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Loki-${{ needs.check-update.outputs.version }}
+          name: Loki-${{ steps.version.outputs.version }}
           path: loki-src/build/dist/Loki-*.jar
           retention-days: 30
 
@@ -146,39 +77,5 @@ jobs:
           echo "## Loki Build Summary"
           echo "| Item | Value |"
           echo "|------|-------|"
-          echo "| Upstream SHA | \`${{ needs.check-update.outputs.upstream_sha }}\` |"
-          echo "| Version | \`${{ needs.check-update.outputs.version }}\` |"
+          echo "| Version | \`${{ steps.version.outputs.version }}\` |"
           echo "| Patches | no-retransform (Android SIGSEGV fix) |"
-
-  create-release:
-    needs: [check-update, build]
-    if: needs.check-update.outputs.should_build == 'true' && github.event.inputs.create_release != 'false'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - name: Download artifact
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-
-      - name: Prepare release assets
-        run: |
-          mkdir -p release-assets
-          find artifacts -name "Loki-*.jar" -exec cp {} release-assets/ \;
-          ls -la release-assets/
-
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: loki-${{ needs.check-update.outputs.version }}
-          name: Loki ${{ needs.check-update.outputs.version }}
-          draft: false
-          prerelease: false
-          body: |
-            Custom build of [Loki](https://github.com/unmojang/Loki) with patches:
-
-            - **no-retransform**: Add `-DLoki.no_retransform=true` option to skip retransformation of already-loaded classes, fixing SIGSEGV crash on Android/aarch64 JVMs.
-          files: release-assets/*
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
