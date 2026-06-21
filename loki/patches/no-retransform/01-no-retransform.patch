@@ -1,105 +1,15 @@
-diff --git a/src/main/java/org/unmojang/loki/Loki.java b/src/main/java/org/unmojang/loki/Loki.java
-index ffc0c25..3e2b1a2 100644
---- a/src/main/java/org/unmojang/loki/Loki.java
-+++ b/src/main/java/org/unmojang/loki/Loki.java
-@@ -10,6 +10,7 @@ public class Loki {
+From 81b6966d34bbae915cb64e6b622e5102c03c4be8 Mon Sep 17 00:00:00 2001
+From: lzc256 <i@lzc256.com>
+Date: Sun, 21 Jun 2026 19:36:06 +0800
+Subject: [PATCH] Add no_retransform option for Android SIGSEGV fix
 
-     public static final Boolean chat_restrictions =  Boolean.getBoolean("Loki.chat_restrictions");
-     public static Boolean disable_factory = Boolean.getBoolean("Loki.disable_factory");
-+    public static final Boolean no_retransform = Boolean.getBoolean("Loki.no_retransform");
-     public static final Boolean disable_profile_lookup = Boolean.getBoolean("Loki.disable_profile_lookup");
-     public static final Boolean enable_patchy =  Boolean.getBoolean("Loki.enable_patchy");
-     public static final Boolean enable_snooper =  Boolean.getBoolean("Loki.enable_snooper");
-@@ -25,11 +26,13 @@ public class Loki {
+---
+ doc/configuration.md                          |  5 +++
+ doc/troubleshooting.md                        | 30 ++++++++++++++
+ src/main/java/org/unmojang/loki/Loki.java     | 39 ++++++++++++++-----
+ src/main/java/org/unmojang/loki/LokiUtil.java |  6 ++-
+ 4 files changed, 69 insertions(+), 11 deletions(-)
 
-         // Kill Loki alternatives so that Loki won't break
--        LokiUtil.addRetransformTransformer(new LokiAlternativesTransformer(), inst);
--        LokiUtil.retransformClass("moe.yushi.authlibinjector.Premain", inst);
--        LokiUtil.retransformClass("moe.yushi.authlibinjector.javaagent.AuthlibInjectorPremain", inst);
--        LokiUtil.retransformClass("org.to2mbn.authlibinjector.javaagent.AuthlibInjectorPremain", inst);
--        LokiUtil.retransformClass("moe.yushi.authlibinjector.transform.ClassTransformer", inst);
--        LokiUtil.retransformClass("org.to2mbn.authlibinjector.transform.ClassTransformer", inst);
-+        if (no_retransform) {
-+            inst.addTransformer(new LokiAlternativesTransformer());
-+        } else {
-+            LokiUtil.addRetransformTransformer(new LokiAlternativesTransformer(), inst);
-+            LokiUtil.retransformClass("moe.yushi.authlibinjector.Premain", inst);
-+            LokiUtil.retransformClass("moe.yushi.authlibinjector.javaagent.AuthlibInjectorPremain", inst);
-+            LokiUtil.retransformClass("org.to2mbn.authlibinjector.javaagent.AuthlibInjectorPremain", inst);
-+            LokiUtil.retransformClass("moe.yushi.authlibinjector.transform.ClassTransformer", inst);
-+            LokiUtil.retransformClass("org.to2mbn.authlibinjector.transform.ClassTransformer", inst);
-+        }
-
-         // Authentication & skins/capes
-@@ -77,7 +80,11 @@ public class Loki {
-         inst.addTransformer(new ReIndevGetSkinTransformer()); // Fix a bug in ReIndev's ThreadGetSkin
-         inst.addTransformer(new MCOSEMultiplayerTransformer()); // Propagate Loki into MCOSE server subprocess
--        LokiUtil.addRetransformTransformer(new SetURLFactoryTransformer(), inst); // Fix 1.13-1.16 Forge, LegacyFix agent
--        LokiUtil.retransformClass("uk.betacraft.legacyfix.LegacyFixLauncher", inst);
-+        if (no_retransform) {
-+            inst.addTransformer(new SetURLFactoryTransformer());
-+        } else {
-+            LokiUtil.addRetransformTransformer(new SetURLFactoryTransformer(), inst); // Fix 1.13-1.16 Forge, LegacyFix agent
-+            LokiUtil.retransformClass("uk.betacraft.legacyfix.LegacyFixLauncher", inst);
-+        }
-         inst.addTransformer(new TitleScreenTransformer()); // Server brand on title screen for 26.1+
-
-@@ -85,9 +92,17 @@ public class Loki {
-
-         // Block some DNS lookups
--        LokiUtil.addRetransformTransformer(new InetAddressTransformer(), inst);
--        LokiUtil.retransformClass("java.net.InetAddress", inst);
-+        if (no_retransform) {
-+            inst.addTransformer(new InetAddressTransformer());
-+        } else {
-+            LokiUtil.addRetransformTransformer(new InetAddressTransformer(), inst);
-+            LokiUtil.retransformClass("java.net.InetAddress", inst);
-+        }
-
-         // Apply 1.21.9+ fixes
-         LokiUtil.apply1219Fixes();
-+
-+        if (no_retransform) {
-+            log.warn("Retransformation of already-loaded classes is disabled.");
-+            log.warn("Authlib-Injector killer, Forge 1.13-1.16 URL factory fix, and DNS");
-+            log.warn("blocking will only apply to classes loaded after this point.");
-+        }
-     }
- }
-diff --git a/src/main/java/org/unmojang/loki/LokiUtil.java b/src/main/java/org/unmojang/loki/LokiUtil.java
-index fcbe4cc..a2c8e1f 100644
---- a/src/main/java/org/unmojang/loki/LokiUtil.java
-+++ b/src/main/java/org/unmojang/loki/LokiUtil.java
-@@ -373,7 +373,11 @@ public class LokiUtil {
-                 }
-             };
-
--        addRetransformTransformer(injector, inst);
-+        if (Loki.no_retransform) {
-+            inst.addTransformer(injector);
-+        } else {
-+            addRetransformTransformer(injector, inst);
-+        }
-     }
-
-     private static void pinHookClasses() {
-@@ -435,7 +439,9 @@ public class LokiUtil {
-             // appending to bootstrap class loader seems to only be necessary on Java 9+ and causes IllegalAccessErrors
-             // on Java 8 and below.
-             if (JAVA_MAJOR > 8) {
--                try {
--                    Method m = Instrumentation.class.getMethod("appendToBootstrapClassLoaderSearch", JarFile.class);
--                    m.invoke(inst, new JarFile(tmpJar));
--                } catch (NoSuchMethodException ignored) {}
-+                if (Loki.no_retransform) {
-+                    inst.appendToBootstrapClassLoaderSearch(new JarFile(tmpJar));
-+                } else {
-+                    try {
-+                        Method m = Instrumentation.class.getMethod("appendToBootstrapClassLoaderSearch", JarFile.class);
-+                        m.invoke(inst, new JarFile(tmpJar));
-+                    } catch (NoSuchMethodException ignored) {}
-+                }
-             }
 diff --git a/doc/configuration.md b/doc/configuration.md
 index 2c8e904..20b0453 100644
 --- a/doc/configuration.md
@@ -107,7 +17,7 @@ index 2c8e904..20b0453 100644
 @@ -29,6 +29,11 @@ Loki supports JVM arguments to enable or disable some behaviour.
    -DLoki.disable_factory=true
    ```
-
+ 
 +- Disable retransformation of already-loaded classes (for Android/non-standard JVMs, see [troubleshooting](troubleshooting.md#android-crash))
 +  ```
 +  -DLoki.no_retransform=true
@@ -121,9 +31,9 @@ index eb35701..2c9de24 100644
 --- a/doc/troubleshooting.md
 +++ b/doc/troubleshooting.md
 @@ -7,6 +7,36 @@ Whenever anyone from a different API server talks in chat, fallback API server p
-
+ 
  ## My game immediately crashed!
-
+ 
 +If you're getting a crash on Android or a non-standard JVM like this:
 +
 +```
@@ -154,4 +64,98 @@ index eb35701..2c9de24 100644
 +WebSocket signaling support for Minecraft 26.2+ official multiplayer is **not** affected
 +by this option.
 +
- If you're getting a crash like this:;
+ If you're getting a crash like this:
+ 
+ ```
+diff --git a/src/main/java/org/unmojang/loki/Loki.java b/src/main/java/org/unmojang/loki/Loki.java
+index ffc0c25..47d52b5 100644
+--- a/src/main/java/org/unmojang/loki/Loki.java
++++ b/src/main/java/org/unmojang/loki/Loki.java
+@@ -10,6 +10,7 @@ public class Loki {
+ 
+     public static final Boolean chat_restrictions =  Boolean.getBoolean("Loki.chat_restrictions");
+     public static Boolean disable_factory = Boolean.getBoolean("Loki.disable_factory");
++    public static final Boolean no_retransform = Boolean.getBoolean("Loki.no_retransform");
+     public static final Boolean disable_profile_lookup = Boolean.getBoolean("Loki.disable_profile_lookup");
+     public static final Boolean enable_patchy =  Boolean.getBoolean("Loki.enable_patchy");
+     public static final Boolean enable_snooper =  Boolean.getBoolean("Loki.enable_snooper");
+@@ -24,12 +25,16 @@ public class Loki {
+         LokiUtil.earlyInit(agentArgs, inst);
+ 
+         // Kill Loki alternatives so that Loki won't break
+-        LokiUtil.addRetransformTransformer(new LokiAlternativesTransformer(), inst);
+-        LokiUtil.retransformClass("moe.yushi.authlibinjector.Premain", inst);
+-        LokiUtil.retransformClass("moe.yushi.authlibinjector.javaagent.AuthlibInjectorPremain", inst);
+-        LokiUtil.retransformClass("org.to2mbn.authlibinjector.javaagent.AuthlibInjectorPremain", inst);
+-        LokiUtil.retransformClass("moe.yushi.authlibinjector.transform.ClassTransformer", inst);
+-        LokiUtil.retransformClass("org.to2mbn.authlibinjector.transform.ClassTransformer", inst);
++        if (no_retransform) {
++            inst.addTransformer(new LokiAlternativesTransformer());
++        } else {
++            LokiUtil.addRetransformTransformer(new LokiAlternativesTransformer(), inst);
++            LokiUtil.retransformClass("moe.yushi.authlibinjector.Premain", inst);
++            LokiUtil.retransformClass("moe.yushi.authlibinjector.javaagent.AuthlibInjectorPremain", inst);
++            LokiUtil.retransformClass("org.to2mbn.authlibinjector.javaagent.AuthlibInjectorPremain", inst);
++            LokiUtil.retransformClass("moe.yushi.authlibinjector.transform.ClassTransformer", inst);
++            LokiUtil.retransformClass("org.to2mbn.authlibinjector.transform.ClassTransformer", inst);
++        }
+ 
+         // Authentication & skins/capes
+         RequestInterceptor.setURLFactory();
+@@ -76,18 +81,32 @@ public class Loki {
+         inst.addTransformer(new MCAuthlibGameProfileTransformer()); // Primarily for MojangFix
+         inst.addTransformer(new ReIndevGetSkinTransformer()); // Fix a bug in ReIndev's ThreadGetSkin
+         inst.addTransformer(new MCOSEMultiplayerTransformer()); // Propagate Loki into MCOSE server subprocess
+-        LokiUtil.addRetransformTransformer(new SetURLFactoryTransformer(), inst); // Fix 1.13-1.16 Forge, LegacyFix agent
+-        LokiUtil.retransformClass("uk.betacraft.legacyfix.LegacyFixLauncher", inst);
++        if (no_retransform) {
++            inst.addTransformer(new SetURLFactoryTransformer());
++        } else {
++            LokiUtil.addRetransformTransformer(new SetURLFactoryTransformer(), inst); // Fix 1.13-1.16 Forge, LegacyFix agent
++            LokiUtil.retransformClass("uk.betacraft.legacyfix.LegacyFixLauncher", inst);
++        }
+         inst.addTransformer(new TitleScreenTransformer()); // Server brand on title screen for 26.1+
+ 
+         // Intercept OptiFine capes to prevent collisions, for whatever reason it isn't caught by Loki's URL factory
+         inst.addTransformer(new OptiFineCapeTransformer());
+ 
+         // Block some DNS lookups
+-        LokiUtil.addRetransformTransformer(new InetAddressTransformer(), inst);
+-        LokiUtil.retransformClass("java.net.InetAddress", inst);
++        if (no_retransform) {
++            inst.addTransformer(new InetAddressTransformer());
++        } else {
++            LokiUtil.addRetransformTransformer(new InetAddressTransformer(), inst);
++            LokiUtil.retransformClass("java.net.InetAddress", inst);
++        }
+ 
+         // Apply 1.21.9+ fixes
+         LokiUtil.apply1219Fixes();
++
++        if (no_retransform) {
++            log.warn("Retransformation of already-loaded classes is disabled.");
++            log.warn("Authlib-Injector killer, Forge 1.13-1.16 URL factory fix, and DNS");
++            log.warn("blocking will only apply to classes loaded after this point.");
++        }
+     }
+ }
+diff --git a/src/main/java/org/unmojang/loki/LokiUtil.java b/src/main/java/org/unmojang/loki/LokiUtil.java
+index fcbe4cc..9f0cd6d 100644
+--- a/src/main/java/org/unmojang/loki/LokiUtil.java
++++ b/src/main/java/org/unmojang/loki/LokiUtil.java
+@@ -372,7 +372,11 @@ public class LokiUtil {
+             }
+         };
+ 
+-        addRetransformTransformer(injector, inst);
++        if (Loki.no_retransform) {
++            inst.addTransformer(injector);
++        } else {
++            addRetransformTransformer(injector, inst);
++        }
+     }
+ 
+     private static void pinHookClasses() {
+-- 
+2.54.0
+
