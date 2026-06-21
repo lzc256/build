@@ -344,12 +344,12 @@ jobs:
 
           # Install to a temp directory
           cmake --install build --config "$BUILD_TYPE" --prefix rpm-build/root
-          cd rpm-build
 
-          # Create spec file
-          cat > SPECS/fjordlauncher.spec << 'EOF'
+          # Create spec file with absolute paths
+          ROOT_DIR="$(pwd)/rpm-build/root"
+          cat > rpm-build/SPECS/fjordlauncher.spec << EOF
           Name:           fjordlauncher
-          Version:        %{version}
+          Version:        ${VERSION}
           Release:        1%{?dist}
           Summary:        FjordLauncher - A custom Minecraft launcher
 
@@ -361,21 +361,19 @@ jobs:
 
           %install
           rm -rf %{buildroot}
-          cp -a root %{buildroot}/usr
+          mkdir -p %{buildroot}/usr
+          cp -a ${ROOT_DIR}/* %{buildroot}/usr/
 
           %files
           %defattr(-,root,root,-)
           /usr/*
           EOF
 
-          # Replace version placeholder
-          sed -i "s/%{version}/$VERSION/g" SPECS/fjordlauncher.spec
-
           # Build RPM
-          rpmbuild --define "_topdir $(pwd)" -bb SPECS/fjordlauncher.spec
+          rpmbuild --define "_topdir $(pwd)/rpm-build" -bb rpm-build/SPECS/fjordlauncher.spec
 
           # Copy to source directory with proper name
-          cp RPMS/x86_64/*.rpm ../fjordlauncher-${VERSION}-Linux-x86_64.rpm
+          cp rpm-build/RPMS/x86_64/*.rpm fjordlauncher-${VERSION}-Linux-x86_64.rpm
 
       - name: Upload artifact (Linux AppImage)
         if: steps.check-enabled.outputs.enabled == 'true' && runner.os == 'Linux'
