@@ -145,33 +145,40 @@ jobs:
       - name: Check if artifact is enabled
         id: check-enabled
         run: |
-          # Default values for test phase
-          declare -A DEFAULTS=(
-            ["mac_arm64_zip"]="true"
-            ["linux_x86_64_appimage"]="true"
-            ["windows_msvc_x86_64"]="true"
-            ["linux_x86_64_portable"]="false"
-            ["mac_universal_zip"]="false"
-            ["windows_msvc_arm64"]="false"
-          )
-
           KEY="${{ matrix.artifact-key }}"
 
-          # Map artifact-key to workflow input names
-          declare -A INPUT_MAP=(
-            ["mac_arm64_zip"]="${{ github.event.inputs.build_mac_arm64_zip }}"
-            ["linux_x86_64_appimage"]="${{ github.event.inputs.build_linux_x86_64_appimage }}"
-            ["windows_msvc_x86_64"]="${{ github.event.inputs.build_windows_msvc_x86_64_portable }}"
-            ["linux_x86_64_portable"]="${{ github.event.inputs.build_linux_x86_64_portable }}"
-            ["mac_universal_zip"]="${{ github.event.inputs.build_mac_universal_zip }}"
-            ["windows_msvc_arm64"]="${{ github.event.inputs.build_windows_msvc_arm64 }}"
-          )
+          # Get input values (empty if not set)
+          INPUT_MAC_ARM64="${{ github.event.inputs.build_mac_arm64_zip }}"
+          INPUT_LINUX_X86_64="${{ github.event.inputs.build_linux_x86_64_appimage }}"
+          INPUT_WINDOWS_MSVC="${{ github.event.inputs.build_windows_msvc_x86_64_portable }}"
+          INPUT_LINUX_PORTABLE="${{ github.event.inputs.build_linux_x86_64_portable }}"
+          INPUT_MAC_UNIVERSAL="${{ github.event.inputs.build_mac_universal_zip }}"
+          INPUT_WINDOWS_ARM64="${{ github.event.inputs.build_windows_msvc_arm64 }}"
 
-          # Get input value or default
-          INPUT_VAL="${INPUT_MAP[$KEY]}"
-          if [ -z "$INPUT_VAL" ]; then
-            INPUT_VAL="${DEFAULTS[$KEY]:-false}"
-          fi
+          # Determine enabled status with defaults
+          case "$KEY" in
+            mac_arm64_zip)
+              INPUT_VAL="${INPUT_MAC_ARM64:-true}"
+              ;;
+            linux_x86_64_appimage)
+              INPUT_VAL="${INPUT_LINUX_X86_64:-true}"
+              ;;
+            windows_msvc_x86_64)
+              INPUT_VAL="${INPUT_WINDOWS_MSVC:-true}"
+              ;;
+            linux_x86_64_portable)
+              INPUT_VAL="${INPUT_LINUX_PORTABLE:-false}"
+              ;;
+            mac_universal_zip)
+              INPUT_VAL="${INPUT_MAC_UNIVERSAL:-false}"
+              ;;
+            windows_msvc_arm64)
+              INPUT_VAL="${INPUT_WINDOWS_ARM64:-false}"
+              ;;
+            *)
+              INPUT_VAL="false"
+              ;;
+          esac
 
           echo "Artifact: $KEY, Enabled: $INPUT_VAL"
           echo "enabled=$INPUT_VAL" >> $GITHUB_OUTPUT
