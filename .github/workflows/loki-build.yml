@@ -18,7 +18,7 @@ on:
 
 env:
   UPSTREAM_REPO: unmojang/Loki
-  UPSTREAM_REF: main
+  UPSTREAM_REF: master
 
 jobs:
   check-update:
