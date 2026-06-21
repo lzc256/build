@@ -215,7 +215,27 @@ jobs:
             dpkg-dev \
             ninja-build extra-cmake-modules pkg-config scdoc \
             cmark gamemode-dev libarchive-dev libcmark-dev libqrencode-dev zlib1g-dev \
-            libxcb-cursor-dev libtomlplusplus-dev libvulkan-dev
+            libxcb-cursor-dev libtomlplusplus-dev libvulkan-dev \
+            file desktop-file-utils rpm
+
+      - name: Install AppImage tools (Linux)
+        if: steps.check-enabled.outputs.enabled == 'true' && runner.os == 'Linux'
+        run: |
+          mkdir -p ~/bin
+
+          # Install sharun
+          curl -L "https://github.com/VHSgunzo/sharun/releases/latest/download/sharun-$(uname -m)" -o ~/bin/sharun
+          chmod +x ~/bin/sharun
+
+          # Install mkappimage
+          curl -L "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-$(uname -m).AppImage" -o ~/bin/mkappimage
+          chmod +x ~/bin/mkappimage
+
+          # Install AppImageUpdate for delta updates
+          curl -L "https://github.com/AppImage/AppImageUpdate/releases/latest/download/AppImageUpdate-$(uname -m).AppImage" -o ~/bin/AppImageUpdate.AppImage
+          chmod +x ~/bin/AppImageUpdate.AppImage
+
+          echo "$HOME/bin" >> $GITHUB_PATH
 
       # macOS dependencies
       - name: Install macOS dependencies
@@ -271,14 +291,107 @@ jobs:
           cd fjordlauncher-src
           cmake --build --preset "$CMAKE_PRESET" --config "$BUILD_TYPE"
 
-      # Package - use cmake --install instead of cpack
-      - name: Package (Linux)
+      # Package Linux
+      - name: Setup build variables (Linux)
+        if: steps.check-enabled.outputs.enabled == 'true' && runner.os == 'Linux'
+        run: |
+          APPIMAGE_ARCH="x86_64"
+          echo "APPIMAGE_ARCH=$APPIMAGE_ARCH" >> $GITHUB_ENV
+          echo "DEB_HOST_MULTIARCH=$(dpkg-architecture -q DEB_HOST_MULTIARCH)" >> $GITHUB_ENV
+
+      - name: Package AppImage (Linux)
         if: steps.check-enabled.outputs.enabled == 'true' && runner.os == 'Linux'
         run: |
           cd fjordlauncher-src
-          cmake --install build --config "$BUILD_TYPE" --prefix install
-          cd install
-          tar -czvf ../fjordlauncher-${{ needs.check-update.outputs.upstream_tag }}-Linux-x86_64.tar.gz .
+          cmake --install build --config "$BUILD_TYPE" --prefix install-appdir
+
+          # Bundle dependencies with sharun
+          sharun lib4bin \
+            --hard-links \
+            --with-hooks \
+            --dst-dir install-appdir \
+            install-appdir/bin/* "$QT_PLUGIN_PATH"/*/*.so
+
+          # Copy AppImageUpdate for delta updates
+          cp ~/bin/AppImageUpdate.AppImage install-appdir/bin/
+
+          # Remove gamemode (not portable with DBus)
+          find install-appdir -name '*gamemode*' -exec rm {} +
+
+          # Setup AppImage environment
+          echo "PRISMLAUNCHER_DISABLE_GLVULKAN=1" >> install-appdir/.env
+          echo "QT_QPA_PLATFORMTHEME=xdgdesktopportal" >> install-appdir/.env
+          ln -s share/applications/org.unmojang.FjordLauncher.desktop install-appdir/org.unmojang.FjordLauncher.desktop
+          ln -s share/icons/hicolor/256x256/apps/org.unmojang.FjordLauncher.png install-appdir/org.unmojang.FjordLauncher.png
+          ln -s org.unmojang.FjordLauncher.metainfo.xml install-appdir/share/metainfo/org.unmojang.FjordLauncher.appdata.xml 2>/dev/null || true
+          mv install-appdir/sharun install-appdir/AppRun
+
+          # Create AppImage
+          VERSION="${{ needs.check-update.outputs.upstream_tag }}"
+          mkappimage \
+            --updateinformation "gh-releases-zsync|lzc256|build|latest|fjordlauncher-Linux-x86_64.AppImage.zsync" \
+            install-appdir \
+            fjordlauncher-${VERSION}-Linux-x86_64.AppImage
+
+      - name: Package RPM (Linux)
+        if: steps.check-enabled.outputs.enabled == 'true' && runner.os == 'Linux'
+        run: |
+          cd fjordlauncher-src
+          VERSION="${{ needs.check-update.outputs.upstream_tag }}"
+
+          # Create RPM build directories
+          mkdir -p rpm-build/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
+
+          # Install to a temp directory
+          cmake --install build --config "$BUILD_TYPE" --prefix rpm-build/root
+          cd rpm-build
+
+          # Create spec file
+          cat > SPECS/fjordlauncher.spec << 'EOF'
+          Name:           fjordlauncher
+          Version:        %{version}
+          Release:        1%{?dist}
+          Summary:        FjordLauncher - A custom Minecraft launcher
+
+          License:        GPL-3.0
+          URL:            https://github.com/unmojang/FjordLauncher
+
+          %description
+          FjordLauncher is a custom, open source Minecraft launcher.
+
+          %install
+          rm -rf %{buildroot}
+          cp -a root %{buildroot}/usr
+
+          %files
+          %defattr(-,root,root,-)
+          /usr/*
+          EOF
+
+          # Replace version placeholder
+          sed -i "s/%{version}/$VERSION/g" SPECS/fjordlauncher.spec
+
+          # Build RPM
+          rpmbuild --define "_topdir $(pwd)" -bb SPECS/fjordlauncher.spec
+
+          # Copy to source directory with proper name
+          cp RPMS/x86_64/*.rpm ../fjordlauncher-${VERSION}-Linux-x86_64.rpm
+
+      - name: Upload artifact (Linux AppImage)
+        if: steps.check-enabled.outputs.enabled == 'true' && runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: fjordlauncher-${{ needs.check-update.outputs.upstream_tag }}-Linux-x86_64-AppImage
+          path: fjordlauncher-src/fjordlauncher-${{ needs.check-update.outputs.upstream_tag }}-Linux-x86_64.AppImage
+          retention-days: 30
+
+      - name: Upload artifact (Linux RPM)
+        if: steps.check-enabled.outputs.enabled == 'true' && runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: fjordlauncher-${{ needs.check-update.outputs.upstream_tag }}-Linux-x86_64-RPM
+          path: fjordlauncher-src/fjordlauncher-${{ needs.check-update.outputs.upstream_tag }}-Linux-x86_64.rpm
+          retention-days: 30
 
       - name: Package (macOS)
         if: steps.check-enabled.outputs.enabled == 'true' && runner.os == 'macOS'
@@ -288,22 +401,6 @@ jobs:
           cd install
           zip -r ../fjordlauncher-${{ needs.check-update.outputs.upstream_tag }}-macOS-arm64.zip .
 
-      - name: Package (Windows)
-        if: steps.check-enabled.outputs.enabled == 'true' && runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          cd fjordlauncher-src
-          cmake --install build --config "$BUILD_TYPE" --prefix install
-          Compress-Archive -Path install/* -DestinationPath fjordlauncher-${{ needs.check-update.outputs.upstream_tag }}-Windows-MSVC-x86_64.zip
-
-      - name: Upload artifact (Linux)
-        if: steps.check-enabled.outputs.enabled == 'true' && runner.os == 'Linux'
-        uses: actions/upload-artifact@v4
-        with:
-          name: fjordlauncher-${{ needs.check-update.outputs.upstream_tag }}-Linux-x86_64
-          path: fjordlauncher-src/fjordlauncher-${{ needs.check-update.outputs.upstream_tag }}-Linux-x86_64.tar.gz
-          retention-days: 30
-
       - name: Upload artifact (macOS)
         if: steps.check-enabled.outputs.enabled == 'true' && runner.os == 'macOS'
         uses: actions/upload-artifact@v4
@@ -311,6 +408,14 @@ jobs:
           name: fjordlauncher-${{ needs.check-update.outputs.upstream_tag }}-macOS-arm64
           path: fjordlauncher-src/fjordlauncher-${{ needs.check-update.outputs.upstream_tag }}-macOS-arm64.zip
           retention-days: 30
+
+      - name: Package (Windows)
+        if: steps.check-enabled.outputs.enabled == 'true' && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cd fjordlauncher-src
+          cmake --install build --config "$BUILD_TYPE" --prefix install
+          Compress-Archive -Path install/* -DestinationPath fjordlauncher-${{ needs.check-update.outputs.upstream_tag }}-Windows-MSVC-x86_64.zip
 
       - name: Upload artifact (Windows)
         if: steps.check-enabled.outputs.enabled == 'true' && runner.os == 'Windows'
