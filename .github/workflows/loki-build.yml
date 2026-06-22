@@ -7,9 +7,9 @@ on:
         description: 'Upstream ref (tag/branch/commit). Leave empty to use latest release.'
         required: false
       patch:
-        description: 'Patch to apply (debug-trace or no-retransform). Leave empty for debug-trace.'
+        description: 'Patch to apply (debug-trace or no-retransform). Leave empty for no-retransform.'
         required: false
-        default: 'debug-trace'
+        default: 'no-retransform'
   push:
     paths:
       - 'loki/**'
@@ -39,7 +39,7 @@ jobs:
 
       - name: Apply patch
         env:
-          PATCH_NAME: ${{ inputs.patch || 'debug-trace' }}
+          PATCH_NAME: ${{ inputs.patch || 'no-retransform' }}
         run: |
           source scripts/common.sh
           apply_patch "$PATCH_NAME" loki-src
@@ -74,7 +74,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Loki-${{ steps.version.outputs.version }}-${{ inputs.patch || 'debug-trace' }}
+          name: Loki-${{ steps.version.outputs.version }}-${{ inputs.patch || 'no-retransform' }}
           path: loki-src/build/dist/Loki-*.jar
           retention-days: 30
 
@@ -84,4 +84,4 @@ jobs:
           echo "| Item | Value |"
           echo "|------|-------|"
           echo "| Version | \`${{ steps.version.outputs.version }}\` |"
-          echo "| Patch | \`${{ inputs.patch || 'debug-trace' }}\` |"
+          echo "| Patch | \`${{ inputs.patch || 'no-retransform' }}\` |"

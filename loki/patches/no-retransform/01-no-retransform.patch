@@ -1,24 +1,24 @@
-From 81b6966d34bbae915cb64e6b622e5102c03c4be8 Mon Sep 17 00:00:00 2001
+From ecd7ebc99c168aa32844a425bf496df3f3769558 Mon Sep 17 00:00:00 2001
 From: lzc256 <i@lzc256.com>
-Date: Sun, 21 Jun 2026 19:36:06 +0800
-Subject: [PATCH] Add no_retransform option for Android SIGSEGV fix
+Date: Mon, 22 Jun 2026 13:49:57 +0800
+Subject: [PATCH] Add no_retransform option to bypass Android SIGSEGV crash
 
 ---
  doc/configuration.md                          |  5 +++
- doc/troubleshooting.md                        | 30 ++++++++++++++
+ doc/troubleshooting.md                        | 31 +++++++++++++++
  src/main/java/org/unmojang/loki/Loki.java     | 39 ++++++++++++++-----
- src/main/java/org/unmojang/loki/LokiUtil.java |  6 ++-
- 4 files changed, 69 insertions(+), 11 deletions(-)
+ src/main/java/org/unmojang/loki/LokiUtil.java | 19 ++++++---
+ 4 files changed, 79 insertions(+), 15 deletions(-)
 
 diff --git a/doc/configuration.md b/doc/configuration.md
-index 2c8e904..20b0453 100644
+index 2c8e904..44d0f9f 100644
 --- a/doc/configuration.md
 +++ b/doc/configuration.md
 @@ -29,6 +29,11 @@ Loki supports JVM arguments to enable or disable some behaviour.
    -DLoki.disable_factory=true
    ```
  
-+- Disable retransformation of already-loaded classes (for Android/non-standard JVMs, see [troubleshooting](troubleshooting.md#android-crash))
++- Disable retransformation of already-loaded classes and appendToBootstrapClassLoaderSearch (for Android/non-standard JVMs, see [troubleshooting](troubleshooting.md#android-crash))
 +  ```
 +  -DLoki.no_retransform=true
 +  ```
@@ -27,10 +27,10 @@ index 2c8e904..20b0453 100644
    ```
    -DLoki.disable_profile_lookup=true
 diff --git a/doc/troubleshooting.md b/doc/troubleshooting.md
-index eb35701..2c9de24 100644
+index eb35701..057995b 100644
 --- a/doc/troubleshooting.md
 +++ b/doc/troubleshooting.md
-@@ -7,6 +7,36 @@ Whenever anyone from a different API server talks in chat, fallback API server p
+@@ -7,6 +7,37 @@ Whenever anyone from a different API server talks in chat, fallback API server p
  
  ## My game immediately crashed!
  
@@ -42,7 +42,7 @@ index eb35701..2c9de24 100644
 +# C  [libinstrument.so+0x...]
 +```
 +
-+then the JVM's class retransformation implementation has crashed. This is a known issue
++then the JVM's instrumentation implementation has crashed. This is a known issue
 +with Android-based JVMs (ZalithLauncher2, PojavLauncher, etc.) on aarch64. To work around
 +this, add the following JVM argument:
 +
@@ -50,7 +50,8 @@ index eb35701..2c9de24 100644
 +-DLoki.no_retransform=true
 +```
 +
-+This disables retransformation of already-loaded classes. The following features will not
++This disables retransformation of already-loaded classes and skips
++appendToBootstrapClassLoaderSearch(). The following features will not
 +apply to classes that were already loaded before Loki started:
 +
 +- **Authlib-Injector killer** -- authlib-injector classes already loaded will not be
@@ -140,15 +141,23 @@ index ffc0c25..47d52b5 100644
      }
  }
 diff --git a/src/main/java/org/unmojang/loki/LokiUtil.java b/src/main/java/org/unmojang/loki/LokiUtil.java
-index fcbe4cc..9f0cd6d 100644
+index fcbe4cc..7415db4 100644
 --- a/src/main/java/org/unmojang/loki/LokiUtil.java
 +++ b/src/main/java/org/unmojang/loki/LokiUtil.java
-@@ -372,7 +372,11 @@ public class LokiUtil {
+@@ -353,6 +353,7 @@ public class LokiUtil {
+     private static void hookFutureClassLoaders(Instrumentation inst, File jarFile) throws Exception {
+         final URL jarUrl = jarFile.toURI().toURL();
+         final Map<ClassLoader, Boolean> injectedLoaders = new ConcurrentHashMap<ClassLoader, Boolean>();
++        final boolean isNoRetransform = Loki.no_retransform;
+         ClassFileTransformer injector = new ClassFileTransformer() {
+             public byte[] transform(ClassLoader loader, String name, Class<?> c, ProtectionDomain pd, byte[] bytes) {
+                 if (loader == null || injectedLoaders.containsKey(loader)) return null;
+@@ -372,7 +373,11 @@ public class LokiUtil {
              }
          };
  
 -        addRetransformTransformer(injector, inst);
-+        if (Loki.no_retransform) {
++        if (isNoRetransform) {
 +            inst.addTransformer(injector);
 +        } else {
 +            addRetransformTransformer(injector, inst);
@@ -156,6 +165,25 @@ index fcbe4cc..9f0cd6d 100644
      }
  
      private static void pinHookClasses() {
+@@ -435,10 +440,14 @@ public class LokiUtil {
+             // appending to bootstrap class loader seems to only be necessary on Java 9+ and causes IllegalAccessErrors
+             // on Java 8 and below.
+             if (JAVA_MAJOR > 8) {
+-                try {
+-                    Method m = Instrumentation.class.getMethod("appendToBootstrapClassLoaderSearch", JarFile.class);
+-                    m.invoke(inst, new JarFile(tmpJar));
+-                } catch (NoSuchMethodException ignored) {}
++                if (!Loki.no_retransform) {
++                    try {
++                        Method m = Instrumentation.class.getMethod("appendToBootstrapClassLoaderSearch", JarFile.class);
++                        m.invoke(inst, new JarFile(tmpJar));
++                    } catch (NoSuchMethodException ignored) {}
++                } else {
++                    Loki.log.debug("Skipped appendToBootstrapClassLoaderSearch (no_retransform=true)");
++                }
+             }
+             hookFutureClassLoaders(inst, tmpJar);
+             Loki.log.debug("Appended hooks to classpath");
 -- 
 2.54.0
 
