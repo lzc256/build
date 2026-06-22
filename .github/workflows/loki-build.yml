@@ -7,9 +7,9 @@ on:
         description: 'Upstream ref (tag/branch/commit). Leave empty to use latest release.'
         required: false
       patch:
-        description: 'Patch to apply (debug-trace, no-retransform, or no-bootstrap-append). Leave empty for no-bootstrap-append.'
+        description: 'Patch to apply (android). Leave empty for android.'
         required: false
-        default: 'no-bootstrap-append'
+        default: 'android'
   push:
     paths:
       - 'loki/**'
@@ -39,7 +39,7 @@ jobs:
 
       - name: Apply patch
         env:
-          PATCH_NAME: ${{ inputs.patch || 'no-bootstrap-append' }}
+          PATCH_NAME: ${{ inputs.patch || 'android' }}
         run: |
           source scripts/common.sh
           apply_patch "$PATCH_NAME" loki-src
@@ -74,7 +74,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Loki-${{ steps.version.outputs.version }}-${{ inputs.patch || 'no-bootstrap-append' }}
+          name: Loki-${{ steps.version.outputs.version }}-${{ inputs.patch || 'android' }}
           path: loki-src/build/dist/Loki-*.jar
           retention-days: 30
 
@@ -84,4 +84,4 @@ jobs:
           echo "| Item | Value |"
           echo "|------|-------|"
           echo "| Version | \`${{ steps.version.outputs.version }}\` |"
-          echo "| Patch | \`${{ inputs.patch || 'no-bootstrap-append' }}\` |"
+          echo "| Patch | \`${{ inputs.patch || 'android' }}\` |"
