@@ -70,21 +70,36 @@ jobs:
 
       - name: Build stub libraries
         run: |
-          mkdir -p loki-src/src/main/resources/libpulse_stub/linux-aarch64
-          mkdir -p loki-src/src/main/resources/libudev_stub/linux-aarch64
-          mkdir -p loki-src/src/main/resources/libX11_stub/linux-aarch64
-          mkdir -p loki-src/src/main/resources/libXfixes_stub/linux-aarch64
+          # Create resource directories for all stubs
+          for stub in libpulse libudev libX11 libXfixes libXrandr libXcursor libXcomposite libXdamage; do
+            mkdir -p "loki-src/src/main/resources/${stub}_stub/linux-aarch64"
+          done
 
           STUBS_DIR="loki/patches/stubs"
 
-          for stub in libpulse libudev libX11 libXfixes; do
+          # Map stub names to their soname versions
+          declare -A SONAME_VERSION=(
+            ["libpulse"]=0
+            ["libudev"]=1
+            ["libX11"]=6
+            ["libXfixes"]=3
+            ["libXrandr"]=2
+            ["libXcursor"]=1
+            ["libXcomposite"]=1
+            ["libXdamage"]=1
+          )
+
+          for stub in libpulse libudev libX11 libXfixes libXrandr libXcursor libXcomposite libXdamage; do
             SRC="${STUBS_DIR}/${stub}-stub.c"
             if [ -f "$SRC" ]; then
-              SONAME="${stub}.so.$([[ "$stub" = "libXfixes" ]] && echo 3 || ([[ "$stub" = "libX11" ]] && echo 6 || ([[ "$stub" = "libudev" ]] && echo 1 || echo 0)))"
+              VER="${SONAME_VERSION[$stub]}"
+              SONAME="${stub}.so.${VER}"
               OUT="loki-src/src/main/resources/${stub}_stub/linux-aarch64/${SONAME}"
               echo "Building ${SONAME} stub..."
               aarch64-linux-gnu-gcc -shared -fPIC -Wl,-soname,${SONAME} -o "$OUT" "$SRC"
               file "$OUT"
+            else
+              echo "Warning: ${stub}-stub.c not found, skipping"
             fi
           done
 
