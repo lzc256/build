@@ -1,11 +1,20 @@
 diff --git a/src/main/java/org/unmojang/loki/Loki.java b/src/main/java/org/unmojang/loki/Loki.java
-index 172e062..b607e6d 100644
+index ffc0c25..1099ffe 100644
 --- a/src/main/java/org/unmojang/loki/Loki.java
 +++ b/src/main/java/org/unmojang/loki/Loki.java
-@@ -23,6 +23,14 @@ public class Loki {
+@@ -10,6 +10,7 @@ public class Loki {
+ 
+     public static final Boolean chat_restrictions =  Boolean.getBoolean("Loki.chat_restrictions");
+     public static Boolean disable_factory = Boolean.getBoolean("Loki.disable_factory");
++    public static final Boolean android = Boolean.getBoolean("Loki.android");
+     public static final Boolean disable_profile_lookup = Boolean.getBoolean("Loki.disable_profile_lookup");
+     public static final Boolean enable_patchy =  Boolean.getBoolean("Loki.enable_patchy");
+     public static final Boolean enable_snooper =  Boolean.getBoolean("Loki.enable_snooper");
+@@ -21,19 +22,36 @@ public class Loki {
+ 
      public static void premain(String agentArgs, Instrumentation inst) {
          log.info("Hello Loki " + Loki.class.getPackage().getImplementationVersion() + " World!");
-         if (android) log.info("[android] Loki.android=true: Android compat mode enabled");
++        if (android) log.info("[android] Loki.android=true: Android compat mode enabled");
 +
 +        // Extract and load native stubs for WebRTC on Android
 +        // libwebrtc-java-linux-aarch64.so has DT_NEEDED for libpulse.so.0, libudev.so.1, libX11.so.6, libXfixes.so.3,
@@ -14,14 +23,134 @@ index 172e062..b607e6d 100644
 +        if (android) {
 +            LokiUtil.extractNativeStubs();
 +        }
-         log.debug("[TRACE] premain: calling earlyInit");
++        log.debug("[TRACE] premain: calling earlyInit");
          LokiUtil.earlyInit(agentArgs, inst);
-         log.debug("[TRACE] premain: earlyInit returned");
++        log.debug("[TRACE] premain: earlyInit returned");
+ 
+         // Kill Loki alternatives so that Loki won't break
++        log.debug("[TRACE] premain: registering LokiAlternativesTransformer (addRetransformTransformer)");
+         LokiUtil.addRetransformTransformer(new LokiAlternativesTransformer(), inst);
++        log.debug("[TRACE] premain: LokiAlternativesTransformer registered, calling retransformClasses for authlib-injector");
+         LokiUtil.retransformClass("moe.yushi.authlibinjector.Premain", inst);
+         LokiUtil.retransformClass("moe.yushi.authlibinjector.javaagent.AuthlibInjectorPremain", inst);
+         LokiUtil.retransformClass("org.to2mbn.authlibinjector.javaagent.AuthlibInjectorPremain", inst);
+         LokiUtil.retransformClass("moe.yushi.authlibinjector.transform.ClassTransformer", inst);
+         LokiUtil.retransformClass("org.to2mbn.authlibinjector.transform.ClassTransformer", inst);
++        log.debug("[TRACE] premain: authlib-injector retransforms done");
+ 
+         // Authentication & skins/capes
++        log.debug("[TRACE] premain: calling RequestInterceptor.setURLFactory");
+         RequestInterceptor.setURLFactory();
++        log.debug("[TRACE] premain: setURLFactory done, registering YggdrasilURLTransformer");
+         inst.addTransformer(new YggdrasilURLTransformer()); // Transform Yggdrasil URL strings
++        log.debug("[TRACE] premain: YggdrasilURLTransformer registered");
+         inst.addTransformer(new AppletParameterTransformer()); // Fetch mppass for classic multiplayer
+ 
+         // Textures
+@@ -76,18 +94,31 @@ public class Loki {
+         inst.addTransformer(new MCAuthlibGameProfileTransformer()); // Primarily for MojangFix
+         inst.addTransformer(new ReIndevGetSkinTransformer()); // Fix a bug in ReIndev's ThreadGetSkin
+         inst.addTransformer(new MCOSEMultiplayerTransformer()); // Propagate Loki into MCOSE server subprocess
++        log.debug("[TRACE] premain: registering SetURLFactoryTransformer (addRetransformTransformer)");
+         LokiUtil.addRetransformTransformer(new SetURLFactoryTransformer(), inst); // Fix 1.13-1.16 Forge, LegacyFix agent
++        log.debug("[TRACE] premain: SetURLFactoryTransformer registered, retransforming LegacyFixLauncher");
+         LokiUtil.retransformClass("uk.betacraft.legacyfix.LegacyFixLauncher", inst);
++        log.debug("[TRACE] premain: LegacyFixLauncher retransform done");
+         inst.addTransformer(new TitleScreenTransformer()); // Server brand on title screen for 26.1+
+ 
+         // Intercept OptiFine capes to prevent collisions, for whatever reason it isn't caught by Loki's URL factory
+         inst.addTransformer(new OptiFineCapeTransformer());
+ 
+         // Block some DNS lookups
++        log.debug("[TRACE] premain: registering InetAddressTransformer (addRetransformTransformer)");
+         LokiUtil.addRetransformTransformer(new InetAddressTransformer(), inst);
++        log.debug("[TRACE] premain: InetAddressTransformer registered, retransforming java.net.InetAddress");
+         LokiUtil.retransformClass("java.net.InetAddress", inst);
++        log.debug("[TRACE] premain: InetAddress retransform done");
+ 
+         // Apply 1.21.9+ fixes
+         LokiUtil.apply1219Fixes();
++        log.debug("[TRACE] premain: all done, premain returning");
++
++        if (android) {
++            log.warn("[android] Android compat mode is enabled.");
++            log.warn("[android] appendToBootstrapClassLoaderSearch is skipped.");
++            log.warn("[android] Hook classes are injected via hookFutureClassLoaders only.");
++        }
+     }
+ }
 diff --git a/src/main/java/org/unmojang/loki/LokiUtil.java b/src/main/java/org/unmojang/loki/LokiUtil.java
-index ec87a08..3057daa 100644
+index fcbe4cc..781c67c 100644
 --- a/src/main/java/org/unmojang/loki/LokiUtil.java
 +++ b/src/main/java/org/unmojang/loki/LokiUtil.java
-@@ -600,4 +600,92 @@ public class LokiUtil {
+@@ -401,6 +401,7 @@ public class LokiUtil {
+ 
+     private static void appendHooksToClasspath(Instrumentation inst) {
+         try {
++            Loki.log.debug("[TRACE] appendHooksToClasspath: starting");
+             File agentJar = new File(LokiUtil.class.getProtectionDomain().getCodeSource().getLocation().toURI());
+             if (!agentJar.exists()) throw new RuntimeException("Agent JAR not found");
+ 
+@@ -434,12 +435,22 @@ public class LokiUtil {
+ 
+             // appending to bootstrap class loader seems to only be necessary on Java 9+ and causes IllegalAccessErrors
+             // on Java 8 and below.
++            // Android OpenJDK on aarch64 crashes with SIGSEGV in libinstrument.so when
++            // appendToBootstrapClassLoaderSearch is called. When Loki.android=true, skip it;
++            // hookFutureClassLoaders provides an alternative mechanism for injecting hook classes.
+             if (JAVA_MAJOR > 8) {
+-                try {
+-                    Method m = Instrumentation.class.getMethod("appendToBootstrapClassLoaderSearch", JarFile.class);
+-                    m.invoke(inst, new JarFile(tmpJar));
+-                } catch (NoSuchMethodException ignored) {}
++                if (!Loki.android) {
++                    Loki.log.debug("[TRACE] appendHooksToClasspath: calling appendToBootstrapClassLoaderSearch");
++                    try {
++                        Method m = Instrumentation.class.getMethod("appendToBootstrapClassLoaderSearch", JarFile.class);
++                        m.invoke(inst, new JarFile(tmpJar));
++                    } catch (NoSuchMethodException ignored) {}
++                    Loki.log.debug("[TRACE] appendHooksToClasspath: appendToBootstrapClassLoaderSearch done");
++                } else {
++                    Loki.log.debug("[android] Skipped appendToBootstrapClassLoaderSearch (Loki.android=true)");
++                }
+             }
++            Loki.log.debug("[TRACE] appendHooksToClasspath: calling hookFutureClassLoaders");
+             hookFutureClassLoaders(inst, tmpJar);
+             Loki.log.debug("Appended hooks to classpath");
+         } catch (Exception e) {
+@@ -474,6 +485,7 @@ public class LokiUtil {
+     }
+ 
+     public static void earlyInit(String agentArgs, Instrumentation inst) {
++        Loki.log.debug("[TRACE] earlyInit: checking isRetransformSupported");
+         if (!isRetransformSupported(inst)) {
+             if (JAVA_MAJOR > 5) { // Causes more problems on Java 9+, and we shouldn't encounter this anyway
+                 Loki.log.error("RETRANSFORMATION IS NOT SUPPORTED?! EXITING!");
+@@ -489,8 +501,11 @@ public class LokiUtil {
+             // fallback to fix Fabric
+             System.setProperty("fabric.debug.disableClassPathIsolation", "true");
+         }
++        Loki.log.debug("[TRACE] earlyInit: isRetransformSupported check done");
+ 
++        Loki.log.debug("[TRACE] earlyInit: calling initManifestAttributes");
+         initManifestAttributes();
++        Loki.log.debug("[TRACE] earlyInit: initManifestAttributes done");
+ 
+         String[] proxyProps = {"http.proxyHost", "http.proxyPort", "https.proxyHost", "https.proxyPort"};
+         for (String prop : proxyProps) {
+@@ -531,8 +546,11 @@ public class LokiUtil {
+         }
+ 
+         // Pin the hook classes to this classloader before appendHooksToClasspath
++        Loki.log.debug("[TRACE] earlyInit: calling pinHookClasses");
+         pinHookClasses();
++        Loki.log.debug("[TRACE] earlyInit: pinHookClasses done, calling appendHooksToClasspath");
+         appendHooksToClasspath(inst);
++        Loki.log.debug("[TRACE] earlyInit: appendHooksToClasspath done");
+     }
+ 
+     private static int getJavaVersion() {
+@@ -582,4 +600,93 @@ public class LokiUtil {
      public static String getFqmn(String className, String name, String desc) {
          return className.replace('/', '.') + "::" + name + desc;
      }
