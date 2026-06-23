@@ -64,6 +64,7 @@ jobs:
           mkdir -p loki-src/src/main/resources/libpulse_stub/linux-aarch64
           mkdir -p loki-src/src/main/resources/libudev_stub/linux-aarch64
           mkdir -p loki-src/src/main/resources/libX11_stub/linux-aarch64
+          mkdir -p loki-src/src/main/resources/libXfixes_stub/linux-aarch64
 
           # Build libpulse.so.0 stub
           PULSE_SRC="loki/patches/libpulse-stub-workaround/libpulse-stub.c"
@@ -96,6 +97,17 @@ jobs:
               -o loki-src/src/main/resources/libX11_stub/linux-aarch64/libX11.so.6 \
               "$X11_SRC"
             file loki-src/src/main/resources/libX11_stub/linux-aarch64/libX11.so.6
+          fi
+
+          # Build libXfixes.so.3 stub
+          XFIXES_SRC="loki/patches/libpulse-stub-workaround/libXfixes-stub.c"
+          if [ -f "$XFIXES_SRC" ]; then
+            echo "Building libXfixes.so.3 stub"
+            aarch64-linux-gnu-gcc -shared -fPIC \
+              -Wl,-soname,libXfixes.so.3 \
+              -o loki-src/src/main/resources/libXfixes_stub/linux-aarch64/libXfixes.so.3 \
+              "$XFIXES_SRC"
+            file loki-src/src/main/resources/libXfixes_stub/linux-aarch64/libXfixes.so.3
           fi
 
       - name: Setup JDK 8

@@ -1,15 +1,15 @@
-From 848ebd124bc135c96a16f957679fee136ded8031 Mon Sep 17 00:00:00 2001
+From 4b6b82d2e8d66a1d1fc6437a1ecb720e3d3f1c45 Mon Sep 17 00:00:00 2001
 From: lzc256 <i@lzc256.com>
-Date: Tue, 23 Jun 2026 11:42:43 +0800
-Subject: [PATCH] Add native stub extraction for Android WebRTC compat
+Date: Tue, 23 Jun 2026 18:02:19 +0800
+Subject: [PATCH] Add libXfixes.so.3 stub for Android WebRTC
 
 ---
  src/main/java/org/unmojang/loki/Loki.java     |  8 ++
- src/main/java/org/unmojang/loki/LokiUtil.java | 80 +++++++++++++++++++
- 2 files changed, 88 insertions(+)
+ src/main/java/org/unmojang/loki/LokiUtil.java | 81 +++++++++++++++++++
+ 2 files changed, 89 insertions(+)
 
 diff --git a/src/main/java/org/unmojang/loki/Loki.java b/src/main/java/org/unmojang/loki/Loki.java
-index 172e062..46ae911 100644
+index 172e062..bccf578 100644
 --- a/src/main/java/org/unmojang/loki/Loki.java
 +++ b/src/main/java/org/unmojang/loki/Loki.java
 @@ -23,6 +23,14 @@ public class Loki {
@@ -18,7 +18,7 @@ index 172e062..46ae911 100644
          if (android) log.info("[android] Loki.android=true: Android compat mode enabled");
 +
 +        // Extract and load native stubs for WebRTC on Android
-+        // libwebrtc-java-linux-aarch64.so has DT_NEEDED for libpulse.so.0, libudev.so.1, libX11.so.6
++        // libwebrtc-java-linux-aarch64.so has DT_NEEDED for libpulse.so.0, libudev.so.1, libX11.so.6, libXfixes.so.3
 +        // which don't exist on Android. These stubs satisfy the linker so data-channel works.
 +        if (android) {
 +            LokiUtil.extractNativeStubs();
@@ -28,10 +28,10 @@ index 172e062..46ae911 100644
          LokiUtil.earlyInit(agentArgs, inst);
          log.debug("[TRACE] premain: earlyInit returned");
 diff --git a/src/main/java/org/unmojang/loki/LokiUtil.java b/src/main/java/org/unmojang/loki/LokiUtil.java
-index ec87a08..2475d5b 100644
+index ec87a08..3a9cb10 100644
 --- a/src/main/java/org/unmojang/loki/LokiUtil.java
 +++ b/src/main/java/org/unmojang/loki/LokiUtil.java
-@@ -600,4 +600,84 @@ public class LokiUtil {
+@@ -600,4 +600,85 @@ public class LokiUtil {
      public static String getFqmn(String className, String name, String desc) {
          return className.replace('/', '.') + "::" + name + desc;
      }
@@ -40,7 +40,7 @@ index ec87a08..2475d5b 100644
 +     * Extract and load native stub libraries for WebRTC on Android.
 +     *
 +     * Minecraft 26.2+ P2P uses WebRTC data-channel, which depends on
-+     * libpulse.so.0 (PulseAudio), libudev.so.1 and libX11.so.6 at the native library level.
++     * libpulse.so.0 (PulseAudio), libudev.so.1, libX11.so.6 and libXfixes.so.3 at the native library level.
 +     * Android doesn't have these. This extracts stub libraries and loads them
 +     * so dlopen can find them for DT_NEEDED resolution.
 +     *
@@ -64,7 +64,8 @@ index ec87a08..2475d5b 100644
 +        String[] stubs = {
 +            "/libpulse_stub/linux-aarch64/libpulse.so.0",
 +            "/libudev_stub/linux-aarch64/libudev.so.1",
-+            "/libX11_stub/linux-aarch64/libX11.so.6"
++            "/libX11_stub/linux-aarch64/libX11.so.6",
++            "/libXfixes_stub/linux-aarch64/libXfixes.so.3"
 +        };
 +
 +        for (String stubPath : stubs) {
