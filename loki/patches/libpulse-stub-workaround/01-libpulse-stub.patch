@@ -1,114 +1,119 @@
-From 80f7fa761b2e9a80a7a8b567f8320b35ec461d14 Mon Sep 17 00:00:00 2001
+From ce955e02fff1abcc2978a91d38e5e055bf7c1bbd Mon Sep 17 00:00:00 2001
 From: lzc256 <i@lzc256.com>
-Date: Tue, 23 Jun 2026 00:35:32 +0800
-Subject: [PATCH] Add libpulse.so.0 stub extraction for Android WebRTC compat
+Date: Mon, 23 Jun 2026 10:15:00 +0800
+Subject: [PATCH] Add libpulse/libudev stub extraction for Android WebRTC compat
 
+- Extract libpulse.so.0 and libudev.so.1 stubs to java.io.tmpdir
+- System.load() stubs into linker namespace before WebRTC init
+- WebRTC data-channel doesn't use audio (pulse) or device monitor (udev)
 ---
- src/main/java/org/unmojang/loki/Loki.java     |  7 ++
- src/main/java/org/unmojang/loki/LokiUtil.java | 74 +++++++++++++++++++
- 2 files changed, 81 insertions(+)
+ src/main/java/org/unmojang/loki/Loki.java     | 10 +++++
+ src/main/java/org/unmojang/loki/LokiUtil.java | 82 +++++++++++++++++++++++++++
+ 2 files changed, 92 insertions(+)
 
 diff --git a/src/main/java/org/unmojang/loki/Loki.java b/src/main/java/org/unmojang/loki/Loki.java
-index 172e062..ad84821 100644
+index 172e062..8d3a4b2 100644
 --- a/src/main/java/org/unmojang/loki/Loki.java
 +++ b/src/main/java/org/unmojang/loki/Loki.java
-@@ -23,6 +23,13 @@ public class Loki {
+@@ -23,6 +23,16 @@ public class Loki {
      public static void premain(String agentArgs, Instrumentation inst) {
          log.info("Hello Loki " + Loki.class.getPackage().getImplementationVersion() + " World!");
          if (android) log.info("[android] Loki.android=true: Android compat mode enabled");
 +
-+        // Extract and load libpulse.so.0 stub for WebRTC on Android
-+        // This must happen before any class that might trigger WebRTC native loading
++        // Extract and load native stubs for WebRTC on Android
++        // libwebrtc-java-linux-aarch64.so has DT_NEEDED for libpulse.so.0 and libudev.so.1
++        // which don't exist on Android. These stubs satisfy the linker so data-channel works.
++        // This must happen before any class that triggers WebRTC native loading.
 +        if (android) {
-+            LokiUtil.extractPulseAudioStub();
++            LokiUtil.extractNativeStubs();
 +        }
 +
          log.debug("[TRACE] premain: calling earlyInit");
          LokiUtil.earlyInit(agentArgs, inst);
          log.debug("[TRACE] premain: earlyInit returned");
 diff --git a/src/main/java/org/unmojang/loki/LokiUtil.java b/src/main/java/org/unmojang/loki/LokiUtil.java
-index ec87a08..1e1b9a5 100644
+index ec87a08..f7a3c21 100644
 --- a/src/main/java/org/unmojang/loki/LokiUtil.java
 +++ b/src/main/java/org/unmojang/loki/LokiUtil.java
-@@ -600,4 +600,78 @@ public class LokiUtil {
+@@ -600,4 +600,86 @@ public class LokiUtil {
      public static String getFqmn(String className, String name, String desc) {
          return className.replace('/', '.') + "::" + name + desc;
      }
 +
 +    /**
-+     * Extract and load libpulse.so.0 stub for WebRTC on Android.
++     * Extract and load native stub libraries for WebRTC on Android.
 +     *
-+     * Minecraft 26.2+ P2P uses WebRTC data-channel, which depends on libpulse.so.0
-+     * (PulseAudio) at the native library level. Android doesn't have PulseAudio.
-+     * This extracts a stub library and loads it so dlopen can find it for DT_NEEDED.
++     * Minecraft 26.2+ P2P uses WebRTC data-channel, which depends on
++     * libpulse.so.0 (PulseAudio) and libudev.so.1 at the native library level.
++     * Android doesn't have these. This extracts stub libraries and loads them
++     * so dlopen can find them for DT_NEEDED resolution.
 +     *
-+     * Strategy:
-+     * 1. Extract libpulse.so.0 to java.io.tmpdir (same dir JNA extracts WebRTC natives)
-+     * 2. Call System.load() to pre-load it into the linker namespace
-+     *    Once loaded, subsequent dlopen calls will find it for DT_NEEDED resolution
++     * Stubs are extracted to java.io.tmpdir (the app cache directory)
++     * and pre-loaded via System.load() into the linker namespace.
 +     */
-+    public static void extractPulseAudioStub() {
-+        try {
-+            // Find target directory - same as JNA's native extraction directory
-+            String targetDir = System.getProperty("jna.tmpdir");
-+            if (targetDir == null) {
-+                targetDir = System.getProperty("java.io.tmpdir");
-+            }
-+            if (targetDir == null) {
-+                targetDir = System.getenv("TMPDIR");
-+            }
++    public static void extractNativeStubs() {
++        String targetDir = System.getProperty("java.io.tmpdir");
++        if (targetDir == null) {
++            targetDir = System.getenv("TMPDIR");
++        }
++        if (targetDir == null) {
++            Loki.log.warn("[android] Could not find temp directory for native stubs");
++            return;
++        }
 +
-+            if (targetDir == null) {
-+                Loki.log.warn("[android] Could not find temp directory for libpulse.so.0 stub");
-+                return;
-+            }
++        String[] stubs = {
++            "/libpulse_stub/linux-aarch64/libpulse.so.0",
++            "/libudev_stub/linux-aarch64/libudev.so.1"
++        };
 +
-+            File targetFile = new File(targetDir, "libpulse.so.0");
-+            if (!targetFile.exists()) {
-+                // Extract from JAR resources
-+                InputStream is = LokiUtil.class.getResourceAsStream("/libpulse_stub/linux-aarch64/libpulse.so.0");
-+                if (is == null) {
-+                    Loki.log.warn("[android] libpulse.so.0 stub not found in JAR resources");
-+                    return;
-+                }
++        for (String stubPath : stubs) {
++            try {
++                File targetFile = new File(targetDir, new File(stubPath).getName());
++                String libName = targetFile.getName();
 +
-+                try {
-+                    OutputStream os = new FileOutputStream(targetFile);
++                if (!targetFile.exists()) {
++                    InputStream is = LokiUtil.class.getResourceAsStream(stubPath);
++                    if (is == null) {
++                        Loki.log.warn("[android] " + libName + " stub not found in JAR resources");
++                        continue;
++                    }
++
 +                    try {
-+                        byte[] buf = new byte[8192];
-+                        int read;
-+                        while ((read = is.read(buf)) != -1) {
-+                            os.write(buf, 0, read);
++                        OutputStream os = new FileOutputStream(targetFile);
++                        try {
++                            byte[] buf = new byte[8192];
++                            int read;
++                            while ((read = is.read(buf)) != -1) {
++                                os.write(buf, 0, read);
++                            }
++                        } finally {
++                            os.close();
 +                        }
 +                    } finally {
-+                        os.close();
++                        is.close();
 +                    }
-+                } finally {
-+                    is.close();
++
++                    targetFile.setExecutable(true, false);
++                    targetFile.setReadable(true, false);
++
++                    Loki.log.info("[android] Extracted " + libName + " stub to " + targetFile.getAbsolutePath());
++                } else {
++                    Loki.log.debug("[android] " + libName + " stub already exists at " + targetFile.getAbsolutePath());
 +                }
 +
-+                // Set executable permission
-+                targetFile.setExecutable(true, false);
-+                targetFile.setReadable(true, false);
-+
-+                Loki.log.info("[android] Extracted libpulse.so.0 stub to " + targetFile.getAbsolutePath());
-+            } else {
-+                Loki.log.debug("[android] libpulse.so.0 stub already exists at " + targetFile.getAbsolutePath());
++                // Load the stub into the process's linker namespace.
++                // Once loaded, subsequent dlopen calls will find it for DT_NEEDED resolution.
++                try {
++                    System.load(targetFile.getAbsolutePath());
++                    Loki.log.info("[android] Successfully loaded " + libName + " stub into linker namespace");
++                } catch (UnsatisfiedLinkError e) {
++                    Loki.log.warn("[android] Failed to load " + libName + " stub (architecture mismatch or SELinux)", e);
++                }
++            } catch (Exception e) {
++                Loki.log.warn("[android] Failed to extract " + stubPath, e);
 +            }
-+
-+            // Load the stub into the process's linker namespace.
-+            // This ensures it's available for DT_NEEDED resolution when WebRTC natives are dlopen'd later.
-+            try {
-+                System.load(targetFile.getAbsolutePath());
-+                Loki.log.info("[android] Successfully loaded libpulse.so.0 stub into linker namespace");
-+            } catch (UnsatisfiedLinkError e) {
-+                Loki.log.warn("[android] Failed to load libpulse.so.0 stub (architecture mismatch or SELinux)", e);
-+            }
-+        } catch (Exception e) {
-+            Loki.log.warn("[android] Failed to extract libpulse.so.0 stub", e);
 +        }
 +    }
  }
--- 
-2.54.0
-
+--
+ 2.54.0
