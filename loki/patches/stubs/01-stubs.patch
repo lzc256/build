@@ -1,15 +1,5 @@
-From 4b6b82d2e8d66a1d1fc6437a1ecb720e3d3f1c45 Mon Sep 17 00:00:00 2001
-From: lzc256 <i@lzc256.com>
-Date: Tue, 23 Jun 2026 18:02:19 +0800
-Subject: [PATCH] Add native stubs for Android WebRTC compatibility
-
----
- src/main/java/org/unmojang/loki/Loki.java     |  8 ++
- src/main/java/org/unmojang/loki/LokiUtil.java | 81 +++++++++++++++++++
- 2 files changed, 89 insertions(+)
-
 diff --git a/src/main/java/org/unmojang/loki/Loki.java b/src/main/java/org/unmojang/loki/Loki.java
-index 172e062..bccf578 100644
+index 172e062..05d7c86 100644
 --- a/src/main/java/org/unmojang/loki/Loki.java
 +++ b/src/main/java/org/unmojang/loki/Loki.java
 @@ -23,6 +23,14 @@ public class Loki {
@@ -24,18 +14,17 @@ index 172e062..bccf578 100644
 +        if (android) {
 +            LokiUtil.extractNativeStubs();
 +        }
-+
          log.debug("[TRACE] premain: calling earlyInit");
          LokiUtil.earlyInit(agentArgs, inst);
          log.debug("[TRACE] premain: earlyInit returned");
 diff --git a/src/main/java/org/unmojang/loki/LokiUtil.java b/src/main/java/org/unmojang/loki/LokiUtil.java
-index ec87a08..3a9cb10 100644
+index ec87a08..f9a4160 100644
 --- a/src/main/java/org/unmojang/loki/LokiUtil.java
 +++ b/src/main/java/org/unmojang/loki/LokiUtil.java
-@@ -600,4 +600,85 @@ public class LokiUtil {
-     public static String getFqmn(String className, String name, String desc) {
+@@ -601,3 +601,91 @@ public class LokiUtil {
          return className.replace('/', '.') + "::" + name + desc;
      }
+ }
 +
 +    /**
 +     * Extract and load native stub libraries for WebRTC on Android.
@@ -123,7 +112,4 @@ index ec87a08..3a9cb10 100644
 +            }
 +        }
 +    }
- }
--- 
-2.54.0
-
++}
