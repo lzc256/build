@@ -1,7 +1,7 @@
 From 4b6b82d2e8d66a1d1fc6437a1ecb720e3d3f1c45 Mon Sep 17 00:00:00 2001
 From: lzc256 <i@lzc256.com>
 Date: Tue, 23 Jun 2026 18:02:19 +0800
-Subject: [PATCH] Add libXfixes.so.3 stub for Android WebRTC
+Subject: [PATCH] Add native stubs for Android WebRTC compatibility
 
 ---
  src/main/java/org/unmojang/loki/Loki.java     |  8 ++

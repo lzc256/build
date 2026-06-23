@@ -7,9 +7,9 @@ on:
         description: 'Upstream ref (tag/branch/commit). Leave empty to use latest release.'
         required: false
       patch:
-        description: 'Patch to apply: android, libpulse-stub-workaround (includes android). Leave empty for android.'
+        description: 'Patch to apply: android, stubs, or all. Leave empty for all.'
         required: false
-        default: 'android'
+        default: 'all'
   push:
     paths:
       - 'loki/**'
@@ -39,76 +39,54 @@ jobs:
 
       - name: Apply patch
         env:
-          PATCH_NAME: ${{ inputs.patch || 'android' }}
+          PATCH_NAME: ${{ inputs.patch || 'all' }}
         run: |
           source scripts/common.sh
 
-          # libpulse-stub-workaround depends on android patch
-          # Apply android first, then libpulse-stub-workaround
-          if [ "$PATCH_NAME" = "libpulse-stub-workaround" ]; then
-            echo "Applying android patch first (dependency)..."
-            apply_patch "android" loki-src
-            echo "Applying libpulse-stub-workaround patch..."
-            apply_patch "libpulse-stub-workaround" loki-src
-          else
-            apply_patch "$PATCH_NAME" loki-src
-          fi
+          case "$PATCH_NAME" in
+            all)
+              echo "Applying all patches..."
+              apply_all_patches loki loki-src
+              ;;
+            android|stubs)
+              # stubs depends on android, apply both
+              if [ "$PATCH_NAME" = "stubs" ]; then
+                echo "Applying android patch (dependency)..."
+                apply_patch "android" loki-src
+              fi
+              echo "Applying $PATCH_NAME patch..."
+              apply_patch "$PATCH_NAME" loki-src
+              ;;
+            *)
+              echo "Unknown patch: $PATCH_NAME"
+              exit 1
+              ;;
+          esac
 
-      - name: Install cross-compiler for libpulse stub
+      - name: Install cross-compiler for stubs
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu
 
-      - name: Build libpulse.so.0 stub (for libpulse-stub-workaround)
+      - name: Build stub libraries
         run: |
           mkdir -p loki-src/src/main/resources/libpulse_stub/linux-aarch64
           mkdir -p loki-src/src/main/resources/libudev_stub/linux-aarch64
           mkdir -p loki-src/src/main/resources/libX11_stub/linux-aarch64
           mkdir -p loki-src/src/main/resources/libXfixes_stub/linux-aarch64
 
-          # Build libpulse.so.0 stub
-          PULSE_SRC="loki/patches/libpulse-stub-workaround/libpulse-stub.c"
-          if [ -f "$PULSE_SRC" ]; then
-            echo "Building libpulse.so.0 stub"
-            aarch64-linux-gnu-gcc -shared -fPIC \
-              -Wl,-soname,libpulse.so.0 \
-              -o loki-src/src/main/resources/libpulse_stub/linux-aarch64/libpulse.so.0 \
-              "$PULSE_SRC"
-            file loki-src/src/main/resources/libpulse_stub/linux-aarch64/libpulse.so.0
-          fi
+          STUBS_DIR="loki/patches/stubs"
 
-          # Build libudev.so.1 stub
-          UDEV_SRC="loki/patches/libpulse-stub-workaround/libudev-stub.c"
-          if [ -f "$UDEV_SRC" ]; then
-            echo "Building libudev.so.1 stub"
-            aarch64-linux-gnu-gcc -shared -fPIC \
-              -Wl,-soname,libudev.so.1 \
-              -o loki-src/src/main/resources/libudev_stub/linux-aarch64/libudev.so.1 \
-              "$UDEV_SRC"
-            file loki-src/src/main/resources/libudev_stub/linux-aarch64/libudev.so.1
-          fi
-
-          # Build libX11.so.6 stub
-          X11_SRC="loki/patches/libpulse-stub-workaround/libX11-stub.c"
-          if [ -f "$X11_SRC" ]; then
-            echo "Building libX11.so.6 stub"
-            aarch64-linux-gnu-gcc -shared -fPIC \
-              -Wl,-soname,libX11.so.6 \
-              -o loki-src/src/main/resources/libX11_stub/linux-aarch64/libX11.so.6 \
-              "$X11_SRC"
-            file loki-src/src/main/resources/libX11_stub/linux-aarch64/libX11.so.6
-          fi
-
-          # Build libXfixes.so.3 stub
-          XFIXES_SRC="loki/patches/libpulse-stub-workaround/libXfixes-stub.c"
-          if [ -f "$XFIXES_SRC" ]; then
-            echo "Building libXfixes.so.3 stub"
-            aarch64-linux-gnu-gcc -shared -fPIC \
-              -Wl,-soname,libXfixes.so.3 \
-              -o loki-src/src/main/resources/libXfixes_stub/linux-aarch64/libXfixes.so.3 \
-              "$XFIXES_SRC"
-            file loki-src/src/main/resources/libXfixes_stub/linux-aarch64/libXfixes.so.3
-          fi
+          for stub in libpulse libudev libX11 libXfixes; do
+            SRC="${STUBS_DIR}/${stub}-stub.c"
+            if [ -f "$SRC" ]; then
+              SONAME="${stub}.so.$([[ "$stub" = "libXfixes" ]] && echo 3 || ([[ "$stub" = "libX11" ]] && echo 6 || ([[ "$stub" = "libudev" ]] && echo 1 || echo 0)))"
+              OUT="loki-src/src/main/resources/${stub}_stub/linux-aarch64/${SONAME}"
+              echo "Building ${SONAME} stub..."
+              aarch64-linux-gnu-gcc -shared -fPIC -Wl,-soname,${SONAME} -o "$OUT" "$SRC"
+              file "$OUT"
+            fi
+          done
 
       - name: Setup JDK 8
         uses: actions/setup-java@v4
@@ -140,7 +118,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Loki-${{ steps.version.outputs.version }}-${{ inputs.patch || 'android' }}
+          name: Loki-${{ steps.version.outputs.version }}-${{ inputs.patch || 'all' }}
           path: loki-src/build/dist/Loki-*.jar
           retention-days: 30
 
@@ -150,4 +128,4 @@ jobs:
           echo "| Item | Value |"
           echo "|------|-------|"
           echo "| Version | \`${{ steps.version.outputs.version }}\` |"
-          echo "| Patch | \`${{ inputs.patch || 'android' }}\` |"
+          echo "| Patch | \`${{ inputs.patch || 'all' }}\` |"
