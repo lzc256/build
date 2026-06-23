@@ -63,31 +63,39 @@ jobs:
         run: |
           mkdir -p loki-src/src/main/resources/libpulse_stub/linux-aarch64
           mkdir -p loki-src/src/main/resources/libudev_stub/linux-aarch64
+          mkdir -p loki-src/src/main/resources/libX11_stub/linux-aarch64
 
           # Build libpulse.so.0 stub
           PULSE_SRC="loki/patches/libpulse-stub-workaround/libpulse-stub.c"
           if [ -f "$PULSE_SRC" ]; then
-            echo "Building libpulse.so.0 stub from $PULSE_SRC"
+            echo "Building libpulse.so.0 stub"
             aarch64-linux-gnu-gcc -shared -fPIC \
               -Wl,-soname,libpulse.so.0 \
               -o loki-src/src/main/resources/libpulse_stub/linux-aarch64/libpulse.so.0 \
               "$PULSE_SRC"
             file loki-src/src/main/resources/libpulse_stub/linux-aarch64/libpulse.so.0
-          else
-            echo "No libpulse-stub.c found, skipping"
           fi
 
           # Build libudev.so.1 stub
           UDEV_SRC="loki/patches/libpulse-stub-workaround/libudev-stub.c"
           if [ -f "$UDEV_SRC" ]; then
-            echo "Building libudev.so.1 stub from $UDEV_SRC"
+            echo "Building libudev.so.1 stub"
             aarch64-linux-gnu-gcc -shared -fPIC \
               -Wl,-soname,libudev.so.1 \
               -o loki-src/src/main/resources/libudev_stub/linux-aarch64/libudev.so.1 \
               "$UDEV_SRC"
             file loki-src/src/main/resources/libudev_stub/linux-aarch64/libudev.so.1
-          else
-            echo "No libudev-stub.c found, skipping"
+          fi
+
+          # Build libX11.so.6 stub
+          X11_SRC="loki/patches/libpulse-stub-workaround/libX11-stub.c"
+          if [ -f "$X11_SRC" ]; then
+            echo "Building libX11.so.6 stub"
+            aarch64-linux-gnu-gcc -shared -fPIC \
+              -Wl,-soname,libX11.so.6 \
+              -o loki-src/src/main/resources/libX11_stub/linux-aarch64/libX11.so.6 \
+              "$X11_SRC"
+            file loki-src/src/main/resources/libX11_stub/linux-aarch64/libX11.so.6
           fi
 
       - name: Setup JDK 8

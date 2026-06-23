@@ -1,13 +1,12 @@
 From 3c0d3344a8a2038581d9245770135a6c9b9ab5d3 Mon Sep 17 00:00:00 2001
 From: lzc256 <i@lzc256.com>
 Date: Tue, 23 Jun 2026 10:10:40 +0800
-Subject: [PATCH] Add libpulse/libudev stub extraction for Android WebRTC
- compat
+Subject: [PATCH] Add native stub extraction for Android WebRTC compat
 
 ---
- src/main/java/org/unmojang/loki/Loki.java     |  8 ++
- src/main/java/org/unmojang/loki/LokiUtil.java | 79 +++++++++++++++++++
- 2 files changed, 87 insertions(+)
+ src/main/java/org/unmojang/loki/Loki.java     |  8 +++
+ src/main/java/org/unmojang/loki/LokiUtil.java | 81 +++++++++++++++++++
+ 2 files changed, 89 insertions(+)
 
 diff --git a/src/main/java/org/unmojang/loki/Loki.java b/src/main/java/org/unmojang/loki/Loki.java
 index 172e062..1015aa1 100644
@@ -19,7 +18,7 @@ index 172e062..1015aa1 100644
          if (android) log.info("[android] Loki.android=true: Android compat mode enabled");
 +
 +        // Extract and load native stubs for WebRTC on Android
-+        // libwebrtc-java-linux-aarch64.so has DT_NEEDED for libpulse.so.0 and libudev.so.1
++        // libwebrtc-java-linux-aarch64.so has DT_NEEDED for libpulse.so.0, libudev.so.1, libX11.so.6
 +        // which don't exist on Android. These stubs satisfy the linker so data-channel works.
 +        if (android) {
 +            LokiUtil.extractNativeStubs();
@@ -41,7 +40,7 @@ index ec87a08..745fa12 100644
 +     * Extract and load native stub libraries for WebRTC on Android.
 +     *
 +     * Minecraft 26.2+ P2P uses WebRTC data-channel, which depends on
-+     * libpulse.so.0 (PulseAudio) and libudev.so.1 at the native library level.
++     * libpulse.so.0 (PulseAudio), libudev.so.1 and libX11.so.6 at the native library level.
 +     * Android doesn't have these. This extracts stub libraries and loads them
 +     * so dlopen can find them for DT_NEEDED resolution.
 +     *
@@ -64,7 +63,8 @@ index ec87a08..745fa12 100644
 +
 +        String[] stubs = {
 +            "/libpulse_stub/linux-aarch64/libpulse.so.0",
-+            "/libudev_stub/linux-aarch64/libudev.so.1"
++            "/libudev_stub/linux-aarch64/libudev.so.1",
++            "/libX11_stub/linux-aarch64/libX11.so.6"
 +        };
 +
 +        for (String stubPath : stubs) {
