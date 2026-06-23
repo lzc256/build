@@ -66,7 +66,7 @@ jobs:
       - name: Install cross-compiler for stubs
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
 
       - name: Build stub libraries
         run: |
