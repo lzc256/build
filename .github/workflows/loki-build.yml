@@ -96,6 +96,11 @@ jobs:
             ["libstdc++"]="aarch64-linux-gnu-g++"
           )
 
+          # Map stub names to additional compiler flags
+          declare -A CFLAGS_EXTRA=(
+            ["libstdc++"]="-nostdlib"
+          )
+
           for stub in libpulse libudev libX11 libXfixes libXrandr libXcursor libXcomposite libXdamage libdbus-1 libstdc++; do
             SRC="${STUBS_DIR}/${stub}-stub.c"
             if [ -f "$SRC" ]; then
@@ -103,8 +108,9 @@ jobs:
               SONAME="${stub}.so.${VER}"
               OUT="loki-src/src/main/resources/${stub}_stub/linux-aarch64/${SONAME}"
               CC="${COMPILER[$stub]:-aarch64-linux-gnu-gcc}"
-              echo "Building ${SONAME} stub with ${CC}..."
-              ${CC} -shared -fPIC -Wl,-soname,${SONAME} -o "$OUT" "$SRC"
+              EXTRA="${CFLAGS_EXTRA[$stub]:-}"
+              echo "Building ${SONAME} stub with ${CC} ${EXTRA}..."
+              ${CC} -shared -fPIC ${EXTRA} -Wl,-soname,${SONAME} -o "$OUT" "$SRC"
               file "$OUT"
             else
               echo "Warning: ${stub}-stub.c not found, skipping"

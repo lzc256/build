@@ -3,14 +3,15 @@
  * libwebrtc-native has DT_NEEDED: libstdc++.so.6.
  * Android uses libc++ instead. This stub satisfies the linker.
  *
+ * IMPORTANT: This must be compiled with -nostdlib to avoid glibc dependency.
+ * Android uses Bionic (libc.so), not glibc (libc.so.6).
+ *
  * Build:
- *   aarch64-linux-gnu-g++ -shared -fPIC -Wl,-soname,libstdc++.so.6 \
+ *   aarch64-linux-gnu-g++ -shared -fPIC -nostdlib -Wl,-soname,libstdc++.so.6 \
  *     -o libstdc++.so.6 libstdc++-stub.c
  */
 
-#include <stddef.h>
 #include <stdint.h>
-#include <stdlib.h>
 
 /* Exception handling - minimal stubs */
 void __cxa_throw(void* thrown_exception, void* type_info, void (*dest)(void*)) {
@@ -28,13 +29,19 @@ void __cxa_rethrow(void) {
     for (;;) {}
 }
 
-void* __cxa_allocate_exception(size_t size) {
-    return malloc(size);
+void* __cxa_allocate_exception(unsigned long size) {
+    /* Simple bump allocator using stack - good enough for stub */
+    static char buf[4096];
+    static unsigned long offset = 0;
+    if (offset + size < sizeof(buf)) {
+        void* p = buf + offset;
+        offset += (size + 15) & ~15;  /* align to 16 */
+        return p;
+    }
+    return (void*)0;
 }
 
-void __cxa_free_exception(void* ptr) {
-    free(ptr);
-}
+void __cxa_free_exception(void* ptr) {}
 
 void* __cxa_get_exception_ptr(void* exc_obj) {
     return exc_obj;
@@ -54,13 +61,13 @@ void __cxa_pure_virtual(void) {}
 void __cxa_deleted_virtual(void) {}
 
 /* Guard variables for static initialization */
-int __cxa_guard_acquire(uint64_t* guard) {
+int __cxa_guard_acquire(unsigned long long* guard) {
     return 1;
 }
 
-void __cxa_guard_release(uint64_t* guard) {}
+void __cxa_guard_release(unsigned long long* guard) {}
 
-void __cxa_guard_abort(uint64_t* guard) {}
+void __cxa_guard_abort(unsigned long long* guard) {}
 
 /* Atexit */
 int atexit(void (*func)(void)) {
@@ -71,44 +78,52 @@ int __cxa_atexit(void (*func)(void*), void* arg, void* dso) {
     return 0;
 }
 
-/* String functions - basic stubs */
-void* _Znwm(size_t size) {
-    return malloc(size);  /* operator new(unsigned long) */
+/* operator new/delete - simple bump allocator */
+static char _new_buf[65536];
+static unsigned long _new_offset = 0;
+
+void* _Znwm(unsigned long size) {  /* operator new(unsigned long) */
+    if (_new_offset + size < sizeof(_new_buf)) {
+        void* p = _new_buf + _new_offset;
+        _new_offset += (size + 15) & ~15;  /* align to 16 */
+        return p;
+    }
+    return (void*)0;
 }
 
-void* _Znam(size_t size) {
-    return malloc(size);  /* operator new[](unsigned long) */
+void* _Znam(unsigned long size) {  /* operator new[](unsigned long) */
+    return _Znwm(size);
 }
 
-void _ZdlPv(void* ptr) { free(ptr); }  /* operator delete(void*) */
-void _ZdaPv(void* ptr) { free(ptr); }  /* operator delete[](void*) */
+void _ZdlPv(void* ptr) {}  /* operator delete(void*) - no-op for bump allocator */
+void _ZdaPv(void* ptr) {}  /* operator delete[](void*) */
 
-void* _ZnwmRKSt9nothrow_t(size_t size, void* nothrow) {
-    return malloc(size);
+void* _ZnwmRKSt9nothrow_t(unsigned long size, void* nothrow) {
+    return _Znwm(size);
 }
 
-void* _ZnamRKSt9nothrow_t(size_t size, void* nothrow) {
-    return malloc(size);
+void* _ZnamRKSt9nothrow_t(unsigned long size, void* nothrow) {
+    return _Znam(size);
 }
 
-void _ZdlPvRKSt9nothrow_t(void* ptr, void* nothrow) { free(ptr); }
-void _ZdaPvRKSt9nothrow_t(void* ptr, void* nothrow) { free(ptr); }
+void _ZdlPvRKSt9nothrow_t(void* ptr, void* nothrow) {}
+void _ZdaPvRKSt9nothrow_t(void* ptr, void* nothrow) {}
 
 /* Aligned allocation variants (C++17) */
-void* _ZnwmSt11align_val_t(size_t size, size_t align) {
-    return malloc(size);
+void* _ZnwmSt11align_val_t(unsigned long size, unsigned long align) {
+    return _Znwm(size);
 }
 
-void* _ZnamSt11align_val_t(size_t size, size_t align) {
-    return malloc(size);
+void* _ZnamSt11align_val_t(unsigned long size, unsigned long align) {
+    return _Znam(size);
 }
 
-void _ZdlPvSt11align_val_t(void* ptr, size_t align) { free(ptr); }
-void _ZdaPvSt11align_val_t(void* ptr, size_t align) { free(ptr); }
+void _ZdlPvSt11align_val_t(void* ptr, unsigned long align) {}
+void _ZdaPvSt11align_val_t(void* ptr, unsigned long align) {}
 
 /* Sized delete (C++14) */
-void _ZdlPvm(void* ptr, size_t size) { free(ptr); }
-void _ZdaPvm(void* ptr, size_t size) { free(ptr); }
+void _ZdlPvm(void* ptr, unsigned long size) {}
+void _ZdaPvm(void* ptr, unsigned long size) {}
 
 /* RTTI stubs */
 void* __dynamic_cast(void* ptr, void* from_type, void* to_type, int offset) {
@@ -135,3 +150,16 @@ void _ZSt10unexpectedv(void) {}
 void* __cxa_current_exception_type(void) {
     return 0;
 }
+
+/* Additional C++ ABI symbols that may be needed */
+void* __gxx_personality_v0 = 0;
+
+/* More typeinfo for common types */
+void* _ZTIPi = 0;   /* typeinfo for int* */
+void* _ZTIPd = 0;   /* typeinfo for double* */
+void* _ZTIPKv = 0;  /* typeinfo for void const* */
+
+/* Exception typeinfo */
+void* _ZTVN10__cxxabiv117__class_type_infoE = 0;
+void* _ZTVN10__cxxabiv120__si_class_type_infoE = 0;
+void* _ZTVN10__cxxabiv121__vmi_class_type_infoE = 0;
