@@ -9,7 +9,7 @@ index 172e062..1099ffe 100644
 +
 +        // Extract and load native stubs for WebRTC on Android
 +        // libwebrtc-java-linux-aarch64.so has DT_NEEDED for libpulse.so.0, libudev.so.1, libX11.so.6, libXfixes.so.3,
-+        // libXrandr.so.2, libXcursor.so.1, libXcomposite.so.1, libXdamage.so.1, libdbus-1.so.3, libstdc++.so.6
++        // libXrandr.so.2, libXcursor.so.1, libXcomposite.so.1, libXdamage.so.1, libdbus-1.so.3, libstdc++.so.6, libm.so.6
 +        // which don't exist on Android. These stubs satisfy the linker so data-channel works.
 +        if (android) {
 +            LokiUtil.extractNativeStubs();
@@ -31,7 +31,7 @@ index ec87a08..36766ac 100644
 +     *
 +     * Minecraft 26.2+ P2P uses WebRTC data-channel, which depends on
 +     * libpulse.so.0 (PulseAudio), libudev.so.1, libX11.so.6, libXfixes.so.3,
-+     * libXrandr.so.2, libXcursor.so.1, libXcomposite.so.1, libXdamage.so.1, libdbus-1.so.3, libstdc++.so.6
++     * libXrandr.so.2, libXcursor.so.1, libXcomposite.so.1, libXdamage.so.1, libdbus-1.so.3, libstdc++.so.6, libm.so.6
 +     * at the native library level.
 +     * Android doesn't have these. This extracts stub libraries and loads them
 +     * so dlopen can find them for DT_NEEDED resolution.
@@ -77,7 +77,8 @@ index ec87a08..36766ac 100644
 +            "/libXcomposite_stub/linux-aarch64/libXcomposite.so.1",
 +            "/libXdamage_stub/linux-aarch64/libXdamage.so.1",
 +            "/libdbus-1_stub/linux-aarch64/libdbus-1.so.3",
-+            "/libstdc++_stub/linux-aarch64/libstdc++.so.6"
++            "/libstdc++_stub/linux-aarch64/libstdc++.so.6",
++            "/libm_stub/linux-aarch64/libm.so.6"
 +        };
 +
 +        for (String stubPath : stubs) {
