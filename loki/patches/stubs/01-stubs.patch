@@ -21,7 +21,7 @@ diff --git a/src/main/java/org/unmojang/loki/LokiUtil.java b/src/main/java/org/u
 index ec87a08..781c67c 100644
 --- a/src/main/java/org/unmojang/loki/LokiUtil.java
 +++ b/src/main/java/org/unmojang/loki/LokiUtil.java
-@@ -600,4 +600,93 @@ public class LokiUtil {
+@@ -600,4 +600,107 @@ public class LokiUtil {
      public static String getFqmn(String className, String name, String desc) {
          return className.replace('/', '.') + "::" + name + desc;
      }
@@ -36,21 +36,35 @@ index ec87a08..781c67c 100644
 +     * Android doesn't have these. This extracts stub libraries and loads them
 +     * so dlopen can find them for DT_NEEDED resolution.
 +     *
-+     * Stubs go to jna.tmpdir (same dir JNA extracts WebRTC natives)
-+     * so the linker can find them alongside the loading library.
-+     * System.load() also pre-loads them into the linker namespace.
++     * Stubs go to a dedicated loki_jna_stubs directory (sibling to JNA's tmpdir)
++     * and are always extracted fresh on startup.
++     * System.load() pre-loads them into the linker namespace.
 +     */
 +    public static void extractNativeStubs() {
-+        String targetDir = System.getProperty("jna.tmpdir");
-+        if (targetDir == null) {
-+            targetDir = System.getProperty("java.io.tmpdir");
++        String baseDir = System.getProperty("jna.tmpdir");
++        if (baseDir == null) {
++            baseDir = System.getProperty("java.io.tmpdir");
 +        }
-+        if (targetDir == null) {
-+            targetDir = System.getenv("TMPDIR");
++        if (baseDir == null) {
++            baseDir = System.getenv("TMPDIR");
 +        }
-+        if (targetDir == null) {
++        if (baseDir == null) {
 +            Loki.log.warn("[android] Could not find temp directory for native stubs");
 +            return;
++        }
++
++        // Use dedicated directory for Loki stubs, clear it on startup
++        File stubDir = new File(baseDir, "loki_jna_stubs");
++        if (stubDir.exists()) {
++            // Clear old stubs to ensure we always have the latest version
++            File[] oldFiles = stubDir.listFiles();
++            if (oldFiles != null) {
++                for (File f : oldFiles) {
++                    f.delete();
++                }
++            }
++        } else {
++            stubDir.mkdirs();
 +        }
 +
 +        String[] stubs = {
@@ -68,10 +82,10 @@ index ec87a08..781c67c 100644
 +
 +        for (String stubPath : stubs) {
 +            try {
-+                File targetFile = new File(targetDir, new File(stubPath).getName());
++                File targetFile = new File(stubDir, new File(stubPath).getName());
 +                String libName = targetFile.getName();
 +
-+                // Always extract fresh stub - ensures we have the latest version
++                // Extract fresh stub
 +                InputStream is = LokiUtil.class.getResourceAsStream(stubPath);
 +                if (is == null) {
 +                    Loki.log.warn("[android] " + libName + " stub not found in JAR resources");
