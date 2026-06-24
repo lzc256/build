@@ -1,5 +1,5 @@
 diff --git a/src/main/java/org/unmojang/loki/Loki.java b/src/main/java/org/unmojang/loki/Loki.java
-index 172e062..1099ffe 100644
+index 172e062..3341fa8 100644
 --- a/src/main/java/org/unmojang/loki/Loki.java
 +++ b/src/main/java/org/unmojang/loki/Loki.java
 @@ -23,6 +23,14 @@ public class Loki {
@@ -18,10 +18,10 @@ index 172e062..1099ffe 100644
          LokiUtil.earlyInit(agentArgs, inst);
          log.debug("[TRACE] premain: earlyInit returned");
 diff --git a/src/main/java/org/unmojang/loki/LokiUtil.java b/src/main/java/org/unmojang/loki/LokiUtil.java
-index ec87a08..36766ac 100644
+index ec87a08..b4e0389 100644
 --- a/src/main/java/org/unmojang/loki/LokiUtil.java
 +++ b/src/main/java/org/unmojang/loki/LokiUtil.java
-@@ -600,4 +600,104 @@ public class LokiUtil {
+@@ -600,4 +600,105 @@ public class LokiUtil {
      public static String getFqmn(String className, String name, String desc) {
          return className.replace('/', '.') + "::" + name + desc;
      }
@@ -101,29 +101,29 @@ index ec87a08..36766ac 100644
 +                        while ((read = is.read(buf)) != -1) {
 +                            os.write(buf, 0, read);
 +                        }
-+                    } finally {
-+                        os.close();
-+                    }
-+                } finally {
-+                    is.close();
-+                }
-+
-+                targetFile.setExecutable(true, false);
-+                targetFile.setReadable(true, false);
-+
-+                Loki.log.debug("[android] Extracted " + libName + " stub to " + targetFile.getAbsolutePath());
-+
-+                // Load the stub into the process's linker namespace.
-+                // Once loaded, subsequent dlopen calls will find it for DT_NEEDED resolution.
-+                try {
-+                    System.load(targetFile.getAbsolutePath());
-+                    Loki.log.info("[android] Successfully loaded " + libName + " stub into linker namespace");
-+                } catch (UnsatisfiedLinkError e) {
-+                    Loki.log.warn("[android] Failed to load " + libName + " stub (architecture mismatch or SELinux)", e);
-+                }
-+            } catch (Exception e) {
-+                Loki.log.warn("[android] Failed to extract " + stubPath, e);
-+            }
-+        }
-+    }
+                    } finally {
+                        os.close();
+                    }
+                } finally {
+                    is.close();
+                }
+
+                targetFile.setExecutable(true, false);
+                targetFile.setReadable(true, false);
+
+                Loki.log.debug("[android] Extracted " + libName + " stub to " + targetFile.getAbsolutePath());
+
+                // Load the stub into the process's linker namespace.
+                // Once loaded, subsequent dlopen calls will find it for DT_NEEDED resolution.
+                try {
+                    System.load(targetFile.getAbsolutePath());
+                    Loki.log.info("[android] Successfully loaded " + libName + " stub into linker namespace");
+                } catch (UnsatisfiedLinkError e) {
+                    Loki.log.warn("[android] Failed to load " + libName + " stub (architecture mismatch or SELinux)", e);
+                }
+            } catch (Exception e) {
+                Loki.log.warn("[android] Failed to extract " + stubPath, e);
+            }
+        }
+    }
  }
