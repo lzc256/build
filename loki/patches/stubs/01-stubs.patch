@@ -71,35 +71,32 @@ index ec87a08..781c67c 100644
 +                File targetFile = new File(targetDir, new File(stubPath).getName());
 +                String libName = targetFile.getName();
 +
-+                if (!targetFile.exists()) {
-+                    InputStream is = LokiUtil.class.getResourceAsStream(stubPath);
-+                    if (is == null) {
-+                        Loki.log.warn("[android] " + libName + " stub not found in JAR resources");
-+                        continue;
-+                    }
++                // Always extract fresh stub - ensures we have the latest version
++                InputStream is = LokiUtil.class.getResourceAsStream(stubPath);
++                if (is == null) {
++                    Loki.log.warn("[android] " + libName + " stub not found in JAR resources");
++                    continue;
++                }
 +
++                try {
++                    OutputStream os = new FileOutputStream(targetFile);
 +                    try {
-+                        OutputStream os = new FileOutputStream(targetFile);
-+                        try {
-+                            byte[] buf = new byte[8192];
-+                            int read;
-+                            while ((read = is.read(buf)) != -1) {
-+                                os.write(buf, 0, read);
-+                            }
-+                        } finally {
-+                            os.close();
++                        byte[] buf = new byte[8192];
++                        int read;
++                        while ((read = is.read(buf)) != -1) {
++                            os.write(buf, 0, read);
 +                        }
 +                    } finally {
-+                        is.close();
++                        os.close();
 +                    }
-+
-+                    targetFile.setExecutable(true, false);
-+                    targetFile.setReadable(true, false);
-+
-+                    Loki.log.info("[android] Extracted " + libName + " stub to " + targetFile.getAbsolutePath());
-+                } else {
-+                    Loki.log.debug("[android] " + libName + " stub already exists at " + targetFile.getAbsolutePath());
++                } finally {
++                    is.close();
 +                }
++
++                targetFile.setExecutable(true, false);
++                targetFile.setReadable(true, false);
++
++                Loki.log.debug("[android] Extracted " + libName + " stub to " + targetFile.getAbsolutePath());
 +
 +                // Load the stub into the process's linker namespace.
 +                // Once loaded, subsequent dlopen calls will find it for DT_NEEDED resolution.
