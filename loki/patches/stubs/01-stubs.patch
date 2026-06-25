@@ -21,7 +21,7 @@ diff --git a/src/main/java/org/unmojang/loki/LokiUtil.java b/src/main/java/org/u
 index ec87a08..b4e0389 100644
 --- a/src/main/java/org/unmojang/loki/LokiUtil.java
 +++ b/src/main/java/org/unmojang/loki/LokiUtil.java
-@@ -600,4 +600,105 @@ public class LokiUtil {
+@@ -600,4 +600,106 @@ public class LokiUtil {
      public static String getFqmn(String className, String name, String desc) {
          return className.replace('/', '.') + "::" + name + desc;
      }
@@ -128,4 +128,3 @@ index ec87a08..b4e0389 100644
 +        }
 +    }
  }
-
