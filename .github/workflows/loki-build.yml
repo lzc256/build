@@ -74,6 +74,8 @@ jobs:
           for stub in libpulse libudev libX11 libXfixes libXrandr libXcursor libXcomposite libXdamage libdbus-1 libstdc++ libm libc; do
             mkdir -p "loki-src/src/main/resources/${stub}_stub/linux-aarch64"
           done
+          # Create directory for ld-linux stub (special naming)
+          mkdir -p "loki-src/src/main/resources/ldlinux_stub/linux-aarch64"
 
           STUBS_DIR="loki/patches/stubs"
 
@@ -119,6 +121,18 @@ jobs:
               echo "Warning: ${stub}-stub.c not found, skipping"
             fi
           done
+
+          # Build ld-linux-aarch64.so.1 stub (special handling - no version suffix)
+          LD_SRC="${STUBS_DIR}/ld-linux-aarch64-stub.c"
+          if [ -f "$LD_SRC" ]; then
+            LD_SONAME="ld-linux-aarch64.so.1"
+            LD_OUT="loki-src/src/main/resources/ldlinux_stub/linux-aarch64/${LD_SONAME}"
+            echo "Building ${LD_SONAME} stub..."
+            aarch64-linux-gnu-gcc -shared -fPIC -nostdlib -Wl,-soname,${LD_SONAME} -o "$LD_OUT" "$LD_SRC"
+            file "$LD_OUT"
+          else
+            echo "Warning: ld-linux-aarch64-stub.c not found, skipping"
+          fi
 
       - name: Setup JDK 8
         uses: actions/setup-java@v4

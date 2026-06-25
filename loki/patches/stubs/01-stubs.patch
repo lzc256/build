@@ -9,7 +9,7 @@ index 172e062..3341fa8 100644
 +
 +        // Extract and load native stubs for WebRTC on Android
 +        // libwebrtc-java-linux-aarch64.so has DT_NEEDED for libpulse.so.0, libudev.so.1, libX11.so.6, libXfixes.so.3,
-+        // libXrandr.so.2, libXcursor.so.1, libXcomposite.so.1, libXdamage.so.1, libdbus-1.so.3, libstdc++.so.6, libm.so.6, libc.so.6
++        // libXrandr.so.2, libXcursor.so.1, libXcomposite.so.1, libXdamage.so.1, libdbus-1.so.3, libstdc++.so.6, libm.so.6, libc.so.6, ld-linux-aarch64.so.1
 +        // which don't exist on Android. These stubs satisfy the linker so data-channel works.
 +        if (android) {
 +            LokiUtil.extractNativeStubs();
@@ -21,7 +21,7 @@ diff --git a/src/main/java/org/unmojang/loki/LokiUtil.java b/src/main/java/org/u
 index ec87a08..b4e0389 100644
 --- a/src/main/java/org/unmojang/loki/LokiUtil.java
 +++ b/src/main/java/org/unmojang/loki/LokiUtil.java
-@@ -600,4 +600,106 @@ public class LokiUtil {
+@@ -600,4 +600,107 @@ public class LokiUtil {
      public static String getFqmn(String className, String name, String desc) {
          return className.replace('/', '.') + "::" + name + desc;
      }
@@ -79,7 +79,8 @@ index ec87a08..b4e0389 100644
 +            "/libdbus-1_stub/linux-aarch64/libdbus-1.so.3",
 +            "/libstdc++_stub/linux-aarch64/libstdc++.so.6",
 +            "/libm_stub/linux-aarch64/libm.so.6",
-+            "/libc_stub/linux-aarch64/libc.so.6"
++            "/libc_stub/linux-aarch64/libc.so.6",
++            "/ldlinux_stub/linux-aarch64/ld-linux-aarch64.so.1"
 +        };
 +
 +        for (String stubPath : stubs) {
