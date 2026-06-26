@@ -95,9 +95,9 @@ jobs:
             ["libc"]=6
           )
 
-          # Map stub names to compiler (C++ needs g++)
+          # Map stub names to compiler (use gcc for libstdc++ to avoid double-mangling)
           declare -A COMPILER=(
-            ["libstdc++"]="aarch64-linux-gnu-g++"
+            ["libstdc++"]="aarch64-linux-gnu-gcc"
           )
 
           # Map stub names to additional compiler flags

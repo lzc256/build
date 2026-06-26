@@ -7,11 +7,12 @@
  * including exception handling, RTTI, typeinfo for all standard types,
  * std::string, std::exception, iostream stubs, etc.
  *
- * IMPORTANT: This must be compiled with -nostdlib to avoid glibc dependency.
+ * IMPORTANT: This must be compiled with a C compiler (gcc), not g++.
+ * Using g++ would mangle the already-mangled symbol names again.
  * Android uses Bionic (libc.so), not glibc (libc.so.6).
  *
  * Build:
- *   aarch64-linux-gnu-g++ -shared -fPIC -nostdlib -Wl,-soname,libstdc++.so.6 \
+ *   aarch64-linux-gnu-gcc -shared -fPIC -nostdlib -Wl,-soname,libstdc++.so.6 \
  *     -o libstdc++.so.6 libstdc++-stub.c
  */
 
