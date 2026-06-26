@@ -504,10 +504,10 @@ void _ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEC2ERKNSt7__cxx1112basi
 void _ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEED2Ev(void* _self) {}
 
 /* std::string assignment */
-void* _ZNSsaSEPKc(void* _self, const char* s) { return this; }
-void* _ZNSsaSERKSs(void* _self, void* other) { return this; }
-void* _ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEaSEPKc(void* _self, const char* s) { return this; }
-void* _ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEaSERKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEE(void* _self, void* other) { return this; }
+void* _ZNSsaSEPKc(void* _self, const char* s) { return _self; }
+void* _ZNSsaSERKSs(void* _self, void* other) { return _self; }
+void* _ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEaSEPKc(void* _self, const char* s) { return _self; }
+void* _ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEaSERKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEE(void* _self, void* other) { return _self; }
 
 /* std::string c_str() and data() */
 const char* _ZNSs5c_strEv(void* _self) { return ""; }
@@ -530,14 +530,14 @@ void _ZNSs5clearEv(void* _self) {}
 void _ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE5clearEv(void* _self) {}
 
 /* std::string append */
-void* _ZNSs6appendEPKc(void* _self, const char* s) { return this; }
-void* _ZNSs6appendERKSs(void* _self, void* other) { return this; }
-void* _ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE6appendEPKc(void* _self, const char* s) { return this; }
-void* _ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE6appendERKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEE(void* _self, void* other) { return this; }
+void* _ZNSs6appendEPKc(void* _self, const char* s) { return _self; }
+void* _ZNSs6appendERKSs(void* _self, void* other) { return _self; }
+void* _ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE6appendEPKc(void* _self, const char* s) { return _self; }
+void* _ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE6appendERKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEE(void* _self, void* other) { return _self; }
 
 /* std::string operator+ */
-void* _ZNSs4appendEc(void* _self, char c) { return this; }
-void* _ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE6appendEmc(void* _self, unsigned long n, char c) { return this; }
+void* _ZNSs4appendEc(void* _self, char c) { return _self; }
+void* _ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE6appendEmc(void* _self, unsigned long n, char c) { return _self; }
 
 /* std::string resize */
 void _ZNSs6resizEm(void* _self, unsigned long n) {}
@@ -578,26 +578,26 @@ unsigned long _ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE5rfindEPKcm(v
 unsigned long _ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE5rfindEcm(void* _self, char c, unsigned long pos) { return (unsigned long)-1; }
 
 /* std::string substr */
-void* _ZNSs6substrEmm(void* _self, unsigned long pos, unsigned long n) { return this; }
-void* _ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE6substrEmm(void* _self, unsigned long pos, unsigned long n) { return this; }
+void* _ZNSs6substrEmm(void* _self, unsigned long pos, unsigned long n) { return _self; }
+void* _ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE6substrEmm(void* _self, unsigned long pos, unsigned long n) { return _self; }
 
 /* std::string erase */
-void* _ZNSs5eraseEmm(void* _self, unsigned long pos, unsigned long n) { return this; }
-void* _ZNSs5eraseEm(void* _self, unsigned long pos) { return this; }
-void* _ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE5eraseEmm(void* _self, unsigned long pos, unsigned long n) { return this; }
-void* _ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE5eraseEm(void* _self, unsigned long pos) { return this; }
+void* _ZNSs5eraseEmm(void* _self, unsigned long pos, unsigned long n) { return _self; }
+void* _ZNSs5eraseEm(void* _self, unsigned long pos) { return _self; }
+void* _ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE5eraseEmm(void* _self, unsigned long pos, unsigned long n) { return _self; }
+void* _ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE5eraseEm(void* _self, unsigned long pos) { return _self; }
 
 /* std::string insert */
-void* _ZNSs6insertEmPKc(void* _self, unsigned long pos, const char* s) { return this; }
-void* _ZNSs6insertEmmc(void* _self, unsigned long pos, unsigned long n, char c) { return this; }
-void* _ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE6insertEmPKc(void* _self, unsigned long pos, const char* s) { return this; }
-void* _ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE6insertEmmc(void* _self, unsigned long pos, unsigned long n, char c) { return this; }
+void* _ZNSs6insertEmPKc(void* _self, unsigned long pos, const char* s) { return _self; }
+void* _ZNSs6insertEmmc(void* _self, unsigned long pos, unsigned long n, char c) { return _self; }
+void* _ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE6insertEmPKc(void* _self, unsigned long pos, const char* s) { return _self; }
+void* _ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE6insertEmmc(void* _self, unsigned long pos, unsigned long n, char c) { return _self; }
 
 /* std::string replace */
-void* _ZNSs7replaceEmmPKc(void* _self, unsigned long pos, unsigned long n, const char* s) { return this; }
-void* _ZNSs7replaceEmmRKSs(void* _self, unsigned long pos, unsigned long n, void* other) { return this; }
-void* _ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE7replaceEmmPKc(void* _self, unsigned long pos, unsigned long n, const char* s) { return this; }
-void* _ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE7replaceEmmRKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEE(void* _self, unsigned long pos, unsigned long n, void* other) { return this; }
+void* _ZNSs7replaceEmmPKc(void* _self, unsigned long pos, unsigned long n, const char* s) { return _self; }
+void* _ZNSs7replaceEmmRKSs(void* _self, unsigned long pos, unsigned long n, void* other) { return _self; }
+void* _ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE7replaceEmmPKc(void* _self, unsigned long pos, unsigned long n, const char* s) { return _self; }
+void* _ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE7replaceEmmRKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEE(void* _self, unsigned long pos, unsigned long n, void* other) { return _self; }
 
 /* std::string copy */
 unsigned long _ZNSs4copyEPcmm(void* _self, char* dest, unsigned long n, unsigned long pos) { return 0; }
@@ -611,10 +611,10 @@ void _ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE4swapERS1_(void* _self
  * std::allocator<char>
  * ============================================================================ */
 
-void* _ZNSaIcEC1Ev(void* _self) { return this; }
-void* _ZNSaIcEC2Ev(void* _self) { return this; }
-void* _ZNSaIcEC1ERKS_(void* _self, void* other) { return this; }
-void* _ZNSaIcEC2ERKS_(void* _self, void* other) { return this; }
+void* _ZNSaIcEC1Ev(void* _self) { return _self; }
+void* _ZNSaIcEC2Ev(void* _self) { return _self; }
+void* _ZNSaIcEC1ERKS_(void* _self, void* other) { return _self; }
+void* _ZNSaIcEC2ERKS_(void* _self, void* other) { return _self; }
 void _ZNSaIcED1Ev(void* _self) {}
 void _ZNSaIcED2Ev(void* _self) {}
 void* _ZNSaIcE8allocateEm(void* _self, unsigned long n) { return _bump_alloc(n); }
@@ -645,20 +645,20 @@ void* _ZSt4cerr = _cerr_buf;
 void* _ZSt3cin = _cin_buf;
 
 /* std::ostream::operator<< stubs */
-void* _ZNSolsEi(void* _self, int val) { return this; }
-void* _ZNSolsEl(void* _self, long val) { return this; }
-void* _ZNSolsEm(void* _self, unsigned long val) { return this; }
-void* _ZNSolsEd(void* _self, double val) { return this; }
-void* _ZNSolsEf(void* _self, float val) { return this; }
-void* _ZNSolsEPKc(void* _self, const char* val) { return this; }
-void* _ZNSolsEc(void* _self, char val) { return this; }
-void* _ZNSolsEb(void* _self, unsigned char val) { return this; }
-void* _ZNSolsEPFRSoS_E(void* _self, void* (*f)(void*)) { return this; }
+void* _ZNSolsEi(void* _self, int val) { return _self; }
+void* _ZNSolsEl(void* _self, long val) { return _self; }
+void* _ZNSolsEm(void* _self, unsigned long val) { return _self; }
+void* _ZNSolsEd(void* _self, double val) { return _self; }
+void* _ZNSolsEf(void* _self, float val) { return _self; }
+void* _ZNSolsEPKc(void* _self, const char* val) { return _self; }
+void* _ZNSolsEc(void* _self, char val) { return _self; }
+void* _ZNSolsEb(void* _self, unsigned char val) { return _self; }
+void* _ZNSolsEPFRSoS_E(void* _self, void* (*f)(void*)) { return _self; }
 
 /* std::ostream::put, write, flush */
-void* _ZNSo3putEc(void* _self, char c) { return this; }
-void* _ZNSo5writeEPKcl(void* _self, const char* s, long n) { return this; }
-void* _ZNSo5flushEv(void* _self) { return this; }
+void* _ZNSo3putEc(void* _self, char c) { return _self; }
+void* _ZNSo5writeEPKcl(void* _self, const char* s, long n) { return _self; }
+void* _ZNSo5flushEv(void* _self) { return _self; }
 
 /* std::ostream width, fill, precision */
 unsigned long _ZNSo5widthEv(void* _self) { return 0; }
@@ -676,16 +676,16 @@ unsigned long _ZNSo4setfEmm(void* _self, unsigned long f, unsigned long mask) { 
 void _ZNSo5unsetfEm(void* _self, unsigned long f) {}
 
 /* std::istream stubs */
-void* _ZNSirsEPFRSiS_E(void* _self, void* (*f)(void*)) { return this; }
-void* _ZNSirsERi(void* _self, int* val) { *val = 0; return this; }
-void* _ZNSirsERl(void* _self, long* val) { *val = 0; return this; }
-void* _ZNSirsERd(void* _self, double* val) { *val = 0; return this; }
-void* _ZNSirsERf(void* _self, float* val) { *val = 0; return this; }
+void* _ZNSirsEPFRSiS_E(void* _self, void* (*f)(void*)) { return _self; }
+void* _ZNSirsERi(void* _self, int* val) { *val = 0; return _self; }
+void* _ZNSirsERl(void* _self, long* val) { *val = 0; return _self; }
+void* _ZNSirsERd(void* _self, double* val) { *val = 0; return _self; }
+void* _ZNSirsERf(void* _self, float* val) { *val = 0; return _self; }
 
 /* std::istream get, getline */
 int _ZNSi3getEv(void* _self) { return -1; }
-void* _ZNSi7getlineEPcic(void* _self, char* buf, int n, char delim) { *buf = '\0'; return this; }
-void* _ZNSi4readEPcl(void* _self, char* buf, long n) { return this; }
+void* _ZNSi7getlineEPcic(void* _self, char* buf, int n, char delim) { *buf = '\0'; return _self; }
+void* _ZNSi4readEPcl(void* _self, char* buf, long n) { return _self; }
 
 /* std::endl, std::flush, std::hex, std::dec, std::oct */
 void* _ZSt4endlIcSt11char_traitsIcEERSt13basic_ostreamIT_T0_ES6_(void* os) { return os; }
@@ -773,7 +773,7 @@ void _ZSt9call_onceIRMSt9once_flagRFvvEJEvEET0_T1_DpOT2_(void* flag, void (*func
  * ============================================================================ */
 
 /* Template instantiations - most common ones */
-void* _ZNSt6vectorISsSaISsEEC1Ev(void* _self) { return this; }
+void* _ZNSt6vectorISsSaISsEEC1Ev(void* _self) { return _self; }
 void _ZNSt6vectorISsSaISsEED1Ev(void* _self) {}
 void _ZNSt6vectorISsSaISsEE9push_backERKSs(void* _self, void* val) {}
 void* _ZNSt6vectorISsSaISsEE4backEv(void* _self) { return NULL; }
@@ -788,35 +788,35 @@ void _ZNSt6vectorISsSaISsEE9pop_backEv(void* _self) {}
  * std::map (minimal)
  * ============================================================================ */
 
-void* _ZNSt3mapISsSsSt4lessISsESaISt4pairIKSsSsEEEC1Ev(void* _self) { return this; }
+void* _ZNSt3mapISsSsSt4lessISsESaISt4pairIKSsSsEEEC1Ev(void* _self) { return _self; }
 void _ZNSt3mapISsSsSt4lessISsESaISt4pairIKSsSsEEED1Ev(void* _self) {}
 
 /* ============================================================================
  * std::set (minimal)
  * ============================================================================ */
 
-void* _ZNSt3setISsSt4lessISsESaISsEEC1Ev(void* _self) { return this; }
+void* _ZNSt3setISsSt4lessISsESaISsEEC1Ev(void* _self) { return _self; }
 void _ZNSt3setISsSt4lessISsESaISsEEED1Ev(void* _self) {}
 
 /* ============================================================================
  * std::list (minimal)
  * ============================================================================ */
 
-void* _ZNSt4listISsSaISsEEC1Ev(void* _self) { return this; }
+void* _ZNSt4listISsSaISsEEC1Ev(void* _self) { return _self; }
 void _ZNSt4listISsSaISsEED1Ev(void* _self) {}
 
 /* ============================================================================
  * std::queue (minimal)
  * ============================================================================ */
 
-void* _ZNSt5queueISsSt5dequeISsSaISsEEEC1Ev(void* _self) { return this; }
+void* _ZNSt5queueISsSt5dequeISsSaISsEEEC1Ev(void* _self) { return _self; }
 void _ZNSt5queueISsSt5dequeISsSaISsEED1Ev(void* _self) {}
 
 /* ============================================================================
  * std::deque (minimal)
  * ============================================================================ */
 
-void* _ZNSt5dequeISsSaISsEEC1Ev(void* _self) { return this; }
+void* _ZNSt5dequeISsSaISsEEC1Ev(void* _self) { return _self; }
 void _ZNSt5dequeISsSaISsEED1Ev(void* _self) {}
 
 /* ============================================================================
@@ -866,8 +866,8 @@ void* _ZSt7addressofIcEPT_RS0_(char* r) { return r; }
 void* _ZSt7addressofIvEPT_RS0_(void* r) { return r; }
 
 /* std::pair */
-void* _ZNSt4pairIKSsSsEC1Ev(void* _self) { return this; }
-void* _ZNSt4pairIKSsSsEC1ERKSsS2_(void* _self, void* k, void* v) { return this; }
+void* _ZNSt4pairIKSsSsEC1Ev(void* _self) { return _self; }
+void* _ZNSt4pairIKSsSsEC1ERKSsS2_(void* _self, void* k, void* v) { return _self; }
 
 /* std::less */
 unsigned char _ZNKSt4lessIiEclERKiS2_(int* a, int* b) { return *a < *b; }
@@ -982,7 +982,7 @@ const char* _ZNKSt12future_error4whatEv(void* _self) { return "std::future_error
  * REGEX
  * ============================================================================ */
 
-void* _ZNSt11regex_errorC1ESt15regex_constants10error_type(void* _self, int code) { return this; }
+void* _ZNSt11regex_errorC1ESt15regex_constants10error_type(void* _self, int code) { return _self; }
 void _ZNSt11regex_errorD1Ev(void* _self) {}
 
 /* ============================================================================
@@ -1001,7 +1001,7 @@ int _ZNKSt10error_code8categoryEv(void* _self) { return 0; }
 int _ZNKSt10error_code7messageEv(void* _self) { return 0; }
 
 /* error_category */
-void* _ZNSt13error_categoryC2Ev(void* _self) { return this; }
+void* _ZNSt13error_categoryC2Ev(void* _self) { return _self; }
 void _ZNSt13error_categoryD2Ev(void* _self) {}
 
 /* ============================================================================
@@ -1015,22 +1015,22 @@ void _ZNSt13error_categoryD2Ev(void* _self) {}
  * ============================================================================ */
 
 /* std::unique_ptr */
-void* _ZNSt10unique_ptrIiSt14default_deleteIiEEC1EPi(void* _self, int* p) { return this; }
+void* _ZNSt10unique_ptrIiSt14default_deleteIiEEC1EPi(void* _self, int* p) { return _self; }
 void _ZNSt10unique_ptrIiSt14default_deleteIiEED1Ev(void* _self) {}
 void* _ZNSt10unique_ptrIiSt14default_deleteIiEE3getEv(void* _self) { return NULL; }
 void _ZNSt10unique_ptrIiSt14default_deleteIiEE5resetEPi(void* _self, int* p) {}
 void* _ZNSt10unique_ptrIiSt14default_deleteIiEE7releaseEv(void* _self) { return NULL; }
 
 /* std::shared_ptr */
-void* _ZNSt10shared_ptrIiEC1Ev(void* _self) { return this; }
-void* _ZNSt10shared_ptrIiEC1EPi(void* _self, int* p) { return this; }
+void* _ZNSt10shared_ptrIiEC1Ev(void* _self) { return _self; }
+void* _ZNSt10shared_ptrIiEC1EPi(void* _self, int* p) { return _self; }
 void _ZNSt10shared_ptrIiED1Ev(void* _self) {}
 void* _ZNSt10shared_ptrIiEE3getEv(void* _self) { return NULL; }
 long _ZNKSt10shared_ptrIiE3useEv(void* _self) { return 1; }
 
 /* std::weak_ptr */
-void* _ZNSt8weak_ptrIiEC1Ev(void* _self) { return this; }
-void* _ZNSt8weak_ptrIiEC1ERKSt10shared_ptrIiE(void* _self, void* sp) { return this; }
+void* _ZNSt8weak_ptrIiEC1Ev(void* _self) { return _self; }
+void* _ZNSt8weak_ptrIiEC1ERKSt10shared_ptrIiE(void* _self, void* sp) { return _self; }
 void _ZNSt8weak_ptrIiED1Ev(void* _self) {}
 void* _ZNSt8weak_ptrIiE4lockEv(void* _self) { return NULL; }
 
@@ -1050,15 +1050,15 @@ void* _ZSt12make_uniqueIiENSt9enable_ifIXsrSt6__and_IJSt21is_move_constructibleI
  * TUPLE
  * ============================================================================ */
 
-void* _ZNSt5tupleIJiEEC1Ev(void* _self) { return this; }
-void* _ZNSt5tupleIJiEEC1IiEERKT_(void* _self, int* v) { return this; }
+void* _ZNSt5tupleIJiEEC1Ev(void* _self) { return _self; }
+void* _ZNSt5tupleIJiEEC1IiEERKT_(void* _self, int* v) { return _self; }
 
 /* ============================================================================
  * OPTIONAL
  * ============================================================================ */
 
-void* _ZNSt8optionalIiEC1Ev(void* _self) { return this; }
-void* _ZNSt8optionalIiEC1IiEERKT_(void* _self, int* v) { return this; }
+void* _ZNSt8optionalIiEC1Ev(void* _self) { return _self; }
+void* _ZNSt8optionalIiEC1IiEERKT_(void* _self, int* v) { return _self; }
 void _ZNSt8optionalIiED1Ev(void* _self) {}
 void* _ZNSt8optionalIiE5valueEv(void* _self) { return NULL; }
 unsigned char _ZNKSt8optionalIiE8has_valueEv(void* _self) { return 0; }
@@ -1067,7 +1067,7 @@ unsigned char _ZNKSt8optionalIiE8has_valueEv(void* _self) { return 0; }
  * VARIANT
  * ============================================================================ */
 
-void* _ZNSt7variantIJiEEC1Ev(void* _self) { return this; }
+void* _ZNSt7variantIJiEEC1Ev(void* _self) { return _self; }
 void _ZNSt7variantIJiEED1Ev(void* _self) {}
 void* _ZNSt7variantIJiEE5indexEv(void* _self) { return 0; }
 
@@ -1075,7 +1075,7 @@ void* _ZNSt7variantIJiEE5indexEv(void* _self) { return 0; }
  * ANY
  * ============================================================================ */
 
-void* _ZNSt3anyC1Ev(void* _self) { return this; }
+void* _ZNSt3anyC1Ev(void* _self) { return _self; }
 void _ZNSt3anyD1Ev(void* _self) {}
 
 /* ============================================================================
@@ -1095,25 +1095,25 @@ void* _ZSt9addressofISt10shared_ptrIiEEPT_RS2_(void* r) { return r; }
  * LOCALE
  * ============================================================================ */
 
-void* _ZNSt6localeC1Ev(void* _self) { return this; }
+void* _ZNSt6localeC1Ev(void* _self) { return _self; }
 void _ZNSt6localeD1Ev(void* _self) {}
-void* _ZNSt6locale5facetC2Em(void* _self, unsigned long refs) { return this; }
+void* _ZNSt6locale5facetC2Em(void* _self, unsigned long refs) { return _self; }
 void _ZNSt6locale5facetD2Ev(void* _self) {}
 
 /* std::numpunct */
-void* _ZNSt8numpunctIcEC2Em(void* _self, unsigned long refs) { return this; }
+void* _ZNSt8numpunctIcEC2Em(void* _self, unsigned long refs) { return _self; }
 
 /* ============================================================================
  * CODECVT
  * ============================================================================ */
 
-void* _ZNSt7codecvtIcc11__mb_state_tEC2Em(void* _self, unsigned long refs) { return this; }
+void* _ZNSt7codecvtIcc11__mb_state_tEC2Em(void* _self, unsigned long refs) { return _self; }
 
 /* ============================================================================
  * RANDOM
  * ============================================================================ */
 
-void* _ZNSt13random_deviceC1ERKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEE(void* _self, void* token) { return this; }
+void* _ZNSt13random_deviceC1ERKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEE(void* _self, void* token) { return _self; }
 void _ZNSt13random_deviceD1Ev(void* _self) {}
 unsigned int _ZNSt13random_deviceclEv(void* _self) { return 0; }
 
@@ -1121,52 +1121,52 @@ unsigned int _ZNSt13random_deviceclEv(void* _self) { return 0; }
  * COMPLEX
  * ============================================================================ */
 
-void* _ZNSt7complexIdEC1Edd(void* _self, double re, double im) { return this; }
-void* _ZNSt7complexIfEC1Eff(void* _self, float re, float im) { return this; }
+void* _ZNSt7complexIdEC1Edd(void* _self, double re, double im) { return _self; }
+void* _ZNSt7complexIfEC1Eff(void* _self, float re, float im) { return _self; }
 
 /* ============================================================================
  * VALARRAY
  * ============================================================================ */
 
-void* _ZNSt8valarrayIdEC1Em(void* _self, unsigned long n) { return this; }
+void* _ZNSt8valarrayIdEC1Em(void* _self, unsigned long n) { return _self; }
 void _ZNSt8valarrayIdED1Ev(void* _self) {}
 
 /* ============================================================================
  * BITSET
  * ============================================================================ */
 
-void* _ZNSt6bitsetILm32EEC1Ev(void* _self) { return this; }
+void* _ZNSt6bitsetILm32EEC1Ev(void* _self) { return _self; }
 void _ZNSt6bitsetILm32EEC2Ev(void* _self) {}
 
 /* ============================================================================
  * STACK
  * ============================================================================ */
 
-void* _ZNSt5stackISt5dequeISsSaISsEEEC1Ev(void* _self) { return this; }
+void* _ZNSt5stackISt5dequeISsSaISsEEEC1Ev(void* _self) { return _self; }
 void _ZNSt5stackISt5dequeISsSaISsEEED1Ev(void* _self) {}
 
 /* ============================================================================
  * PRIORITY_QUEUE
  * ============================================================================ */
 
-void* _ZNSt14priority_queueISsSt6vectorISsSaISsEESt4lessISsEEC1Ev(void* _self) { return this; }
+void* _ZNSt14priority_queueISsSt6vectorISsSaISsEESt4lessISsEEC1Ev(void* _self) { return _self; }
 void _ZNSt14priority_queueISsSt6vectorISsSaISsEESt4lessISsEED1Ev(void* _self) {}
 
 /* ============================================================================
  * UNORDERED_MAP/SET
  * ============================================================================ */
 
-void* _ZNSt13unordered_mapISsSsSt4hashISsESt8equal_toISsESaISt4pairIKSsSsEEEC1Ev(void* _self) { return this; }
+void* _ZNSt13unordered_mapISsSsSt4hashISsESt8equal_toISsESaISt4pairIKSsSsEEEC1Ev(void* _self) { return _self; }
 void _ZNSt13unordered_mapISsSsSt4hashISsESt8equal_toISsESaISt4pairIKSsSsEEED1Ev(void* _self) {}
 
-void* _ZNSt13unordered_setISsSt4hashISsESt8equal_toISsESaISsEEC1Ev(void* _self) { return this; }
+void* _ZNSt13unordered_setISsSt4hashISsESt8equal_toISsESaISsEEC1Ev(void* _self) { return _self; }
 void _ZNSt13unordered_setISsSt4hashISsESt8equal_toISsESaISsEEED1Ev(void* _self) {}
 
 /* ============================================================================
  * FORWARD_LIST
  * ============================================================================ */
 
-void* _ZNSt10forward_listISsSaISsEEC1Ev(void* _self) { return this; }
+void* _ZNSt10forward_listISsSaISsEEC1Ev(void* _self) { return _self; }
 void _ZNSt10forward_listISsSaISsEED1Ev(void* _self) {}
 
 /* ============================================================================
@@ -1185,14 +1185,14 @@ void _ZNSt10forward_listISsSaISsEED1Ev(void* _self) {}
  * TYPEINDEX
  * ============================================================================ */
 
-void* _ZNSt8type_indexC1ERKSt9type_info(void* _self, void* ti) { return this; }
+void* _ZNSt8type_indexC1ERKSt9type_info(void* _self, void* ti) { return _self; }
 void _ZNSt8type_indexD1Ev(void* _self) {}
 
 /* ============================================================================
  * SCOPED_ALLOCATOR
  * ============================================================================ */
 
-void* _ZNSt15scoped_allocatorISaIiEEC1Ev(void* _self) { return this; }
+void* _ZNSt15scoped_allocatorISaIiEEC1Ev(void* _self) { return _self; }
 
 /* ============================================================================
  * INITIALIZER_LIST
@@ -1204,7 +1204,7 @@ void* _ZNSt15scoped_allocatorISaIiEEC1Ev(void* _self) { return this; }
  * EXCEPTION_PTR
  * ============================================================================ */
 
-void* _ZNSt15__exception_ptr13exception_ptrC1Ev(void* _self) { return this; }
+void* _ZNSt15__exception_ptr13exception_ptrC1Ev(void* _self) { return _self; }
 void _ZNSt15__exception_ptr13exception_ptrD1Ev(void* _self) {}
 void* _ZNSt15__exception_ptr13exception_ptr10_M_releaseEv(void* _self) { return NULL; }
 
