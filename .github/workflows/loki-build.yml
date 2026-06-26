@@ -71,7 +71,7 @@ jobs:
       - name: Build stub libraries
         run: |
           # Create resource directories for all stubs
-          for stub in libpulse libudev libX11 libXfixes libXrandr libXcursor libXcomposite libXdamage libdbus-1 libstdc++ libm libc; do
+          for stub in libpulse libudev libX11 libXfixes libXrandr libXcursor libXcomposite libXdamage libdbus-1 libstdc++ libm libc libpthread; do
             mkdir -p "loki-src/src/main/resources/${stub}_stub/linux-aarch64"
           done
           # Create directory for ld-linux stub (special naming)
@@ -93,6 +93,7 @@ jobs:
             ["libstdc++"]=6
             ["libm"]=6
             ["libc"]=6
+            ["libpthread"]=0
           )
 
           # Map stub names to compiler (use gcc for libstdc++ to avoid double-mangling)
@@ -104,9 +105,10 @@ jobs:
           declare -A CFLAGS_EXTRA=(
             ["libstdc++"]="-nostdlib"
             ["libc"]="-nostdlib"
+            ["libpthread"]="-nostdlib"
           )
 
-          for stub in libpulse libudev libX11 libXfixes libXrandr libXcursor libXcomposite libXdamage libdbus-1 libstdc++ libm libc; do
+          for stub in libpulse libudev libX11 libXfixes libXrandr libXcursor libXcomposite libXdamage libdbus-1 libstdc++ libm libc libpthread; do
             SRC="${STUBS_DIR}/${stub}-stub.c"
             if [ -f "$SRC" ]; then
               VER="${SONAME_VERSION[$stub]}"
