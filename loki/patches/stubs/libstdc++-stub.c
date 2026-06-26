@@ -745,7 +745,7 @@ void _ZNSt18condition_variableD1Ev(void* _self) {}
 /* std::thread */
 void* _ZNSt6thread20hardware_concurrencyEv(void) { return (void*)4; }
 void _ZNSt6thread4joinEv(void* _self) {}
-void _ZNSt6thread9joinableEv(void* _self) { return 0; }
+unsigned char _ZNSt6thread9joinableEv(void* _self) { return 0; }
 void _ZNSt6thread6detachEv(void* _self) {}
 
 /* std::this_thread::sleep_for, sleep_until, yield */
@@ -934,16 +934,6 @@ void _ZNSt14basic_istreamIcSt11char_traitsIcEED2Ev(void* _self) {}
 /* basic_ostream */
 void _ZNSt13basic_ostreamIcSt11char_traitsIcEED1Ev(void* _self) {}
 void _ZNSt13basic_ostreamIcSt11char_traitsIcEED2Ev(void* _self) {}
-
-/* ============================================================================
- * MORE TYPEINFO FOR STD TYPES
- * ============================================================================ */
-
-struct type_info _ZTISt11logic_error = { _logic_error_vtable, "St11logic_error" };
-struct type_info _ZTISt12runtime_error = { _runtime_error_vtable, "St12runtime_error" };
-struct type_info _ZTISt12out_of_range = { _out_of_range_vtable, "St12out_of_range" };
-struct type_info _ZTISt12length_error = { _length_error_vtable, "St12length_error" };
-struct type_info _ZTISt16invalid_argument = { _invalid_argument_vtable, "St16invalid_argument" };
 
 /* ============================================================================
  * MORE STRING METHODS (C++11 ABI)
