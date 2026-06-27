@@ -1,0 +1,58 @@
+diff --git a/src/storage/postgres/item.go b/src/storage/postgres/item.go
+index 4fc41af..7ed79a5 100644
+--- a/src/storage/postgres/item.go
++++ b/src/storage/postgres/item.go
+@@ -343,6 +343,53 @@ var (
+ 	itemsKeepDays = 90
+ )
+ 
++// DeleteFilteredItems deletes items matching title/content keywords.
++// Never deletes starred items.
++func (s *PostgresStorage) DeleteFilteredItems(titleKw, contentKw []string) {
++	if len(titleKw) == 0 && len(contentKw) == 0 {
++		return
++	}
++
++	// Build WHERE conditions for keyword matching
++	conditions := make([]string, 0)
++	args := make([]any, 0)
++	n := 0
++
++	next := func() int {
++		n++
++		return n
++	}
++
++	for _, kw := range titleKw {
++		conditions = append(conditions, fmt.Sprintf("title LIKE $%d", next()))
++		args = append(args, "%"+kw+"%")
++	}
++	for _, kw := range contentKw {
++		conditions = append(conditions, fmt.Sprintf("content LIKE $%d", next()))
++		args = append(args, "%"+kw+"%")
++	}
++
++	// Combine with OR (match any keyword)
++	matchClause := strings.Join(conditions, " OR ")
++
++	args = append(args, model.STARRED)
++
++	result, err := s.db.Exec(`
++		delete from items
++		where status != $`+fmt.Sprintf("%d", n+1)+`
++		  and (`+matchClause+`)`,
++		args...,
++	)
++	if err != nil {
++		log.Print(err)
++		return
++	}
++	numDeleted, err := result.RowsAffected()
++	if err == nil && numDeleted > 0 {
++		log.Printf("Deleted %d filtered items", numDeleted)
++	}
++}
++
+ func (s *PostgresStorage) DeleteOldItems() {
+ 	keepDaysLimit := fmt.Sprintf("-%d days", itemsKeepDays)
+ 	result, err := s.db.Exec(`

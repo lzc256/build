@@ -1,0 +1,12 @@
+diff --git a/src/storage/storage.go b/src/storage/storage.go
+index 1111111..2222222 100644
+--- a/src/storage/storage.go
++++ b/src/storage/storage.go
+@@ -18,6 +18,7 @@ type Storage interface {
+ 	DeleteFeed(feedId int64) bool
+ 	DeleteItem(id int64) bool
+ 	DeleteFolder(folderId int64) bool
++	DeleteFilteredItems(titleKw, contentKw []string)
+ 	DeleteOldItems()
+ 	FeedStats() []model.FeedStat
+ 	GetFeed(id int64) *model.Feed

@@ -1,0 +1,18 @@
+diff --git a/src/worker/worker.go b/src/worker/worker.go
+index 9bbfade..07f4a38 100644
+--- a/src/worker/worker.go
++++ b/src/worker/worker.go
+@@ -31,11 +31,13 @@ func (w *Worker) FeedsPending() int32 {
+ 
+ func (w *Worker) StartFeedCleaner() {
+ 	go w.db.DeleteOldItems()
++	go w.db.DeleteFilteredItems(GetFilterTitle(), GetFilterContent())
+ 	ticker := time.NewTicker(time.Hour * 24)
+ 	go func() {
+ 		for {
+ 			<-ticker.C
+ 			w.db.DeleteOldItems()
++			w.db.DeleteFilteredItems(GetFilterTitle(), GetFilterContent())
+ 		}
+ 	}()
+ }

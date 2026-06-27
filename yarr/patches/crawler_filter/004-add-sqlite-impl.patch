@@ -1,0 +1,58 @@
+diff --git a/src/storage/sqlite/item.go b/src/storage/sqlite/item.go
+index 87987d5..77eba27 100644
+--- a/src/storage/sqlite/item.go
++++ b/src/storage/sqlite/item.go
+@@ -323,6 +323,53 @@ var (
+ 	itemsKeepDays = 90
+ )
+ 
++// DeleteFilteredItems deletes items matching title/content keywords.
++// Never deletes starred items.
++func (s *SQLiteStorage) DeleteFilteredItems(titleKw, contentKw []string) {
++	if len(titleKw) == 0 && len(contentKw) == 0 {
++		return
++	}
++
++	// Build WHERE conditions for keyword matching
++	conditions := make([]string, 0)
++	args := make([]any, 0)
++
++	for i, kw := range titleKw {
++		name := fmt.Sprintf("title_kw%d", i)
++		conditions = append(conditions, fmt.Sprintf("title LIKE :%s", name))
++		args = append(args, sql.Named(name, "%"+kw+"%"))
++	}
++	for i, kw := range contentKw {
++		name := fmt.Sprintf("content_kw%d", i)
++		conditions = append(conditions, fmt.Sprintf("content LIKE :%s", name))
++		args = append(args, sql.Named(name, "%"+kw+"%"))
++	}
++
++	// Combine with OR (match any keyword)
++	matchClause := strings.Join(conditions, " OR ")
++
++	args = append(args, sql.Named("starred_status", model.STARRED))
++
++	result, err := s.db.Exec(`
++		delete from items
++		where status != :starred_status
++		  and (`+matchClause+`)`,
++		args...,
++	)
++	if err != nil {
++		log.Print(err)
++		return
++	}
++	numDeleted, err := result.RowsAffected()
++	if err == nil && numDeleted > 0 {
++		log.Printf("Deleted %d filtered items", numDeleted)
++
++		if _, err := s.db.Exec("vacuum"); err != nil {
++			log.Print(err)
++		}
++	}
++}
++
+ // Delete old articles from the database to cleanup space.
+ //
+ // The rules:
