@@ -1,0 +1,116 @@
+name: Yarr
+
+on:
+  schedule:
+    - cron: '23 3 * * *'  # Check once daily at 3:23 UTC
+  workflow_dispatch:
+  push:
+    paths:
+      - 'yarr/**'
+      - '.github/workflows/yarr-build.yml'
+      - 'scripts/common.sh'
+
+env:
+  REGISTRY: ghcr.io
+  UPSTREAM_REPO: nkanaev/yarr
+  UPSTREAM_REF: master
+
+jobs:
+  check-update:
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.compare.outputs.should_build }}
+      commit: ${{ steps.commit.outputs.commit }}
+      short_commit: ${{ steps.commit.outputs.short_commit }}
+    steps:
+      - name: Get upstream commit
+        id: commit
+        run: |
+          COMMIT=$(curl -s "https://api.github.com/repos/${{ env.UPSTREAM_REPO }}/commits/${{ env.UPSTREAM_REF }}" | jq -r '.sha')
+          if [ -z "$COMMIT" ] || [ "$COMMIT" = "null" ]; then
+            echo "Failed to get upstream commit"
+            exit 1
+          fi
+          SHORT_COMMIT=$(echo "$COMMIT" | cut -c1-7)
+          echo "commit=$COMMIT" >> $GITHUB_OUTPUT
+          echo "short_commit=$SHORT_COMMIT" >> $GITHUB_OUTPUT
+          echo "combined_key=yarr-${SHORT_COMMIT}" >> $GITHUB_OUTPUT
+          echo "Upstream commit: $COMMIT"
+
+      - name: Cache check
+        if: github.event_name != 'push'
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: .build_success
+          key: ${{ steps.commit.outputs.combined_key }}
+
+      - name: Compare
+        id: compare
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "Push triggered. Building."
+            echo "should_build=true" >> $GITHUB_OUTPUT
+          elif [ -f .build_success ]; then
+            echo "No updates detected. Skipping."
+            echo "should_build=false" >> $GITHUB_OUTPUT
+          else
+            echo "Updates detected. Proceeding to build."
+            echo "should_build=true" >> $GITHUB_OUTPUT
+            echo "done" > .build_success
+          fi
+
+  build:
+    needs: check-update
+    if: needs.check-update.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout patch framework
+        uses: actions/checkout@v4
+
+      - name: Clone yarr upstream
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.UPSTREAM_REPO }}
+          path: yarr-src
+          ref: ${{ env.UPSTREAM_REF }}
+
+      - name: Apply patches
+        run: |
+          source scripts/common.sh
+          apply_all_patches yarr yarr-src
+
+      - name: Login to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build and Push
+        uses: docker/build-push-action@v6
+        with:
+          context: yarr-src
+          file: yarr-src/etc/dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ github.repository }}:yarr
+            ${{ env.REGISTRY }}/${{ github.repository }}:yarr-${{ needs.check-update.outputs.short_commit }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64,linux/arm64
+
+      - name: Summary
+        run: |
+          echo "## Yarr Build Summary"
+          echo "| Item | Value |"
+          echo "|------|-------|"
+          echo "| Upstream Commit | \`${{ needs.check-update.outputs.commit }}\` |"
+          echo "| Image | \`${{ env.REGISTRY }}/${{ github.repository }}:yarr\` |"
+          echo "| Retention | 30 days, min 20 items per feed (patched from 90/50) |"

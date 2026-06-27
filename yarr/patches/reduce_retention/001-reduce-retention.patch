@@ -1,0 +1,30 @@
+diff --git a/src/storage/postgres/item.go b/src/storage/postgres/item.go
+index 4fc41af..d5eb2db 100644
+--- a/src/storage/postgres/item.go
++++ b/src/storage/postgres/item.go
+@@ -339,8 +339,8 @@ func (s *PostgresStorage) FeedStats() []model.FeedStat {
+ }
+
+ var (
+-	itemsKeepSize = 50
+-	itemsKeepDays = 90
++	itemsKeepSize = 20
++	itemsKeepDays = 30
+ )
+
+ func (s *PostgresStorage) DeleteOldItems() {
+diff --git a/src/storage/sqlite/item.go b/src/storage/sqlite/item.go
+index 87987d5..51b9bb1 100644
+--- a/src/storage/sqlite/item.go
++++ b/src/storage/sqlite/item.go
+@@ -319,8 +319,8 @@ func (s *SQLiteStorage) FeedStats() []model.FeedStat {
+ }
+
+ var (
+-	itemsKeepSize = 50
+-	itemsKeepDays = 90
++	itemsKeepSize = 20
++	itemsKeepDays = 30
+ )
+
+ // Delete old articles from the database to cleanup space.
