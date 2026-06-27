@@ -1,15 +1,17 @@
 diff --git a/src/worker/filter.go b/src/worker/filter.go
 new file mode 100644
-index 0000000..0f74227
+index 0000000..e725718
 --- /dev/null
 +++ b/src/worker/filter.go
-@@ -0,0 +1,57 @@
+@@ -0,0 +1,77 @@
 +package worker
 +
 +import (
 +	"os"
 +	"strings"
 +	"sync"
++
++	"github.com/nkanaev/yarr/src/storage/model"
 +)
 +
 +var (
@@ -47,17 +49,35 @@ index 0000000..0f74227
 +	return filterContentValues
 +}
 +
-+// ShouldFilterItem returns true if item should be discarded based on title/content keywords
-+func ShouldFilterItem(title, content string) bool {
-+	for _, kw := range GetFilterTitle() {
-+		if strings.Contains(title, kw) {
-+			return true
++// FilterItems filters out items matching title/content keywords.
++// Returns the filtered slice (may be shorter than input).
++func FilterItems(items []model.Item) []model.Item {
++	titleKw := GetFilterTitle()
++	contentKw := GetFilterContent()
++	if len(titleKw) == 0 && len(contentKw) == 0 {
++		return items
++	}
++
++	filtered := items[:0]
++	for _, item := range items {
++		discard := false
++		for _, kw := range titleKw {
++			if strings.Contains(item.Title, kw) {
++				discard = true
++				break
++			}
++		}
++		if !discard {
++			for _, kw := range contentKw {
++				if strings.Contains(item.Content, kw) {
++					discard = true
++					break
++				}
++			}
++		}
++		if !discard {
++			filtered = append(filtered, item)
 +		}
 +	}
-+	for _, kw := range GetFilterContent() {
-+		if strings.Contains(content, kw) {
-+			return true
-+		}
-+	}
-+	return false
++	return filtered
 +}

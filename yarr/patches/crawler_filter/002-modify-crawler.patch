@@ -1,33 +1,13 @@
 diff --git a/src/worker/crawler.go b/src/worker/crawler.go
-index b501ec3..894c4d7 100644
+index b501ec3..cdd944b 100644
 --- a/src/worker/crawler.go
 +++ b/src/worker/crawler.go
-@@ -141,13 +141,16 @@ func findFavicon(siteUrl, feedUrl string) (*[]byte, error) {
+@@ -200,7 +200,7 @@ func listItems(f model.Feed, db storage.Storage) ([]model.Item, error) {
+ 			LastRefreshed:    &now,
+ 		})
+ 	}
+-	return ConvertItems(feed.Items, f), nil
++	return FilterItems(ConvertItems(feed.Items, f)), nil
  }
  
- func ConvertItems(items []parser.Item, feed model.Feed) []model.Item {
--	result := make([]model.Item, len(items))
--	for i, item := range items {
-+	result := make([]model.Item, 0, len(items))
-+	for _, item := range items {
-+		if ShouldFilterItem(item.Title, item.Content) {
-+			continue
-+		}
- 		mediaLinks := make(model.MediaLinks, 0)
- 		for _, link := range item.MediaLinks {
- 			mediaLinks = append(mediaLinks, model.MediaLink(link))
- 		}
--		result[i] = model.Item{
-+		result = append(result, model.Item{
- 			GUID:       item.GUID,
- 			FeedId:     feed.Id,
- 			Title:      item.Title,
-@@ -156,7 +159,7 @@ func ConvertItems(items []parser.Item, feed model.Feed) []model.Item {
- 			Date:       item.Date,
- 			Status:     model.UNREAD,
- 			MediaLinks: mediaLinks,
--		}
-+		})
- 	}
- 	return result
- }
+ func getCharset(res *http.Response) string {
