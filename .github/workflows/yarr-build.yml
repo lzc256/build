@@ -104,7 +104,8 @@ jobs:
             ${{ env.REGISTRY }}/${{ github.repository }}:yarr-${{ needs.check-update.outputs.short_commit }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          platforms: linux/amd64,linux/arm64
+          # platforms: linux/amd64,linux/arm64  # arm64 disabled - QEMU too slow for CGO build
+          platforms: linux/amd64
 
       - name: Summary
         run: |
