@@ -1,0 +1,63 @@
+diff --git a/src/worker/filter.go b/src/worker/filter.go
+new file mode 100644
+index 0000000..0f74227
+--- /dev/null
++++ b/src/worker/filter.go
+@@ -0,0 +1,50 @@
++package worker
++
++import (
++	"os"
++	"strings"
++	"sync"
++)
++
++var (
++	filterTitleOnce     sync.Once
++	filterTitleValues   []string
++	filterContentOnce   sync.Once
++	filterContentValues []string
++)
++
++// GetFilterTitle returns title filter keywords from YARR_FILTER_TITLE env
++func GetFilterTitle() []string {
++	filterTitleOnce.Do(func() {
++		if v := os.Getenv("YARR_FILTER_TITLE"); v != "" {
++			for _, s := range strings.Split(v, ",") {
++				if trimmed := strings.TrimSpace(s); trimmed != "" {
++					filterTitleValues = append(filterTitleValues, trimmed)
++				}
++			}
++		}
++	})
++	return filterTitleValues
++}
++
++// GetFilterContent returns content filter keywords from YARR_FILTER_CONTENT env
++func GetFilterContent() []string {
++	filterContentOnce.Do(func() {
++		if v := os.Getenv("YARR_FILTER_CONTENT"); v != "" {
++			for _, s := range strings.Split(v, ",") {
++				if trimmed := strings.TrimSpace(s); trimmed != "" {
++					filterContentValues = append(filterContentValues, trimmed)
++				}
++			}
++		}
++	})
++	return filterContentValues
++}
++
++// ShouldFilterItem returns true if item should be discarded based on title/content keywords
++func ShouldFilterItem(title, content string) bool {
++	for _, kw := range GetFilterTitle() {
++		if strings.Contains(title, kw) {
++			return true
++		}
++	}
++	for _, kw := range GetFilterContent() {
++		if strings.Contains(content, kw) {
++			return true
++		}
++	}
++	return false
++}

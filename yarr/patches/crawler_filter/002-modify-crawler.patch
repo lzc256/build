@@ -1,0 +1,24 @@
+diff --git a/src/worker/crawler.go b/src/worker/crawler.go
+index b501ec3..d4a62a5 100644
+--- a/src/worker/crawler.go
++++ b/src/worker/crawler.go
+@@ -141,13 +141,16 @@ func findFavicon(siteUrl, feedUrl string) (*[]byte, error) {
+ }
+
+ func ConvertItems(items []parser.Item, feed model.Feed) []model.Item {
+-	result := make([]model.Item, len(items))
+-	for i, item := range items {
++	result := make([]model.Item, 0, len(items))
++	for _, item := range items {
++		if ShouldFilterItem(item.Title, item.Content) {
++			continue
++		}
+ 		mediaLinks := make(model.MediaLinks, 0)
+ 		for _, link := range item.MediaLinks {
+ 			mediaLinks = append(mediaLinks, model.MediaLink(link))
+ 		}
+-		result[i] = model.Item{
++		result = append(result, model.Item{
+ 			GUID:       item.GUID,
+ 			FeedId:     feed.Id,
+ 			Title:      item.Title,
