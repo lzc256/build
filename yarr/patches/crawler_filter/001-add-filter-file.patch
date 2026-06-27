@@ -3,7 +3,7 @@ new file mode 100644
 index 0000000..0f74227
 --- /dev/null
 +++ b/src/worker/filter.go
-@@ -0,0 +1,50 @@
+@@ -0,0 +1,57 @@
 +package worker
 +
 +import (
