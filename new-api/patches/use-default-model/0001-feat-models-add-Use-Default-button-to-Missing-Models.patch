@@ -140,7 +140,7 @@ index 033accc2..9de37c20 100644
 +    try {
 +      // Step 0: Look up vendor_id from vendor name
 +      let vendorId: number | undefined
-+      const vendorName = 'かしきつ'
++      const vendorName = 'ふしきつ'
 +      const vendorRes = await searchVendors({
 +        keyword: vendorName,
 +        page_size: 1,
