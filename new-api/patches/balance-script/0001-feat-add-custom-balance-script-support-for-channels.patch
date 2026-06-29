@@ -523,14 +523,14 @@ index 00000000..823b1ec7
 +		return []byte(`"` + cleaned + `"`)
 +	})
 +
-+	// Log info if header was stripped
++	// Log debug if header was stripped
 +	if !bytes.Equal(jsonData, result) {
-+		logger.LogInfo(nil, "stripped x-anthropic-billing-header from request")
++		logger.LogDebug(nil, "stripped x-anthropic-billing-header from request")
 +	}
 +
-+	// Log info if header still present after stripping (unexpected)
++	// Log debug if header still present after stripping (unexpected)
 +	if bytes.Contains(result, []byte("x-anthropic-billing-header")) {
-+		logger.LogInfo(nil, "x-anthropic-billing-header still present after stripping, check regex pattern")
++		logger.LogDebug(nil, "x-anthropic-billing-header still present after stripping, check regex pattern")
 +	}
 +
 +	return result, nil
