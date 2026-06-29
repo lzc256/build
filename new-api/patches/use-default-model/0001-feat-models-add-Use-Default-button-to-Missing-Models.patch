@@ -1,22 +1,20 @@
-From 5c6f7c2b5a5d65b9196f287406830db543d771ce Mon Sep 17 00:00:00 2001
+From 081b86118387e41ad43a78825fcaeba80d22abc0 Mon Sep 17 00:00:00 2001
 From: lzc256 <i@lzc256.com>
-Date: Mon, 29 Jun 2026 22:10:51 +0800
-Subject: [PATCH] fix(models): correct vendor lookup in Use Default button
+Date: Mon, 29 Jun 2026 22:16:12 +0800
+Subject: [PATCH] fix(models): remove extra closing brace in handleUseDefault
 
-The searchVendors API returns data with an 'items' array, not a direct array.
-Fixed to access vendorRes.data.items[0].id instead of vendorRes.data[0].id.
 ---
- .../dialogs/missing-models-dialog.tsx         | 155 +++++++++++++++++-
+ .../dialogs/missing-models-dialog.tsx         | 154 +++++++++++++++++-
  web/default/src/i18n/locales/en.json          |   4 +-
  web/default/src/i18n/locales/fr.json          |   4 +-
  web/default/src/i18n/locales/ja.json          |   4 +-
  web/default/src/i18n/locales/ru.json          |   4 +-
  web/default/src/i18n/locales/vi.json          |   4 +-
  web/default/src/i18n/locales/zh.json          |   4 +-
- 7 files changed, 170 insertions(+), 9 deletions(-)
+ 7 files changed, 169 insertions(+), 9 deletions(-)
 
 diff --git a/web/default/src/features/models/components/dialogs/missing-models-dialog.tsx b/web/default/src/features/models/components/dialogs/missing-models-dialog.tsx
-index 033accc2..2d1bcf7b 100644
+index 033accc2..9de37c20 100644
 --- a/web/default/src/features/models/components/dialogs/missing-models-dialog.tsx
 +++ b/web/default/src/features/models/components/dialogs/missing-models-dialog.tsx
 @@ -17,9 +17,10 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
@@ -65,7 +63,7 @@ index 033accc2..2d1bcf7b 100644
    const { data, isLoading } = useQuery({
      queryKey: modelsQueryKeys.missing(),
      queryFn: getMissingModels,
-@@ -62,11 +76,132 @@ export function MissingModelsDialog({
+@@ -62,11 +76,131 @@ export function MissingModelsDialog({
    const missingModels = useMemo(() => data?.data || [], [data?.data])
    const pageSize = DEFAULT_PAGE_SIZE
  
@@ -150,7 +148,6 @@ index 033accc2..2d1bcf7b 100644
 +      if (vendorRes.success && vendorRes.data?.items?.length) {
 +        vendorId = vendorRes.data.items[0].id
 +      }
-+      }
 +
 +      // Step 1: Create model record
 +      const modelPayload: Record<string, unknown> = {
@@ -198,7 +195,7 @@ index 033accc2..2d1bcf7b 100644
    useEffect(() => {
      if (open) {
        // eslint-disable-next-line react-hooks/set-state-in-effect
-@@ -181,6 +316,20 @@ export function MissingModelsDialog({
+@@ -181,6 +315,20 @@ export function MissingModelsDialog({
                          copyText={modelName}
                        />
                      </div>
