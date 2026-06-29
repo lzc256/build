@@ -1,0 +1,311 @@
+From faf0e42c911fbd971a6a88600ce1000c0c6db15f Mon Sep 17 00:00:00 2001
+From: lzc256 <i@lzc256.com>
+Date: Mon, 29 Jun 2026 21:14:28 +0800
+Subject: [PATCH] feat(models): add "Use Default" button to Missing Models
+ dialog
+
+- Add "Use Default" button next to "Configure" in Missing Models dialog
+- Auto-configures model with per-request pricing at $0.01
+- Sets exact match (name_rule=0) and assigns vendor from name lookup
+- Updates ModelPrice system option for billing configuration
+- Adds i18n keys for "Use Default" and success message
+---
+ .../dialogs/missing-models-dialog.tsx         | 154 +++++++++++++++++-
+ web/default/src/i18n/locales/en.json          |   4 +-
+ web/default/src/i18n/locales/fr.json          |   4 +-
+ web/default/src/i18n/locales/ja.json          |   4 +-
+ web/default/src/i18n/locales/ru.json          |   4 +-
+ web/default/src/i18n/locales/vi.json          |   4 +-
+ web/default/src/i18n/locales/zh.json          |   4 +-
+ 7 files changed, 169 insertions(+), 9 deletions(-)
+
+diff --git a/web/default/src/features/models/components/dialogs/missing-models-dialog.tsx b/web/default/src/features/models/components/dialogs/missing-models-dialog.tsx
+index 033accc2..a47e2896 100644
+--- a/web/default/src/features/models/components/dialogs/missing-models-dialog.tsx
++++ b/web/default/src/features/models/components/dialogs/missing-models-dialog.tsx
+@@ -17,9 +17,10 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
+ For commercial licensing, please contact support@quantumnous.com
+ */
+ import { useEffect, useMemo, useState } from 'react'
+-import { useQuery } from '@tanstack/react-query'
+-import { ChevronLeft, ChevronRight, Loader2, Plus, Search } from 'lucide-react'
++import { useQuery, useQueryClient } from '@tanstack/react-query'
++import { ChevronLeft, ChevronRight, Loader2, Plus, Search, Zap } from 'lucide-react'
+ import { useTranslation } from 'react-i18next'
++import { toast } from 'sonner'
+ import { useIsMobile } from '@/hooks/use-mobile'
+ import { Button } from '@/components/ui/button'
+ import {
+@@ -32,11 +33,19 @@ import {
+ import { Input } from '@/components/ui/input'
+ import { Dialog } from '@/components/dialog'
+ import { StatusBadge } from '@/components/status-badge'
+-import { getMissingModels } from '../../api'
++import { getMissingModels, createModel, searchVendors } from '../../api'
+ import { DEFAULT_PAGE_SIZE } from '../../constants'
+ import { modelsQueryKeys } from '../../lib'
+ import type { Model } from '../../types'
+ import { useModels } from '../models-provider'
++import {
++  useSystemOptions,
++  getOptionValue,
++} from '@/features/system-settings/hooks/use-system-options'
++import { useUpdateOption } from '@/features/system-settings/hooks/use-update-option'
++import { normalizeJsonString } from '@/features/system-settings/models/utils'
++import type { ModelSettings } from '@/features/system-settings/types'
++import { safeJsonParse } from '@/features/system-settings/utils/json-parser'
+ 
+ type MissingModelsDialogProps = {
+   open: boolean
+@@ -53,6 +62,11 @@ export function MissingModelsDialog({
+   const [searchTerm, setSearchTerm] = useState('')
+   const [currentPage, setCurrentPage] = useState(1)
+ 
++  const queryClient = useQueryClient()
++  const updateOption = useUpdateOption()
++  const { data: systemOptionsData } = useSystemOptions()
++  const [applyingDefault, setApplyingDefault] = useState<string | null>(null)
++
+   const { data, isLoading } = useQuery({
+     queryKey: modelsQueryKeys.missing(),
+     queryFn: getMissingModels,
+@@ -62,11 +76,131 @@ export function MissingModelsDialog({
+   const missingModels = useMemo(() => data?.data || [], [data?.data])
+   const pageSize = DEFAULT_PAGE_SIZE
+ 
++  const modelSettings = useMemo(() => {
++    if (!systemOptionsData?.data) return null
++    // Must provide all ModelSettings keys — getOptionValue only processes keys that exist in defaults.
++    const defaultModelSettings: ModelSettings = {
++      'global.pass_through_request_enabled': false,
++      'global.thinking_model_blacklist': '[]',
++      'global.chat_completions_to_responses_policy': '{}',
++      'general_setting.ping_interval_enabled': false,
++      'general_setting.ping_interval_seconds': 60,
++      'gemini.safety_settings': '',
++      'gemini.version_settings': '',
++      'gemini.supported_imagine_models': '',
++      'gemini.thinking_adapter_enabled': false,
++      'gemini.thinking_adapter_budget_tokens_percentage': 0.6,
++      'gemini.function_call_thought_signature_enabled': false,
++      'gemini.remove_function_response_id_enabled': true,
++      'claude.model_headers_settings': '',
++      'claude.default_max_tokens': '',
++      'claude.thinking_adapter_enabled': true,
++      'claude.thinking_adapter_budget_tokens_percentage': 0.8,
++      ModelPrice: '',
++      ModelRatio: '',
++      CacheRatio: '',
++      CompletionRatio: '',
++      ImageRatio: '',
++      AudioRatio: '',
++      AudioCompletionRatio: '',
++      ExposeRatioEnabled: false,
++      'billing_setting.billing_mode': '{}',
++      'billing_setting.billing_expr': '{}',
++      'tool_price_setting.prices': '{}',
++      TopupGroupRatio: '',
++      GroupRatio: '',
++      UserUsableGroups: '',
++      GroupGroupRatio: '',
++      AutoGroups: '',
++      DefaultUseAutoGroup: false,
++      CreateCacheRatio: '',
++      'group_ratio_setting.group_special_usable_group': '{}',
++      'grok.violation_deduction_enabled': false,
++      'grok.violation_deduction_amount': 0,
++      RetryTimes: 0,
++      ChannelDisableThreshold: '',
++      AutomaticDisableChannelEnabled: false,
++      AutomaticEnableChannelEnabled: false,
++      AutomaticDisableKeywords: '',
++      AutomaticDisableStatusCodes: '401',
++      AutomaticRetryStatusCodes:
++        '100-199,300-399,401-407,409-499,500-503,505-523,525-599',
++      'monitor_setting.auto_test_channel_enabled': false,
++      'monitor_setting.auto_test_channel_minutes': 10,
++      'channel_affinity_setting.enabled': false,
++      'channel_affinity_setting.switch_on_success': true,
++      'channel_affinity_setting.keep_on_channel_disabled': false,
++      'channel_affinity_setting.max_entries': 100000,
++      'channel_affinity_setting.default_ttl_seconds': 3600,
++      'channel_affinity_setting.rules': '[]',
++      'model_deployment.ionet.api_key': '',
++      'model_deployment.ionet.enabled': false,
++    }
++    return getOptionValue(systemOptionsData.data, defaultModelSettings)
++  }, [systemOptionsData])
++
+   const handleConfigureModel = (modelName: string) => {
+     setCurrentRow({ model_name: modelName } as unknown as Model)
+     setOpen('create-model')
+   }
+ 
++  const handleUseDefault = async (modelName: string) => {
++    setApplyingDefault(modelName)
++    try {
++      // Step 0: Look up vendor_id from vendor name
++      let vendorId: number | undefined
++      const vendorName = 'かしきつ'
++      const vendorRes = await searchVendors({
++        keyword: vendorName,
++        page_size: 1,
++      })
++      if (vendorRes.success && vendorRes.data?.length) {
++        vendorId = vendorRes.data[0].id
++      }
++
++      // Step 1: Create model record
++      const modelPayload: Record<string, unknown> = {
++        model_name: modelName,
++        name_rule: 0,
++        status: 1,
++        sync_official: 1,
++      }
++      if (vendorId !== undefined) {
++        modelPayload.vendor_id = vendorId
++      }
++      const response = await createModel(modelPayload as Partial<Model>)
++      if (!response.success) {
++        toast.error(response.message || 'Failed to create model')
++        return
++      }
++
++      // Step 2: Update ModelPrice in system options
++      if (modelSettings) {
++        const priceMap = safeJsonParse<Record<string, number>>(
++          modelSettings.ModelPrice,
++          { fallback: {}, silent: true }
++        )
++        priceMap[modelName] = 0.01
++        const newModelPrice = normalizeJsonString(JSON.stringify(priceMap))
++        if (newModelPrice !== normalizeJsonString(modelSettings.ModelPrice)) {
++          await updateOption.mutateAsync({
++            key: 'ModelPrice',
++            value: newModelPrice,
++          })
++        }
++      }
++
++      toast.success(t('Model configured with default pricing'))
++      queryClient.invalidateQueries({ queryKey: modelsQueryKeys.lists() })
++      queryClient.invalidateQueries({ queryKey: modelsQueryKeys.missing() })
++      queryClient.invalidateQueries({ queryKey: ['system-options'] })
++    } catch (error) {
++      toast.error((error as Error)?.message || 'Operation failed')
++    } finally {
++      setApplyingDefault(null)
++    }
++  }
++
+   useEffect(() => {
+     if (open) {
+       // eslint-disable-next-line react-hooks/set-state-in-effect
+@@ -181,6 +315,20 @@ export function MissingModelsDialog({
+                         copyText={modelName}
+                       />
+                     </div>
++                    <Button
++                      variant='outline'
++                      size='sm'
++                      className='flex-shrink-0 gap-1'
++                      onClick={() => handleUseDefault(modelName)}
++                      disabled={applyingDefault !== null}
++                    >
++                      {applyingDefault === modelName ? (
++                        <Loader2 className='h-4 w-4 animate-spin' />
++                      ) : (
++                        <Zap className='h-4 w-4' />
++                      )}
++                      {t('Use Default')}
++                    </Button>
+                     <Button
+                       size='sm'
+                       className='flex-shrink-0 gap-1'
+diff --git a/web/default/src/i18n/locales/en.json b/web/default/src/i18n/locales/en.json
+index 5796aee6..a69cf4fd 100644
+--- a/web/default/src/i18n/locales/en.json
++++ b/web/default/src/i18n/locales/en.json
+@@ -4758,6 +4758,8 @@
+     "Zero retention": "Zero retention",
+     "Zhipu": "Zhipu",
+     "Zhipu V4": "Zhipu V4",
+-    "Zoom": "Zoom"
++    "Zoom": "Zoom",
++    "Model configured with default pricing": "Model configured with default pricing",
++    "Use Default": "Use Default"
+   }
+ }
+diff --git a/web/default/src/i18n/locales/fr.json b/web/default/src/i18n/locales/fr.json
+index 8774d6b7..af55801b 100644
+--- a/web/default/src/i18n/locales/fr.json
++++ b/web/default/src/i18n/locales/fr.json
+@@ -4758,6 +4758,8 @@
+     "Zero retention": "Aucune rétention",
+     "Zhipu": "Zhipu",
+     "Zhipu V4": "Zhipu V4",
+-    "Zoom": "Zoom"
++    "Zoom": "Zoom",
++    "Model configured with default pricing": "Model configured with default pricing",
++    "Use Default": "Use Default"
+   }
+ }
+diff --git a/web/default/src/i18n/locales/ja.json b/web/default/src/i18n/locales/ja.json
+index fe33d923..13e13b4b 100644
+--- a/web/default/src/i18n/locales/ja.json
++++ b/web/default/src/i18n/locales/ja.json
+@@ -4758,6 +4758,8 @@
+     "Zero retention": "データ保持なし",
+     "Zhipu": "Zhipu",
+     "Zhipu V4": "Zhipu V 4",
+-    "Zoom": "ズーム"
++    "Zoom": "ズーム",
++    "Model configured with default pricing": "Model configured with default pricing",
++    "Use Default": "Use Default"
+   }
+ }
+diff --git a/web/default/src/i18n/locales/ru.json b/web/default/src/i18n/locales/ru.json
+index ce404080..23ad5a6c 100644
+--- a/web/default/src/i18n/locales/ru.json
++++ b/web/default/src/i18n/locales/ru.json
+@@ -4758,6 +4758,8 @@
+     "Zero retention": "Без хранения данных",
+     "Zhipu": "Zhipu",
+     "Zhipu V4": "Zhipu V4",
+-    "Zoom": "Zoom"
++    "Zoom": "Zoom",
++    "Model configured with default pricing": "Model configured with default pricing",
++    "Use Default": "Use Default"
+   }
+ }
+diff --git a/web/default/src/i18n/locales/vi.json b/web/default/src/i18n/locales/vi.json
+index 2114263e..01ebd699 100644
+--- a/web/default/src/i18n/locales/vi.json
++++ b/web/default/src/i18n/locales/vi.json
+@@ -4758,6 +4758,8 @@
+     "Zero retention": "Không lưu dữ liệu",
+     "Zhipu": "Zhipu",
+     "Zhipu V4": "Zhipu V4",
+-    "Zoom": "Zoom"
++    "Zoom": "Zoom",
++    "Model configured with default pricing": "Model configured with default pricing",
++    "Use Default": "Use Default"
+   }
+ }
+diff --git a/web/default/src/i18n/locales/zh.json b/web/default/src/i18n/locales/zh.json
+index 68753f1b..435133df 100644
+--- a/web/default/src/i18n/locales/zh.json
++++ b/web/default/src/i18n/locales/zh.json
+@@ -4758,6 +4758,8 @@
+     "Zero retention": "零数据保留",
+     "Zhipu": "智谱",
+     "Zhipu V4": "智谱 V4",
+-    "Zoom": "缩放"
++    "Zoom": "缩放",
++    "Model configured with default pricing": "模型已使用默认定价配置",
++    "Use Default": "使用默认"
+   }
+ }
+-- 
+2.54.0
+
