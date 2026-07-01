@@ -2,7 +2,7 @@ name: Cleanup Untagged Images
 
 on:
   schedule:
-    - cron: '0 4 * * *'  # Run daily at 4:00 UTC
+    - cron: '12 21 * * *'  # Run daily at 05:12 Beijing time (21:12 UTC)
   workflow_dispatch:
 
 permissions:

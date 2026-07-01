@@ -2,7 +2,7 @@ name: Open-Notebook - Slim Build
 
 on:
   schedule:
-    - cron: '0 4 * * *'  # Check once daily at 4:00 UTC
+    - cron: '56 18 * * *'  # Check once daily at 02:56 Beijing time (18:56 UTC)
   workflow_dispatch:
     inputs:
       build_multi:

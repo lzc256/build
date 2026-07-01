@@ -2,7 +2,7 @@ name: NapCat
 
 on:
   schedule:
-    - cron: '0 3 * * *'
+    - cron: '56 18 * * *'  # Check once daily at 02:56 Beijing time (18:56 UTC)
   workflow_dispatch:
   push:
     paths:
