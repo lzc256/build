@@ -1,5 +1,5 @@
 FROM alpine
-RUN apk add --no-cache python3 py3-pip
+RUN apk add --no-cache python3 py3-pip ffmpeg
 RUN pip3 install requests fastapi uvicorn httpx gradio_client pydantic --break-system-packages
 
 WORKDIR /data
