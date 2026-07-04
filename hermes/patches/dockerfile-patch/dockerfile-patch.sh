@@ -50,8 +50,9 @@ awk '
     print "    && uv sync --frozen --no-install-project --extra matrix \\"
     print "    && uv pip install requests dashscope gradio-client \\"
     # WeChat gateway deps — versions pinned to upstream pyproject.toml extras
-    # (aiohttp/qrcode from [messaging], defusedxml from [wecom]).
-    print "    && uv pip install aiohttp==3.13.4 qrcode==7.4.2 defusedxml==0.7.1 \\"
+    # (qrcode from [messaging], defusedxml from [wecom]).
+    # aiohttp is already provided by --extra matrix at 3.14.1, not pinned here.
+    print "    && uv pip install qrcode==7.4.2 defusedxml==0.7.1 \\"
     print "    && apt-get remove -y gcc g++ make cmake \\"
     print "    && apt-get autoremove -y \\"
     print "    && rm -rf /var/lib/apt/lists/*"
