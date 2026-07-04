@@ -1,0 +1,22 @@
+name: 'Commit successful build'
+description: 'Record a successful build into the GHA cache so subsequent check-update calls skip rebuilding the same upstream state.'
+
+inputs:
+  cache_key:
+    description: 'Cache key identifying the upstream state that was just built (must match the key used in check-update).'
+    required: true
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Write success marker
+      shell: bash
+      run: |
+        echo "done" > .build_success
+        echo "Marked build as successful for key: ${{ inputs.cache_key }}"
+
+    - name: Save marker to cache
+      uses: actions/cache/save@v4
+      with:
+        path: .build_success
+        key: ${{ inputs.cache_key }}

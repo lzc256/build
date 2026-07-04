@@ -1,0 +1,41 @@
+name: 'Check if build is needed'
+description: 'Check the GHA cache to determine whether a rebuild is required.'
+
+inputs:
+  cache_key:
+    description: 'Cache key identifying the current upstream state (e.g. alpine-<digest>, newapi-<tag>, yarr-<short-commit>).'
+    required: true
+
+outputs:
+  should_build:
+    description: '"true" if a build should run, "false" otherwise.'
+    value: ${{ steps.compare.outputs.should_build }}
+  cache_key:
+    description: 'Echoes the provided cache_key so callers can thread it into the build job.'
+    value: ${{ inputs.cache_key }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Cache lookup
+      if: github.event_name != 'push'
+      id: cache
+      uses: actions/cache@v4
+      with:
+        path: .build_success
+        key: ${{ inputs.cache_key }}
+
+    - name: Compare
+      id: compare
+      shell: bash
+      run: |
+        if [ "${{ github.event_name }}" = "push" ]; then
+          echo "Push triggered. Building."
+          echo "should_build=true" >> $GITHUB_OUTPUT
+        elif [ -f .build_success ]; then
+          echo "Cache hit (${{ inputs.cache_key }}). Skipping build."
+          echo "should_build=false" >> $GITHUB_OUTPUT
+        else
+          echo "No cache hit (${{ inputs.cache_key }}). Build needed."
+          echo "should_build=true" >> $GITHUB_OUTPUT
+        fi
