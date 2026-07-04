@@ -129,6 +129,7 @@ jobs:
           file: inventree-src/contrib/container/Dockerfile
           target: production
           push: true
+          provenance: false
           tags: |
             ${{ env.REGISTRY }}/${{ github.repository }}:inventree
             ${{ env.REGISTRY }}/${{ github.repository }}:inventree-${{ needs.check-update.outputs.version }}

@@ -113,6 +113,7 @@ jobs:
           context: open-notebook-src
           file: open-notebook-src/Dockerfile.single
           push: true
+          provenance: false
           tags: ${{ env.REGISTRY }}/${{ github.repository }}:open-notebook
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -123,6 +124,7 @@ jobs:
         with:
           context: open-notebook-src
           push: true
+          provenance: false
           tags: ${{ env.REGISTRY }}/${{ github.repository }}:open-notebook-multi
           cache-from: type=gha
           cache-to: type=gha,mode=max

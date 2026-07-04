@@ -137,6 +137,7 @@ jobs:
         with:
           context: new-api-src
           push: true
+          provenance: false
           tags: |
             ${{ env.REGISTRY }}/${{ github.repository }}:newapi
             ${{ env.REGISTRY }}/${{ github.repository }}:newapi-${{ needs.check-update.outputs.tag }}

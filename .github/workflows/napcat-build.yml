@@ -66,6 +66,7 @@ jobs:
         with:
           context: napcat
           push: true
+          provenance: false
           tags: |
             ${{ env.REGISTRY }}/${{ github.repository }}:napcat
             ${{ env.REGISTRY }}/${{ github.repository }}:napcat-${{ needs.check-update.outputs.version }}

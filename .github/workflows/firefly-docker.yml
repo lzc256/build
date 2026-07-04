@@ -84,6 +84,7 @@ jobs:
           context: firefly
           file: firefly/Dockerfile
           push: true
+          provenance: false
           build-args: |
             FIREFLY_VERSION=${{ needs.check-update.outputs.firefly_version }}
           tags: |

@@ -99,6 +99,7 @@ jobs:
           context: yarr-src
           file: yarr-src/etc/dockerfile
           push: true
+          provenance: false
           tags: |
             ${{ env.REGISTRY }}/${{ github.repository }}:yarr
             ${{ env.REGISTRY }}/${{ github.repository }}:yarr-${{ needs.check-update.outputs.short_commit }}

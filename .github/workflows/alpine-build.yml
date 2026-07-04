@@ -81,6 +81,7 @@ jobs:
         with:
           context: alpine
           push: true
+          provenance: false
           tags: |
             ${{ env.REGISTRY }}/${{ github.repository }}:alpine
           cache-from: type=gha

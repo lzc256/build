@@ -103,6 +103,7 @@ jobs:
         with:
           context: hermes-src
           push: true
+          provenance: false
           tags: ${{ env.REGISTRY }}/${{ github.repository }}:hermes
           cache-from: type=gha
           cache-to: type=gha,mode=max
