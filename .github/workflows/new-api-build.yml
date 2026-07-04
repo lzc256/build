@@ -109,10 +109,10 @@ jobs:
           source scripts/common.sh
           apply_patch billing-header-filter new-api-src
 
-      - name: Apply zero-completion-compact-error patch
-        run: |
-          source scripts/common.sh
-          apply_patch zero-completion-compact-error new-api-src
+      # - name: Apply zero-completion-compact-error patch
+      #   run: |
+      #     source scripts/common.sh
+      #     apply_patch zero-completion-compact-error new-api-src
 
       - name: Verify patches applied
         run: |
