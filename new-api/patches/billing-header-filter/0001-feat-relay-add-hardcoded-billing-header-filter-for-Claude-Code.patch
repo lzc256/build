@@ -1,15 +1,9 @@
-From 468aa8dbc700cde91d16fb68efd03bb259c326ef Mon Sep 17 00:00:00 2001
+From 5556f37039e715a8281204824909431ff2243eef Mon Sep 17 00:00:00 2001
 From: lzc256 <i@lzc256.com>
-Date: Thu, 18 Jun 2026 11:03:06 +0800
-Subject: [PATCH] feat(relay): add hardcoded billing header filter for Claude
- Code
+Date: Sat, 4 Jul 2026 08:10:01 +0800
+Subject: [PATCH 2/2] feat(relay): add hardcoded billing header filter for
+ Claude Code
 
-- Strip x-anthropic-billing-header from all JSON string fields
-- Only matches strings that START with the header (no false positives)
-- Regex: x-anthropic-billing-header:.*?cch=[^;]*;?
-- Logs info when header stripped, info if still present after (unexpected)
-- Applies to ALL channels, cannot be disabled from admin panel
-- Execution order: RemoveDisabledFields -> ApplyBuiltinOverride -> ApplyParamOverrideWithRelayInfo
 ---
  relay/claude_handler.go          |  6 ++++
  relay/common/builtin_override.go | 54 ++++++++++++++++++++++++++++++++
@@ -36,7 +30,7 @@ index 52736320..5e05fcc7 100644
  			jsonData, err = relaycommon.ApplyParamOverrideWithRelayInfo(jsonData, info)
 diff --git a/relay/common/builtin_override.go b/relay/common/builtin_override.go
 new file mode 100644
-index 00000000..137f852c
+index 00000000..a129ae71
 --- /dev/null
 +++ b/relay/common/builtin_override.go
 @@ -0,0 +1,54 @@
@@ -87,9 +81,9 @@ index 00000000..137f852c
 +		logger.LogDebug(nil, "stripped x-anthropic-billing-header from request")
 +	}
 +
-+	// Log warn if header still present after stripping (unexpected)
++	// Log debug if header still present after stripping (unexpected)
 +	if bytes.Contains(result, []byte("x-anthropic-billing-header")) {
-+		logger.LogInfo(nil, "[warn] x-anthropic-billing-header still present after stripping, check regex pattern")
++		logger.LogDebug(nil, "x-anthropic-billing-header still present after stripping, check regex pattern")
 +	}
 +
 +	return result, nil

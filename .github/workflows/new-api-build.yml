@@ -104,12 +104,25 @@ jobs:
           source scripts/common.sh
           apply_patch use-default-model new-api-src
 
+      - name: Apply billing-header-filter patch
+        run: |
+          source scripts/common.sh
+          apply_patch billing-header-filter new-api-src
+
+      - name: Apply zero-completion-compact-error patch
+        run: |
+          source scripts/common.sh
+          apply_patch zero-completion-compact-error new-api-src
+
       - name: Verify patches applied
         run: |
           echo "=== Patch verification ==="
           git -C new-api-src diff --stat
           test -f new-api-src/controller/channel_balance_script.go && echo "balance-script: channel_balance_script.go OK" || echo "balance-script: channel_balance_script.go MISSING"
           grep -q "handleUseDefault" new-api-src/web/default/src/features/models/components/dialogs/missing-models-dialog.tsx && echo "use-default-model: handleUseDefault OK" || echo "use-default-model: handleUseDefault MISSING"
+          test -f new-api-src/relay/common/builtin_override.go && echo "billing-header-filter: builtin_override.go OK" || echo "billing-header-filter: builtin_override.go MISSING"
+          test -f new-api-src/relay/common/builtin_response_check.go && echo "zero-completion: builtin_response_check.go OK" || echo "zero-completion: builtin_response_check.go MISSING"
+          grep -q "CheckZeroCompletion" new-api-src/relay/claude_handler.go && grep -q "CheckZeroCompletion" new-api-src/relay/compatible_handler.go && echo "zero-completion: wiring OK" || echo "zero-completion: wiring MISSING"
 
       - name: Login to GHCR
         uses: docker/login-action@v4

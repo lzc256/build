@@ -1,7 +1,8 @@
-From 081b86118387e41ad43a78825fcaeba80d22abc0 Mon Sep 17 00:00:00 2001
+From f0cff10d2481a65e1112b740e72518eef5488a45 Mon Sep 17 00:00:00 2001
 From: lzc256 <i@lzc256.com>
-Date: Mon, 29 Jun 2026 22:16:12 +0800
-Subject: [PATCH] fix(models): remove extra closing brace in handleUseDefault
+Date: Sat, 4 Jul 2026 08:14:07 +0800
+Subject: [PATCH] feat(models): add Use Default button to Missing Models
+ (rebased to rc.16)
 
 ---
  .../dialogs/missing-models-dialog.tsx         | 154 +++++++++++++++++-
@@ -14,32 +15,27 @@ Subject: [PATCH] fix(models): remove extra closing brace in handleUseDefault
  7 files changed, 169 insertions(+), 9 deletions(-)
 
 diff --git a/web/default/src/features/models/components/dialogs/missing-models-dialog.tsx b/web/default/src/features/models/components/dialogs/missing-models-dialog.tsx
-index 033accc2..9de37c20 100644
+index bce9dc7d..610c7c28 100644
 --- a/web/default/src/features/models/components/dialogs/missing-models-dialog.tsx
 +++ b/web/default/src/features/models/components/dialogs/missing-models-dialog.tsx
-@@ -17,9 +17,10 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
+@@ -16,10 +16,11 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
+ 
  For commercial licensing, please contact support@quantumnous.com
  */
- import { useEffect, useMemo, useState } from 'react'
 -import { useQuery } from '@tanstack/react-query'
 -import { ChevronLeft, ChevronRight, Loader2, Plus, Search } from 'lucide-react'
 +import { useQuery, useQueryClient } from '@tanstack/react-query'
 +import { ChevronLeft, ChevronRight, Loader2, Plus, Search, Zap } from 'lucide-react'
+ import { useEffect, useMemo, useState } from 'react'
  import { useTranslation } from 'react-i18next'
 +import { toast } from 'sonner'
- import { useIsMobile } from '@/hooks/use-mobile'
- import { Button } from '@/components/ui/button'
- import {
-@@ -32,11 +33,19 @@ import {
- import { Input } from '@/components/ui/input'
+ 
  import { Dialog } from '@/components/dialog'
  import { StatusBadge } from '@/components/status-badge'
--import { getMissingModels } from '../../api'
-+import { getMissingModels, createModel, searchVendors } from '../../api'
- import { DEFAULT_PAGE_SIZE } from '../../constants'
- import { modelsQueryKeys } from '../../lib'
- import type { Model } from '../../types'
- import { useModels } from '../models-provider'
+@@ -33,8 +34,16 @@ import {
+ } from '@/components/ui/empty'
+ import { Input } from '@/components/ui/input'
+ import { useIsMobile } from '@/hooks/use-mobile'
 +import {
 +  useSystemOptions,
 +  getOptionValue,
@@ -49,9 +45,12 @@ index 033accc2..9de37c20 100644
 +import type { ModelSettings } from '@/features/system-settings/types'
 +import { safeJsonParse } from '@/features/system-settings/utils/json-parser'
  
- type MissingModelsDialogProps = {
-   open: boolean
-@@ -53,6 +62,11 @@ export function MissingModelsDialog({
+-import { getMissingModels } from '../../api'
++import { getMissingModels, createModel, searchVendors } from '../../api'
+ import { DEFAULT_PAGE_SIZE } from '../../constants'
+ import { modelsQueryKeys } from '../../lib'
+ import type { Model } from '../../types'
+@@ -55,6 +64,11 @@ export function MissingModelsDialog({
    const [searchTerm, setSearchTerm] = useState('')
    const [currentPage, setCurrentPage] = useState(1)
  
@@ -63,7 +62,7 @@ index 033accc2..9de37c20 100644
    const { data, isLoading } = useQuery({
      queryKey: modelsQueryKeys.missing(),
      queryFn: getMissingModels,
-@@ -62,11 +76,131 @@ export function MissingModelsDialog({
+@@ -64,11 +78,131 @@ export function MissingModelsDialog({
    const missingModels = useMemo(() => data?.data || [], [data?.data])
    const pageSize = DEFAULT_PAGE_SIZE
  
@@ -195,7 +194,7 @@ index 033accc2..9de37c20 100644
    useEffect(() => {
      if (open) {
        // eslint-disable-next-line react-hooks/set-state-in-effect
-@@ -181,6 +315,20 @@ export function MissingModelsDialog({
+@@ -183,6 +317,20 @@ export function MissingModelsDialog({
                          copyText={modelName}
                        />
                      </div>
@@ -217,10 +216,10 @@ index 033accc2..9de37c20 100644
                        size='sm'
                        className='flex-shrink-0 gap-1'
 diff --git a/web/default/src/i18n/locales/en.json b/web/default/src/i18n/locales/en.json
-index 5796aee6..a69cf4fd 100644
+index 569dd499..e3f56157 100644
 --- a/web/default/src/i18n/locales/en.json
 +++ b/web/default/src/i18n/locales/en.json
-@@ -4758,6 +4758,8 @@
+@@ -4977,6 +4977,8 @@
      "Zero retention": "Zero retention",
      "Zhipu": "Zhipu",
      "Zhipu V4": "Zhipu V4",
@@ -231,10 +230,10 @@ index 5796aee6..a69cf4fd 100644
    }
  }
 diff --git a/web/default/src/i18n/locales/fr.json b/web/default/src/i18n/locales/fr.json
-index 8774d6b7..af55801b 100644
+index 8ff9c68a..aa25ac0a 100644
 --- a/web/default/src/i18n/locales/fr.json
 +++ b/web/default/src/i18n/locales/fr.json
-@@ -4758,6 +4758,8 @@
+@@ -4977,6 +4977,8 @@
      "Zero retention": "Aucune rétention",
      "Zhipu": "Zhipu",
      "Zhipu V4": "Zhipu V4",
@@ -245,10 +244,10 @@ index 8774d6b7..af55801b 100644
    }
  }
 diff --git a/web/default/src/i18n/locales/ja.json b/web/default/src/i18n/locales/ja.json
-index fe33d923..13e13b4b 100644
+index 1bbcf897..5b5c2d14 100644
 --- a/web/default/src/i18n/locales/ja.json
 +++ b/web/default/src/i18n/locales/ja.json
-@@ -4758,6 +4758,8 @@
+@@ -4977,6 +4977,8 @@
      "Zero retention": "データ保持なし",
      "Zhipu": "Zhipu",
      "Zhipu V4": "Zhipu V 4",
@@ -259,10 +258,10 @@ index fe33d923..13e13b4b 100644
    }
  }
 diff --git a/web/default/src/i18n/locales/ru.json b/web/default/src/i18n/locales/ru.json
-index ce404080..23ad5a6c 100644
+index a9044cb6..0d30faa7 100644
 --- a/web/default/src/i18n/locales/ru.json
 +++ b/web/default/src/i18n/locales/ru.json
-@@ -4758,6 +4758,8 @@
+@@ -4977,6 +4977,8 @@
      "Zero retention": "Без хранения данных",
      "Zhipu": "Zhipu",
      "Zhipu V4": "Zhipu V4",
@@ -273,10 +272,10 @@ index ce404080..23ad5a6c 100644
    }
  }
 diff --git a/web/default/src/i18n/locales/vi.json b/web/default/src/i18n/locales/vi.json
-index 2114263e..01ebd699 100644
+index 0fb82378..691c2280 100644
 --- a/web/default/src/i18n/locales/vi.json
 +++ b/web/default/src/i18n/locales/vi.json
-@@ -4758,6 +4758,8 @@
+@@ -4977,6 +4977,8 @@
      "Zero retention": "Không lưu dữ liệu",
      "Zhipu": "Zhipu",
      "Zhipu V4": "Zhipu V4",
@@ -287,10 +286,10 @@ index 2114263e..01ebd699 100644
    }
  }
 diff --git a/web/default/src/i18n/locales/zh.json b/web/default/src/i18n/locales/zh.json
-index 68753f1b..435133df 100644
+index e78ac5b4..4807f035 100644
 --- a/web/default/src/i18n/locales/zh.json
 +++ b/web/default/src/i18n/locales/zh.json
-@@ -4758,6 +4758,8 @@
+@@ -4977,6 +4977,8 @@
      "Zero retention": "零数据保留",
      "Zhipu": "智谱",
      "Zhipu V4": "智谱 V4",
