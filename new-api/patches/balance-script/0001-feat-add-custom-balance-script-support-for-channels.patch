@@ -1,998 +1,609 @@
-From 3d6176c375b1acca970724ca543246be17746017 Mon Sep 17 00:00:00 2001
+From ea5ab237377e04d788a01d482c3098a3a6bac819 Mon Sep 17 00:00:00 2001
 From: lzc256 <i@lzc256.com>
-Date: Sun, 5 Jul 2026 10:02:02 +0800
-Subject: [PATCH] feat(new-api): add state persistence + RestrictedPython +
- seccomp for balance script
+Date: Sun, 5 Jul 2026 10:20:31 +0800
+Subject: [PATCH] feat: add custom balance script support for channels
 
+- Add balance_script field in ChannelOtherSettings for custom Python scripts
 - Add BalanceScriptState column for persisting script state (max 64KB)
-- Input via env vars (CHANNEL_BASE_URL/KEY/STATE, etc.), no os.Environ() inheritance
+- Execute scripts via prlimit with CPU/memory/process limits
+- Pass channel info via env vars: CHANNEL_BASE_URL, CHANNEL_KEY, CHANNEL_TYPE, CHANNEL_ID, CHANNEL_IS_MULTI_KEY, CHANNEL_STATE
 - Output: JSON {balance, state} or plain number (backward compatible)
 - RestrictedPython: compile_restricted + safe_builtins + safer_getattr + import whitelist
 - seccomp: allow read-only open + network, deny write/execve/fork
 - Atomic state update with GetChannelPollingLock serialization
-- Update frontend template with state example
-- Install RestrictedPython + seccomp in Dockerfile
-- Remove stale balance-script.patch
+- Add BalanceScriptField component in frontend drawer
+- Update Dockerfile to install python3, RestrictedPython, python3-seccomp
 ---
- CLAUDE.md                                     |   4 +
- new-api/patches/balance-script.patch          | 557 ------------------
- ...-balance-script-support-for-channels.patch | 263 +++++++--
- 3 files changed, 217 insertions(+), 607 deletions(-)
- delete mode 100644 new-api/patches/balance-script.patch
+ Dockerfile                                    |   2 +
+ controller/channel-billing.go                 |  12 +-
+ controller/channel_balance_script.go          | 267 ++++++++++++++++++
+ dto/channel_settings.go                       |   1 +
+ model/channel.go                              |   7 +
+ .../drawers/channel-mutate-drawer.tsx         |   6 +
+ .../sections/balance-script-section.tsx       | 107 +++++++
+ .../components/drawers/sections/index.ts      |   1 +
+ .../src/features/channels/lib/channel-form.ts |  12 +
+ web/default/src/features/channels/types.ts    |   1 +
+ 10 files changed, 413 insertions(+), 3 deletions(-)
+ create mode 100644 controller/channel_balance_script.go
+ create mode 100644 web/default/src/features/channels/components/drawers/sections/balance-script-section.tsx
 
-diff --git a/CLAUDE.md b/CLAUDE.md
-index 2a9b4fa..a52d50d 100644
---- a/CLAUDE.md
-+++ b/CLAUDE.md
-@@ -49,6 +49,10 @@ The framework operates across multiple project directories, each with its own `p
- 2. Each patch script is executed with the target directory as argument
- 3. CI workflows (`.github/workflows/*.yml`) run builds after patches are applied
+diff --git a/Dockerfile b/Dockerfile
+index e2788f5..6dfc965 100644
+--- a/Dockerfile
++++ b/Dockerfile
+@@ -42,6 +42,8 @@ FROM debian:bookworm-slim@sha256:f06537653ac770703bc45b4b113475bd402f451e85223f0
  
-+## Upstream Repositories
+ RUN apt-get update \
+     && apt-get install -y --no-install-recommends ca-certificates tzdata libasan8 wget \
++       python3 python3-pip python3-seccomp \
++    && pip install --break-system-packages RestrictedPython \
+     && rm -rf /var/lib/apt/lists/* \
+     && update-ca-certificates
+ 
+diff --git a/controller/channel-billing.go b/controller/channel-billing.go
+index 751ee36..7254d4d 100644
+--- a/controller/channel-billing.go
++++ b/controller/channel-billing.go
+@@ -357,6 +357,12 @@ func updateChannelMoonshotBalance(channel *model.Channel) (float64, error) {
+ }
+ 
+ func updateChannelBalance(channel *model.Channel) (float64, error) {
++	// Custom balance script takes priority over built-in balance fetchers
++	settings := channel.GetOtherSettings()
++	if settings.BalanceScript != "" {
++		return updateChannelBalanceScript(channel, settings.BalanceScript)
++	}
 +
-+The `.upstream-repos/` directory contains cloned upstream repositories used for patch development and testing. These are temporary working directories that Claude can freely modify (reset, apply patches, make changes, generate new patches). The user does not manually modify these directories.
+ 	baseURL := constant.ChannelBaseURLs[channel.Type]
+ 	if channel.GetBaseURL() == "" {
+ 		channel.BaseURL = &baseURL
+@@ -432,7 +438,7 @@ func UpdateChannelBalance(c *gin.Context) {
+ 		common.ApiError(c, err)
+ 		return
+ 	}
+-	if channel.ChannelInfo.IsMultiKey {
++	if channel.ChannelInfo.IsMultiKey && channel.GetOtherSettings().BalanceScript == "" {
+ 		c.JSON(http.StatusOK, gin.H{
+ 			"success": false,
+ 			"message": "多密钥渠道不支持余额查询",
+@@ -460,8 +466,8 @@ func updateAllChannelsBalance() error {
+ 		if channel.Status != common.ChannelStatusEnabled {
+ 			continue
+ 		}
+-		if channel.ChannelInfo.IsMultiKey {
+-			continue // skip multi-key channels
++		if channel.ChannelInfo.IsMultiKey && channel.GetOtherSettings().BalanceScript == "" {
++			continue // skip multi-key channels unless they have balance script
+ 		}
+ 		// TODO: support Azure
+ 		//if channel.Type != common.ChannelTypeOpenAI && channel.Type != common.ChannelTypeCustom {
+diff --git a/controller/channel_balance_script.go b/controller/channel_balance_script.go
+new file mode 100644
+index 0000000..3869cb7
+--- /dev/null
++++ b/controller/channel_balance_script.go
+@@ -0,0 +1,267 @@
++package controller
 +
- ## Adding a New Project
++import (
++	"bytes"
++	"context"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"io"
++	"os/exec"
++	"strconv"
++	"strings"
++	"syscall"
++	"time"
++
++	"github.com/QuantumNous/new-api/model"
++)
++
++const (
++	balanceScriptTimeout      = 30 * time.Second
++	balanceScriptMaxOutputLen = 72 * 1024         // 72KB cap on script stdout/stderr (extra room for state JSON)
++	balanceScriptMemoryLimit  = 128 * 1024 * 1024 // 128MB virtual address space
++	balanceScriptCPULimit     = 25                // 25s CPU time (wall clock is 30s)
++	balanceScriptNprocLimit   = 64                // max processes/threads
++	balanceScriptMaxStateLen  = 65536             // 64KB max state size
++)
++
++// updateChannelBalanceScript executes a user-defined Python script to fetch channel balance.
++// The script receives channel info via environment variables:
++//   - CHANNEL_BASE_URL: the channel's base URL
++//   - CHANNEL_KEY: the channel's API key (for multi-key channels: all keys joined by ",")
++//   - CHANNEL_TYPE: the channel type integer
++//   - CHANNEL_ID: the channel ID
++//   - CHANNEL_IS_MULTI_KEY: "1" if multi-key, "0" otherwise
++//   - CHANNEL_STATE: previous state (empty on first run)
++//   - BALANCE_SCRIPT_SOURCE: the user script source code
++//
++// The script must print to stdout:
++//   - JSON object: {"balance": <number>, "state": <any json value>}
++//   - Or a single number (backward compatible, state unchanged)
++//
++// Security layers:
++//  1. RestrictedPython: compile_restricted + safe_builtins + safer_getattr + import whitelist
++//  2. seccomp: allow read-only open + network, deny write/execve/fork
++//  3. prlimit: CPU/memory/process limits
++//  4. env whitelist: only CHANNEL_* + minimal PATH/HOME/LANG
++func updateChannelBalanceScript(channel *model.Channel, script string) (float64, error) {
++	// Acquire per-channel lock to serialize state read/write
++	lock := model.GetChannelPollingLock(channel.Id)
++	lock.Lock()
++	defer lock.Unlock()
++
++	ctx, cancel := context.WithTimeout(context.Background(), balanceScriptTimeout)
++	defer cancel()
++
++	// For multi-key channels, join all keys with ","; otherwise use the single key.
++	keyEnv := channel.Key
++	isMultiKey := "0"
++	if channel.ChannelInfo.IsMultiKey {
++		keyEnv = strings.Join(channel.GetKeys(), ",")
++		isMultiKey = "1"
++	}
++
++	// Build env whitelist (do NOT inherit os.Environ() to avoid leaking secrets)
++	cmdEnv := []string{
++		"PATH=/usr/bin:/bin",
++		"HOME=/nonexistent",
++		"LANG=C.UTF-8",
++		"PYTHONNOUSERSITE=1",
++		"PYTHONDONTWRITEBYTECODE=1",
++		"CHANNEL_BASE_URL=" + channel.GetBaseURL(),
++		"CHANNEL_KEY=" + keyEnv,
++		"CHANNEL_TYPE=" + strconv.Itoa(channel.Type),
++		"CHANNEL_ID=" + strconv.Itoa(channel.Id),
++		"CHANNEL_IS_MULTI_KEY=" + isMultiKey,
++		"CHANNEL_STATE=" + channel.BalanceScriptState,
++		"BALANCE_SCRIPT_SOURCE=" + script,
++	}
++
++	// prlimit applies RLIMIT_* before exec; child python3 inherits the limits.
++	cmd := exec.CommandContext(ctx, "prlimit",
++		fmt.Sprintf("--as=%d", balanceScriptMemoryLimit),
++		fmt.Sprintf("--cpu=%d", balanceScriptCPULimit),
++		fmt.Sprintf("--nproc=%d", balanceScriptNprocLimit),
++		"--", "python3", "-I", "-c", balanceScriptHarness)
++	cmd.Env = cmdEnv
++	// Run in its own process group so we can kill any subprocesses on timeout.
++	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
++
++	// Cap stdout/stderr so a runaway print doesn't blow up our memory.
++	var stdout, stderr bytes.Buffer
++	cmd.Stdout = &limitWriter{w: &stdout, n: balanceScriptMaxOutputLen}
++	cmd.Stderr = &limitWriter{w: &stderr, n: balanceScriptMaxOutputLen}
++
++	if err := cmd.Start(); err != nil {
++		return 0, fmt.Errorf("balance script start failed: %w", err)
++	}
++
++	// On context timeout, signal the whole process group (negative pid).
++	done := make(chan error, 1)
++	go func() { done <- cmd.Wait() }()
++
++	var waitErr error
++	select {
++	case <-ctx.Done():
++		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
++		<-done
++		return 0, fmt.Errorf("balance script timed out after %s", balanceScriptTimeout)
++	case waitErr = <-done:
++	}
++
++	if waitErr != nil {
++		var exitErr *exec.ExitError
++		if errors.As(waitErr, &exitErr) {
++			return 0, fmt.Errorf("balance script error: %s", strings.TrimSpace(stderr.String()))
++		}
++		return 0, waitErr
++	}
++
++	// Parse output: JSON object or plain number
++	output := strings.TrimSpace(stdout.String())
++	if strings.HasPrefix(output, "{") {
++		var result struct {
++			Balance float64         `json:"balance"`
++			State   json.RawMessage `json:"state"`
++		}
++		if err := json.Unmarshal([]byte(output), &result); err != nil {
++			return 0, fmt.Errorf("balance script invalid JSON: %w, output: %s", err, output)
++		}
++		if len(result.State) > balanceScriptMaxStateLen {
++			return 0, fmt.Errorf("balance script state exceeds %d bytes", balanceScriptMaxStateLen)
++		}
++		// Atomic update: write state first, then balance
++		if err := channel.UpdateBalanceScriptState(string(result.State)); err != nil {
++			return 0, fmt.Errorf("failed to save balance script state: %w", err)
++		}
++		channel.UpdateBalance(result.Balance)
++		return result.Balance, nil
++	}
++
++	// Backward compatible: plain number output, state unchanged
++	balance, err := strconv.ParseFloat(output, 64)
++	if err != nil {
++		return 0, fmt.Errorf("balance script output invalid (expected number or JSON): %s", output)
++	}
++	channel.UpdateBalance(balance)
++	return balance, nil
++}
++
++// limitWriter writes to w until n bytes have been written, then silently discards the rest.
++type limitWriter struct {
++	w io.Writer
++	n int64
++}
++
++func (lw *limitWriter) Write(p []byte) (int, error) {
++	if lw.n <= 0 {
++		return len(p), nil
++	}
++	if int64(len(p)) > lw.n {
++		_, err := lw.w.Write(p[:lw.n])
++		lw.n = 0
++		if err != nil {
++			return 0, err
++		}
++		return len(p), nil
++	}
++	n, err := lw.w.Write(p)
++	lw.n -= int64(n)
++	return n, err
++}
++
++// balanceScriptHarness is the trusted Python wrapper that runs the user script.
++// It enforces RestrictedPython + seccomp before executing untrusted code.
++const balanceScriptHarness = `
++import os, json
++
++# Pre-import all allowed modules BEFORE seccomp filter is installed
++import urllib, urllib.request, urllib.parse, urllib.error
++import math, datetime, re, base64, hashlib, hmac
++import time, ssl, socket, http
++import collections, itertools, functools, string
++import random, secrets, uuid, decimal
++
++# Now import RestrictedPython and seccomp
++from RestrictedPython import compile_restricted, safe_builtins
++from RestrictedPython.Guards import safer_getattr, guarded_iter_unpack_sequence
++from RestrictedPython.Eval import default_guarded_getiter
++
++# Install seccomp filter BEFORE executing user code
++try:
++    from seccomp import SyscallFilter, Action, Arg
++    O_ACCMODE = 3
++    f = SyscallFilter(def_action=Action.ERRNO(1))
++    # Allow syscalls needed for Python runtime and network I/O
++    for s in [
++        'read', 'write', 'close', 'mmap', 'mprotect', 'munmap', 'brk',
++        'rt_sigaction', 'rt_sigprocmask', 'rt_sigreturn', 'ioctl',
++        'poll', 'ppoll', 'pselect6', 'nanosleep', 'clock_gettime', 'clock_nanosleep',
++        'stat', 'lstat', 'newfstatat', 'readlink', 'readlinkat', 'getcwd',
++        'access', 'faccessat', 'fcntl', 'dup', 'dup2', 'dup3',
++        'getrandom', 'futex', 'prlimit64', 'arch_prctl', 'rseq',
++        'set_tid_address', 'set_robust_list', 'madvise', 'sched_yield',
++        'getpid', 'gettid', 'getuid', 'geteuid', 'getgid', 'getegid',
++        'socket', 'connect', 'bind', 'listen', 'accept', 'accept4',
++        'sendto', 'recvfrom', 'sendmsg', 'recvmsg', 'shutdown',
++        'setsockopt', 'getsockopt', 'getsockname', 'getpeername',
++        'uname', 'sysinfo', 'getdents64', 'pread64', 'pwrite64',
++    ]:
++        f.add_rule(Action.ALLOW, s)
++    # Allow read-only open/openat
++    f.add_rule(Action.ALLOW, 'openat', [Arg(2, 'masked_eq', O_ACCMODE, 0)])
++    f.add_rule(Action.ERRNO(1), 'openat')
++    f.add_rule(Action.ALLOW, 'open', [Arg(1, 'masked_eq', O_ACCMODE, 0)])
++    f.add_rule(Action.ERRNO(1), 'open')
++    # Default ERRNO(1) blocks: execve, execveat, fork, vfork, clone,
++    # unlink, rename, mkdir, chmod, chown, truncate, creat, etc.
++    f.load()
++except Exception as e:
++    # seccomp not available (e.g., in dev environment), continue without it
++    pass
++
++# User script source from env
++user_script = os.environ.get("BALANCE_SCRIPT_SOURCE", "")
++
++# RestrictedPython: compile with guards
++ALLOWED_MODS = {
++    'urllib', 'urllib.request', 'urllib.parse', 'urllib.error',
++    'json', 'math', 'datetime', 're', 'base64', 'hashlib', 'hmac',
++    'time', 'ssl', 'socket', 'http', 'collections', 'itertools',
++    'functools', 'string', 'random', 'secrets', 'uuid', 'decimal',
++}
++
++def _safe_import(name, g=None, l=None, ff=(), level=0):
++    root = name.split('.')[0]
++    if root not in ALLOWED_MODS:
++        raise ImportError(f"module '{name}' is not allowed in balance script")
++    return __builtins__.__import__(name, g, l, ff, level)
++
++# Build restricted builtins
++b = dict(safe_builtins)
++b['__import__'] = _safe_import
++b['print'] = print  # Python 3 print is not rewritten by RestrictedPython
++
++# Build restricted globals with guards
++g = {
++    '__builtins__': b,
++    '__metaclass__': type,
++    '__name__': '__main__',
++    '_getattr_': safer_getattr,  # Blocks __subclasses__, __globals__, etc.
++    '_getitem_': lambda o, k: o[k],
++    '_write_': lambda o: o,
++    '_getiter_': default_guarded_getiter,
++    '_iter_unpack_sequence_': guarded_iter_unpack_sequence,
++}
++
++# Compile and execute user script
++try:
++    code = compile_restricted(user_script, '<balance_script>', 'exec')
++    exec(code, g)
++except SyntaxError as e:
++    print(json.dumps({"error": f"syntax error: {e}"}), file=__import__('sys').stderr)
++    raise SystemExit(2)
++except Exception as e:
++    print(json.dumps({"error": str(e)}), file=__import__('sys').stderr)
++    raise SystemExit(1)
++`
+diff --git a/dto/channel_settings.go b/dto/channel_settings.go
+index dc03773..542a58f 100644
+--- a/dto/channel_settings.go
++++ b/dto/channel_settings.go
+@@ -49,6 +49,7 @@ type ChannelOtherSettings struct {
+ 	UpstreamModelUpdateLastRemovedModels  []string              `json:"upstream_model_update_last_removed_models,omitempty"`  // 上次检测到的可删除模型
+ 	UpstreamModelUpdateIgnoredModels      []string              `json:"upstream_model_update_ignored_models,omitempty"`       // 手动忽略的模型
+ 	AdvancedCustom                        *AdvancedCustomConfig `json:"advanced_custom,omitempty"`
++	BalanceScript                         string                `json:"balance_script,omitempty"` // 自定义余额查询 Python 脚本（最后 print 数字或 JSON）
+ }
  
- 1. Create project directory and patches subdirectory: `mkdir -p new-project/patches`
-diff --git a/new-api/patches/balance-script.patch b/new-api/patches/balance-script.patch
-deleted file mode 100644
-index e708a0b..0000000
---- a/new-api/patches/balance-script.patch
-+++ /dev/null
-@@ -1,557 +0,0 @@
--From e232ee82969a592ed64d66b2bbf92baeb7b972b7 Mon Sep 17 00:00:00 2001
--From: lzc256 <i@lzc256.com>
--Date: Sun, 14 Jun 2026 22:24:56 +0800
--Subject: [PATCH 1/2] feat: add custom balance script support for channels
--
-----
-- Dockerfile                                    |   2 +-
-- controller/channel-billing.go                 |  10 +-
-- controller/channel_balance_script.go          | 141 ++++++++++++++++++
-- dto/channel_settings.go                       |   1 +
-- .../drawers/channel-mutate-drawer.tsx         |   9 +-
-- .../sections/balance-script-section.tsx       | 102 +++++++++++++
-- .../src/features/channels/lib/channel-form.ts |  12 ++
-- web/default/src/features/channels/types.ts    |   1 +
-- 8 files changed, 274 insertions(+), 4 deletions(-)
-- create mode 100644 controller/channel_balance_script.go
-- create mode 100644 web/default/src/features/channels/components/drawers/sections/balance-script-section.tsx
--
--diff --git a/Dockerfile b/Dockerfile
--index d01ab3f0..13e52033 100644
----- a/Dockerfile
--+++ b/Dockerfile
--@@ -41,7 +41,7 @@ RUN go build -ldflags "-s -w -X 'github.com/QuantumNous/new-api/common.Version=$
-- FROM debian:bookworm-slim@sha256:f06537653ac770703bc45b4b113475bd402f451e85223f0f2837acbf89ab020a
-- 
-- RUN apt-get update \
---    && apt-get install -y --no-install-recommends ca-certificates tzdata libasan8 wget \
--+    && apt-get install -y --no-install-recommends ca-certificates tzdata libasan8 wget python3 \
--     && rm -rf /var/lib/apt/lists/* \
--     && update-ca-certificates
-- 
--diff --git a/controller/channel-billing.go b/controller/channel-billing.go
--index 751ee360..d582af76 100644
----- a/controller/channel-billing.go
--+++ b/controller/channel-billing.go
--@@ -357,6 +357,12 @@ func updateChannelMoonshotBalance(channel *model.Channel) (float64, error) {
-- }
-- 
-- func updateChannelBalance(channel *model.Channel) (float64, error) {
--+	// Custom balance script takes priority over built-in balance fetchers
--+	settings := channel.GetOtherSettings()
--+	if settings.BalanceScript != "" {
--+		return updateChannelBalanceScript(channel, settings.BalanceScript)
--+	}
--+
-- 	baseURL := constant.ChannelBaseURLs[channel.Type]
-- 	if channel.GetBaseURL() == "" {
-- 		channel.BaseURL = &baseURL
--@@ -432,7 +438,7 @@ func UpdateChannelBalance(c *gin.Context) {
-- 		common.ApiError(c, err)
-- 		return
-- 	}
---	if channel.ChannelInfo.IsMultiKey {
--+	if channel.ChannelInfo.IsMultiKey && channel.GetOtherSettings().BalanceScript == "" {
-- 		c.JSON(http.StatusOK, gin.H{
-- 			"success": false,
-- 			"message": "多密钥渠道不支持余额查询",
--@@ -460,7 +466,7 @@ func updateAllChannelsBalance() error {
-- 		if channel.Status != common.ChannelStatusEnabled {
-- 			continue
-- 		}
---		if channel.ChannelInfo.IsMultiKey {
--+		if channel.ChannelInfo.IsMultiKey && channel.GetOtherSettings().BalanceScript == "" {
-- 			continue // skip multi-key channels
-- 		}
-- 		// TODO: support Azure
--diff --git a/controller/channel_balance_script.go b/controller/channel_balance_script.go
--new file mode 100644
--index 00000000..32a46989
----- /dev/null
--+++ b/controller/channel_balance_script.go
--@@ -0,0 +1,141 @@
--+package controller
--+
--+import (
--+	"bytes"
--+	"context"
--+	"errors"
--+	"fmt"
--+	"io"
--+	"os"
--+	"os/exec"
--+	"strconv"
--+	"strings"
--+	"syscall"
--+	"time"
--+
--+	"github.com/QuantumNous/new-api/model"
--+)
--+
--+const (
--+	balanceScriptTimeout      = 30 * time.Second
--+	balanceScriptMaxOutputLen = 64 * 1024         // 64KB cap on script stdout/stderr
--+	balanceScriptMemoryLimit  = 128 * 1024 * 1024 // 128MB virtual address space
--+	balanceScriptCPULimit     = 25                // 25s CPU time (wall clock is 30s)
--+	balanceScriptNprocLimit   = 64                // max processes/threads
--+)
--+
--+// updateChannelBalanceScript executes a user-defined Python script to fetch channel balance.
--+// The script receives channel info via environment variables:
--+//   - CHANNEL_BASE_URL: the channel's base URL
--+//   - CHANNEL_KEY: the channel's API key (for multi-key channels: all keys joined by ",")
--+//   - CHANNEL_TYPE: the channel type integer
--+//   - CHANNEL_ID: the channel ID
--+//   - CHANNEL_IS_MULTI_KEY: "1" if multi-key, "0" otherwise
--+//
--+// The script must print a single number to stdout (the balance value).
--+// Only Python standard library is available (urllib.request, json, os, etc.).
--+//
--+// Resource limits enforced via prlimit (util-linux, ships with debian:bookworm-slim):
--+//   - 30s wall-clock timeout (process group killed on expiry)
--+//   - 25s CPU time (RLIMIT_CPU)
--+//   - 128MB virtual address space (RLIMIT_AS)
--+//   - 64 max processes/threads (RLIMIT_NPROC)
--+//   - 64KB stdout/stderr cap each
--+//
--+// Example script:
--+//
--+//	import urllib.request, json, os
--+//	url = os.environ["CHANNEL_BASE_URL"] + "/v1/user/balance"
--+//	req = urllib.request.Request(url, headers={"Authorization": "Bearer " + os.environ["CHANNEL_KEY"]})
--+//	with urllib.request.urlopen(req, timeout=15) as resp:
--+//	    data = json.loads(resp.read())
--+//	print(data["balance"])
--+func updateChannelBalanceScript(channel *model.Channel, script string) (float64, error) {
--+	ctx, cancel := context.WithTimeout(context.Background(), balanceScriptTimeout)
--+	defer cancel()
--+
--+	// For multi-key channels, join all keys with ","; otherwise use the single key.
--+	keyEnv := channel.Key
--+	isMultiKey := "0"
--+	if channel.ChannelInfo.IsMultiKey {
--+		keyEnv = strings.Join(channel.GetKeys(), ",")
--+		isMultiKey = "1"
--+	}
--+
--+	// prlimit applies RLIMIT_* before exec; child python3 inherits the limits.
--+	cmd := exec.CommandContext(ctx, "prlimit",
--+		fmt.Sprintf("--as=%d", balanceScriptMemoryLimit),
--+		fmt.Sprintf("--cpu=%d", balanceScriptCPULimit),
--+		fmt.Sprintf("--nproc=%d", balanceScriptNprocLimit),
--+		"--", "python3", "-c", script)
--+	cmd.Env = append(os.Environ(),
--+		"CHANNEL_BASE_URL="+channel.GetBaseURL(),
--+		"CHANNEL_KEY="+keyEnv,
--+		"CHANNEL_TYPE="+strconv.Itoa(channel.Type),
--+		"CHANNEL_ID="+strconv.Itoa(channel.Id),
--+		"CHANNEL_IS_MULTI_KEY="+isMultiKey,
--+	)
--+	// Run in its own process group so we can kill any subprocesses on timeout.
--+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
--+
--+	// Cap stdout/stderr at 64KB each so a runaway print doesn't blow up our memory.
--+	var stdout, stderr bytes.Buffer
--+	cmd.Stdout = &limitWriter{w: &stdout, n: balanceScriptMaxOutputLen}
--+	cmd.Stderr = &limitWriter{w: &stderr, n: balanceScriptMaxOutputLen}
--+
--+	if err := cmd.Start(); err != nil {
--+		return 0, fmt.Errorf("balance script start failed: %w", err)
--+	}
--+
--+	// On context timeout, signal the whole process group (negative pid).
--+	done := make(chan error, 1)
--+	go func() { done <- cmd.Wait() }()
--+
--+	var waitErr error
--+	select {
--+	case <-ctx.Done():
--+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
--+		<-done
--+		return 0, fmt.Errorf("balance script timed out after %s", balanceScriptTimeout)
--+	case waitErr = <-done:
--+	}
--+
--+	if waitErr != nil {
--+		var exitErr *exec.ExitError
--+		if errors.As(waitErr, &exitErr) {
--+			return 0, fmt.Errorf("balance script error: %s", strings.TrimSpace(stderr.String()))
--+		}
--+		return 0, waitErr
--+	}
--+
--+	balance, err := strconv.ParseFloat(strings.TrimSpace(stdout.String()), 64)
--+	if err != nil {
--+		return 0, fmt.Errorf("balance script output invalid (expected number): %s", stdout.String())
--+	}
--+	channel.UpdateBalance(balance)
--+	return balance, nil
--+}
--+
--+// limitWriter writes to w until n bytes have been written, then silently discards the rest.
--+// This caps script output without erroring (we still want to surface partial output for debugging).
--+type limitWriter struct {
--+	w io.Writer
--+	n int64
--+}
--+
--+func (lw *limitWriter) Write(p []byte) (int, error) {
--+	if lw.n <= 0 {
--+		return len(p), nil
--+	}
--+	if int64(len(p)) > lw.n {
--+		_, err := lw.w.Write(p[:lw.n])
--+		lw.n = 0
--+		if err != nil {
--+			return 0, err
--+		}
--+		return len(p), nil
--+	}
--+	n, err := lw.w.Write(p)
--+	lw.n -= int64(n)
--+	return n, err
--+}
--diff --git a/dto/channel_settings.go b/dto/channel_settings.go
--index 390853c9..26c31e12 100644
----- a/dto/channel_settings.go
--+++ b/dto/channel_settings.go
--@@ -48,6 +48,7 @@ type ChannelOtherSettings struct {
-- 	UpstreamModelUpdateLastRemovedModels  []string              `json:"upstream_model_update_last_removed_models,omitempty"`  // 上次检测到的可删除模型
-- 	UpstreamModelUpdateIgnoredModels      []string              `json:"upstream_model_update_ignored_models,omitempty"`       // 手动忽略的模型
-- 	AdvancedCustom                        *AdvancedCustomConfig `json:"advanced_custom,omitempty"`
--+	BalanceScript                         string                `json:"balance_script,omitempty"` // 自定义余额查询 Python 脚本（最后 print 数字即为余额）
-- }
-- 
-- func (s *ChannelOtherSettings) IsOpenRouterEnterprise() bool {
--diff --git a/web/default/src/features/channels/components/drawers/channel-mutate-drawer.tsx b/web/default/src/features/channels/components/drawers/channel-mutate-drawer.tsx
--index a38ec0af..11142967 100644
----- a/web/default/src/features/channels/components/drawers/channel-mutate-drawer.tsx
--+++ b/web/default/src/features/channels/components/drawers/channel-mutate-drawer.tsx
--@@ -166,6 +166,7 @@ import {
--   ChannelEditorLoadingState,
--   ChannelModelsSection,
-- } from './sections'
--+import { BalanceScriptField } from './sections/balance-script-section'
-- 
-- type ChannelMutateDrawerProps = {
--   open: boolean
--@@ -223,7 +224,8 @@ function hasAdvancedSettingsValues(values: ChannelFormValues): boolean {
--     values.claude_beta_query ||
--     values.upstream_model_update_check_enabled ||
--     values.upstream_model_update_auto_sync_enabled ||
---    values.upstream_model_update_ignored_models?.trim()
--+    values.upstream_model_update_ignored_models?.trim() ||
--+    values.balance_script?.trim()
--   )
-- }
-- 
--@@ -2944,6 +2946,11 @@ export function ChannelMutateDrawer({
--                             </FormItem>
--                           )}
--                         />
--+
--+                        <BalanceScriptField
--+                          control={form.control}
--+                          name='balance_script'
--+                        />
--                       </div>
--                     </div>
-- 
--diff --git a/web/default/src/features/channels/components/drawers/sections/balance-script-section.tsx b/web/default/src/features/channels/components/drawers/sections/balance-script-section.tsx
--new file mode 100644
--index 00000000..44904362
----- /dev/null
--+++ b/web/default/src/features/channels/components/drawers/sections/balance-script-section.tsx
--@@ -0,0 +1,102 @@
--+/*
--+Copyright (C) 2023-2026 QuantumNous
--+
--+This program is free software: you can redistribute it and/or modify
--+it under the terms of the GNU Affero General Public License as
--+published by the Free Software Foundation, either version 3 of the
--+License, or (at your option) any later version.
--+
--+This program is distributed in the hope that it will be useful,
--+but WITHOUT ANY WARRANTY; without even the implied warranty of
--+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
--+GNU Affero General Public License for more details.
--+
--+You should have received a copy of the GNU Affero General Public License
--+along with this program. If not, see <https://www.gnu.org/licenses/>.
--+
--+For commercial licensing, please contact support@quantumnous.com
--+*/
--+import { useTranslation } from 'react-i18next'
--+import { Button } from '@/components/ui/button'
--+import { Textarea } from '@/components/ui/textarea'
--+import {
--+  FormControl,
--+  FormDescription,
--+  FormItem,
--+  FormLabel,
--+  FormMessage,
--+} from '@/components/ui/form'
--+import type { FieldPath, FieldValues } from 'react-hook-form'
--+import type { Control } from 'react-hook-form'
--+import { FormField } from '@/components/ui/form'
--+
--+const BALANCE_SCRIPT_TEMPLATE = `import urllib.request, json, os
--+
--+url = os.environ["CHANNEL_BASE_URL"] + "/v1/user/balance"
--+req = urllib.request.Request(url, headers={
--+    "Authorization": "Bearer " + os.environ["CHANNEL_KEY"]
--+})
--+with urllib.request.urlopen(req, timeout=15) as resp:
--+    data = json.loads(resp.read())
--+print(data["balance"])
--+`
--+
--+interface BalanceScriptFieldProps<TFieldValues extends FieldValues> {
--+  control: Control<TFieldValues>
--+  name: FieldPath<TFieldValues>
--+}
--+
--+export function BalanceScriptField<TFieldValues extends FieldValues>({
--+  control,
--+  name,
--+}: BalanceScriptFieldProps<TFieldValues>) {
--+  const { t } = useTranslation()
--+
--+  return (
--+    <FormField
--+      control={control}
--+      name={name}
--+      render={({ field }) => (
--+        <FormItem className='space-y-3 border-t pt-4'>
--+          <div className='flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between'>
--+            <div className='space-y-1'>
--+              <FormLabel>{t('Custom Balance Script (Python)')}</FormLabel>
--+              <FormDescription>
--+                {t(
--+                  'Python script to fetch channel balance. Stdlib only. Read CHANNEL_BASE_URL/CHANNEL_KEY env vars, print balance number to stdout.'
--+                )}
--+              </FormDescription>
--+            </div>
--+            <div className='flex flex-wrap gap-2'>
--+              <Button
--+                type='button'
--+                variant='outline'
--+                size='sm'
--+                onClick={() => field.onChange(BALANCE_SCRIPT_TEMPLATE)}
--+              >
--+                {t('Fill Template')}
--+              </Button>
--+              <Button
--+                type='button'
--+                variant='ghost'
--+                size='sm'
--+                onClick={() => field.onChange('')}
--+              >
--+                {t('Clear')}
--+              </Button>
--+            </div>
--+          </div>
--+          <FormControl>
--+            <Textarea
--+              {...field}
--+              rows={10}
--+              className='font-mono text-xs'
--+              placeholder={t('Leave empty to use the default balance API')}
--+            />
--+          </FormControl>
--+          <FormMessage />
--+        </FormItem>
--+      )}
--+    />
--+  )
--+}
--diff --git a/web/default/src/features/channels/lib/channel-form.ts b/web/default/src/features/channels/lib/channel-form.ts
--index 3a043153..fb5d00bc 100644
----- a/web/default/src/features/channels/lib/channel-form.ts
--+++ b/web/default/src/features/channels/lib/channel-form.ts
--@@ -207,6 +207,7 @@ export const channelFormSchema = z
--     upstream_model_update_check_enabled: z.boolean().optional(),
--     upstream_model_update_auto_sync_enabled: z.boolean().optional(),
--     upstream_model_update_ignored_models: z.string().optional(),
--+    balance_script: z.string().optional(),
--   })
--   .superRefine((data, ctx) => {
--     if ([3, 8, 36, 45].includes(data.type) && !data.base_url?.trim()) {
--@@ -346,6 +347,7 @@ export const CHANNEL_FORM_DEFAULT_VALUES: ChannelFormValues = {
--   upstream_model_update_auto_sync_enabled: false,
--   upstream_model_update_ignored_models: '',
--   advanced_custom: '',
--+  balance_script: '',
-- }
-- 
-- // ============================================================================
--@@ -401,6 +403,7 @@ export function transformChannelToFormDefaults(
--   let upstreamModelUpdateAutoSyncEnabled = false
--   let upstreamModelUpdateIgnoredModels = ''
--   let advancedCustom = ''
--+  let balanceScript = ''
-- 
--   if (channel.settings) {
--     try {
--@@ -428,6 +431,7 @@ export function transformChannelToFormDefaults(
--       if (parsed.advanced_custom) {
--         advancedCustom = stringifyAdvancedCustomConfig(parsed.advanced_custom)
--       }
--+      balanceScript = parsed.balance_script || ''
--     } catch (error) {
--       // eslint-disable-next-line no-console
--       console.error('Failed to parse channel settings:', error)
--@@ -478,6 +482,7 @@ export function transformChannelToFormDefaults(
--     upstream_model_update_auto_sync_enabled: upstreamModelUpdateAutoSyncEnabled,
--     upstream_model_update_ignored_models: upstreamModelUpdateIgnoredModels,
--     advanced_custom: advancedCustom,
--+    balance_script: balanceScript,
--   }
-- }
-- 
--@@ -613,6 +618,13 @@ function buildSettingsJSON(formData: ChannelFormValues): string {
--     delete settingsObj.advanced_custom
--   }
-- 
--+  // Custom balance script (Python) — applies to any channel type
--+  if (formData.balance_script && formData.balance_script.trim()) {
--+    settingsObj.balance_script = formData.balance_script
--+  } else if ('balance_script' in settingsObj) {
--+    delete settingsObj.balance_script
--+  }
--+
--   return JSON.stringify(settingsObj)
-- }
-- 
--diff --git a/web/default/src/features/channels/types.ts b/web/default/src/features/channels/types.ts
--index 54879d89..a73b38a8 100644
----- a/web/default/src/features/channels/types.ts
--+++ b/web/default/src/features/channels/types.ts
--@@ -106,6 +106,7 @@ export interface ChannelOtherSettings {
--   upstream_model_update_last_check_time?: number
--   upstream_model_update_last_detected_models?: string[]
--   advanced_custom?: AdvancedCustomConfig
--+  balance_script?: string
-- }
-- 
-- export interface AdvancedCustomConfig {
---- 
--2.54.0
--
--
--From db78b96f20ef83ccbfd34a590f069f4ac16c1aa9 Mon Sep 17 00:00:00 2001
--From: lzc256 <i@lzc256.com>
--Date: Thu, 18 Jun 2026 11:03:06 +0800
--Subject: [PATCH 2/2] feat(relay): add hardcoded billing header filter for
-- Claude Code
--
--- Strip x-anthropic-billing-header from all JSON string fields
--- Only matches strings that START with the header (no false positives)
--- Regex: x-anthropic-billing-header:.*?cch=[^;]*;?
--- Logs info when header stripped, info if still present after (unexpected)
--- Applies to ALL channels, cannot be disabled from admin panel
--- Execution order: RemoveDisabledFields -> ApplyBuiltinOverride -> ApplyParamOverrideWithRelayInfo
-----
-- relay/claude_handler.go          |  6 ++++
-- relay/common/builtin_override.go | 54 ++++++++++++++++++++++++++++++++
-- relay/compatible_handler.go      |  6 ++++
-- 3 files changed, 66 insertions(+)
-- create mode 100644 relay/common/builtin_override.go
--
--diff --git a/relay/claude_handler.go b/relay/claude_handler.go
--index 52736320..5e05fcc7 100644
----- a/relay/claude_handler.go
--+++ b/relay/claude_handler.go
--@@ -174,6 +174,12 @@ func ClaudeHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
-- 			return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
-- 		}
-- 
--+		// Apply builtin override (hardcoded billing header filter)
--+		jsonData, err = relaycommon.ApplyBuiltinOverride(jsonData)
--+		if err != nil {
--+			return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
--+		}
--+
-- 		// apply param override
-- 		if len(info.ParamOverride) > 0 {
-- 			jsonData, err = relaycommon.ApplyParamOverrideWithRelayInfo(jsonData, info)
--diff --git a/relay/common/builtin_override.go b/relay/common/builtin_override.go
--new file mode 100644
--index 00000000..823b1ec7
----- /dev/null
--+++ b/relay/common/builtin_override.go
--@@ -0,0 +1,54 @@
--+package common
--+
--+import (
--+	"bytes"
--+	"regexp"
--+	"strings"
--+
--+	"github.com/QuantumNous/new-api/logger"
--+)
--+
--+// billingHeaderRegex matches: x-anthropic-billing-header: ... cch=...;
--+var billingHeaderRegex = regexp.MustCompile(`x-anthropic-billing-header:.*?cch=[^;]*;?`)
--+
--+// jsonStringValueRegex matches JSON string values: "..."
--+var jsonStringValueRegex = regexp.MustCompile(`"([^"\\]*(\\.[^"\\]*)*)"`)
--+
--+// ApplyBuiltinOverride strips Claude Code billing headers from all string fields in the request body.
--+// This is a hardcoded filter that applies to ALL channels and cannot be disabled from the admin panel.
--+func ApplyBuiltinOverride(jsonData []byte) ([]byte, error) {
--+	// Fast path: skip if no billing header present
--+	if !bytes.Contains(jsonData, []byte("x-anthropic-billing-header")) {
--+		return jsonData, nil
--+	}
--+
--+	// Replace all string values that start with the billing header
--+	result := jsonStringValueRegex.ReplaceAllFunc(jsonData, func(match []byte) []byte {
--+		// match = "..." including quotes
--+		if len(match) < 2 {
--+			return match
--+		}
--+		inner := string(match[1 : len(match)-1]) // strip quotes
--+
--+		// Only process if starts with billing header
--+		if !strings.HasPrefix(inner, "x-anthropic-billing-header:") {
--+			return match
--+		}
--+
--+		// Strip the billing header part only
--+		cleaned := billingHeaderRegex.ReplaceAllString(inner, "")
--+		return []byte(`"` + cleaned + `"`)
--+	})
--+
--+	// Log info if header was stripped
--+	if !bytes.Equal(jsonData, result) {
--+		logger.LogInfo(nil, "stripped x-anthropic-billing-header from request")
--+	}
--+
--+	// Log info if header still present after stripping (unexpected)
--+	if bytes.Contains(result, []byte("x-anthropic-billing-header")) {
--+		logger.LogInfo(nil, "x-anthropic-billing-header still present after stripping, check regex pattern")
--+	}
--+
--+	return result, nil
--+}
--diff --git a/relay/compatible_handler.go b/relay/compatible_handler.go
--index a68cfe73..58f0b78d 100644
----- a/relay/compatible_handler.go
--+++ b/relay/compatible_handler.go
--@@ -165,6 +165,12 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
-- 			return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
-- 		}
-- 
--+		// Apply builtin override (hardcoded billing header filter)
--+		jsonData, err = relaycommon.ApplyBuiltinOverride(jsonData)
--+		if err != nil {
--+			return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
--+		}
--+
-- 		// apply param override
-- 		if len(info.ParamOverride) > 0 {
-- 			jsonData, err = relaycommon.ApplyParamOverrideWithRelayInfo(jsonData, info)
---- 
--2.54.0
--
-diff --git a/new-api/patches/balance-script/0001-feat-add-custom-balance-script-support-for-channels.patch b/new-api/patches/balance-script/0001-feat-add-custom-balance-script-support-for-channels.patch
-index 0306845..58ae038 100644
---- a/new-api/patches/balance-script/0001-feat-add-custom-balance-script-support-for-channels.patch
-+++ b/new-api/patches/balance-script/0001-feat-add-custom-balance-script-support-for-channels.patch
-@@ -1,31 +1,38 @@
--From e8b8c4f5df2ed3c9f03d09de8ab88cb291c4a0cd Mon Sep 17 00:00:00 2001
-+From a3ef6a154aeab873235330116dafc7123ebe29ec Mon Sep 17 00:00:00 2001
- From: lzc256 <i@lzc256.com>
--Date: Sat, 4 Jul 2026 08:09:57 +0800
--Subject: [PATCH 1/2] feat: add custom balance script support for channels
-+Date: Sun, 5 Jul 2026 10:00:22 +0800
-+Subject: [PATCH] feat: add custom balance script support for channels
+ func (s *ChannelOtherSettings) IsOpenRouterEnterprise() bool {
+diff --git a/model/channel.go b/model/channel.go
+index dbd1dea..f112d65 100644
+--- a/model/channel.go
++++ b/model/channel.go
+@@ -36,6 +36,7 @@ type Channel struct {
+ 	Other              string  `json:"other"`
+ 	Balance            float64 `json:"balance"` // in USD
+ 	BalanceUpdatedTime int64   `json:"balance_updated_time" gorm:"bigint"`
++	BalanceScriptState string  `json:"balance_script_state" gorm:"type:text"` // state for custom balance script (max 65536 bytes)
+ 	Models             string  `json:"models"`
+ 	Group              string  `json:"group" gorm:"type:varchar(64);default:'default'"`
+ 	UsedQuota          int64   `json:"used_quota" gorm:"bigint;default:0"`
+@@ -592,6 +593,12 @@ func (channel *Channel) UpdateBalance(balance float64) {
+ 	}
+ }
  
-+- Add balance_script field in ChannelOtherSettings for custom Python scripts
-+- Execute scripts via prlimit with CPU/memory/process limits
-+- Pass channel info via env vars: CHANNEL_BASE_URL, CHANNEL_KEY, CHANNEL_TYPE, CHANNEL_ID, CHANNEL_IS_MULTI_KEY
-+- Scripts print balance number to stdout (stdlib only)
-+- Add BalanceScriptField component in frontend drawer
-+- Update Dockerfile to install python3 in runtime image
- ---
-- Dockerfile                                    |   2 +-
-+ Dockerfile                                    |   2 +
-  controller/channel-billing.go                 |  10 +-
-- controller/channel_balance_script.go          | 141 ++++++++++++++++++
-+ controller/channel_balance_script.go          | 267 ++++++++++++++++++
-  dto/channel_settings.go                       |   1 +
-+ model/channel.go                              |   7 +
-  .../drawers/channel-mutate-drawer.tsx         |   9 +-
-- .../sections/balance-script-section.tsx       | 102 +++++++++++++
-- .../src/features/channels/lib/channel-form.ts |  12 ++
-+ .../sections/balance-script-section.tsx       | 107 +++++++
-+ .../src/features/channels/lib/channel-form.ts |  12 +
-  web/default/src/features/channels/types.ts    |   1 +
-- 8 files changed, 274 insertions(+), 4 deletions(-)
-+ 9 files changed, 413 insertions(+), 3 deletions(-)
-  create mode 100644 controller/channel_balance_script.go
-  create mode 100644 web/default/src/features/channels/components/drawers/sections/balance-script-section.tsx
++func (channel *Channel) UpdateBalanceScriptState(state string) error {
++	return DB.Model(channel).Select("balance_script_state").Updates(Channel{
++		BalanceScriptState: state,
++	}).Error
++}
++
+ func (channel *Channel) Delete() error {
+ 	var err error
+ 	err = DB.Delete(channel).Error
+diff --git a/web/default/src/features/channels/components/drawers/channel-mutate-drawer.tsx b/web/default/src/features/channels/components/drawers/channel-mutate-drawer.tsx
+index f21228c..7f2855c 100644
+--- a/web/default/src/features/channels/components/drawers/channel-mutate-drawer.tsx
++++ b/web/default/src/features/channels/components/drawers/channel-mutate-drawer.tsx
+@@ -182,6 +182,7 @@ import {
+   ChannelBasicSection,
+   ChannelEditorLoadingState,
+   ChannelModelsSection,
++  BalanceScriptField,
+ } from './sections'
  
- diff --git a/Dockerfile b/Dockerfile
--index e2788f55..f8d5f51c 100644
-+index e2788f55..afd2c4c7 100644
- --- a/Dockerfile
- +++ b/Dockerfile
--@@ -41,7 +41,7 @@ RUN go build -ldflags "-s -w -X 'github.com/QuantumNous/new-api/common.Version=$
-- FROM debian:bookworm-slim@sha256:f06537653ac770703bc45b4b113475bd402f451e85223f0f2837acbf89ab020a
-+@@ -42,6 +42,8 @@ FROM debian:bookworm-slim@sha256:f06537653ac770703bc45b4b113475bd402f451e85223f0
-  
-  RUN apt-get update \
---    && apt-get install -y --no-install-recommends ca-certificates tzdata libasan8 wget \
--+    && apt-get install -y --no-install-recommends ca-certificates tzdata libasan8 wget python3 \
-+     && apt-get install -y --no-install-recommends ca-certificates tzdata libasan8 wget \
-++       python3 python3-pip libseccomp-dev \
-++    && pip install --break-system-packages RestrictedPython seccomp \
-      && rm -rf /var/lib/apt/lists/* \
-      && update-ca-certificates
-  
-@@ -66,19 +73,19 @@ index 751ee360..d582af76 100644
-  		// TODO: support Azure
- diff --git a/controller/channel_balance_script.go b/controller/channel_balance_script.go
- new file mode 100644
--index 00000000..32a46989
-+index 00000000..b3b9650e
- --- /dev/null
- +++ b/controller/channel_balance_script.go
--@@ -0,0 +1,141 @@
-+@@ -0,0 +1,267 @@
- +package controller
- +
- +import (
- +	"bytes"
- +	"context"
-++	"encoding/json"
- +	"errors"
- +	"fmt"
- +	"io"
--+	"os"
- +	"os/exec"
- +	"strconv"
- +	"strings"
-@@ -90,10 +97,11 @@ index 00000000..32a46989
- +
- +const (
- +	balanceScriptTimeout      = 30 * time.Second
--+	balanceScriptMaxOutputLen = 64 * 1024         // 64KB cap on script stdout/stderr
-++	balanceScriptMaxOutputLen = 72 * 1024         // 72KB cap on script stdout/stderr (extra room for state JSON)
- +	balanceScriptMemoryLimit  = 128 * 1024 * 1024 // 128MB virtual address space
- +	balanceScriptCPULimit     = 25                // 25s CPU time (wall clock is 30s)
- +	balanceScriptNprocLimit   = 64                // max processes/threads
-++	balanceScriptMaxStateLen  = 65536             // 64KB max state size
- +)
- +
- +// updateChannelBalanceScript executes a user-defined Python script to fetch channel balance.
-@@ -103,26 +111,24 @@ index 00000000..32a46989
- +//   - CHANNEL_TYPE: the channel type integer
- +//   - CHANNEL_ID: the channel ID
- +//   - CHANNEL_IS_MULTI_KEY: "1" if multi-key, "0" otherwise
-++//   - CHANNEL_STATE: previous state (empty on first run)
-++//   - BALANCE_SCRIPT_SOURCE: the user script source code
- +//
--+// The script must print a single number to stdout (the balance value).
--+// Only Python standard library is available (urllib.request, json, os, etc.).
-++// The script must print to stdout:
-++//   - JSON object: {"balance": <number>, "state": <any json value>}
-++//   - Or a single number (backward compatible, state unchanged)
- +//
--+// Resource limits enforced via prlimit (util-linux, ships with debian:bookworm-slim):
--+//   - 30s wall-clock timeout (process group killed on expiry)
--+//   - 25s CPU time (RLIMIT_CPU)
--+//   - 128MB virtual address space (RLIMIT_AS)
--+//   - 64 max processes/threads (RLIMIT_NPROC)
--+//   - 64KB stdout/stderr cap each
--+//
--+// Example script:
--+//
--+//	import urllib.request, json, os
--+//	url = os.environ["CHANNEL_BASE_URL"] + "/v1/user/balance"
--+//	req = urllib.request.Request(url, headers={"Authorization": "Bearer " + os.environ["CHANNEL_KEY"]})
--+//	with urllib.request.urlopen(req, timeout=15) as resp:
--+//	    data = json.loads(resp.read())
--+//	print(data["balance"])
-++// Security layers:
-++//  1. RestrictedPython: compile_restricted + safe_builtins + safer_getattr + import whitelist
-++//  2. seccomp: allow read-only open + network, deny write/execve/fork
-++//  3. prlimit: CPU/memory/process limits
-++//  4. env whitelist: only CHANNEL_* + minimal PATH/HOME/LANG
- +func updateChannelBalanceScript(channel *model.Channel, script string) (float64, error) {
-++	// Acquire per-channel lock to serialize state read/write
-++	lock := model.GetChannelPollingLock(channel.Id)
-++	lock.Lock()
-++	defer lock.Unlock()
-++
- +	ctx, cancel := context.WithTimeout(context.Background(), balanceScriptTimeout)
- +	defer cancel()
- +
-@@ -134,23 +140,33 @@ index 00000000..32a46989
- +		isMultiKey = "1"
- +	}
- +
-++	// Build env whitelist (do NOT inherit os.Environ() to avoid leaking secrets)
-++	cmdEnv := []string{
-++		"PATH=/usr/bin:/bin",
-++		"HOME=/nonexistent",
-++		"LANG=C.UTF-8",
-++		"PYTHONNOUSERSITE=1",
-++		"PYTHONDONTWRITEBYTECODE=1",
-++		"CHANNEL_BASE_URL=" + channel.GetBaseURL(),
-++		"CHANNEL_KEY=" + keyEnv,
-++		"CHANNEL_TYPE=" + strconv.Itoa(channel.Type),
-++		"CHANNEL_ID=" + strconv.Itoa(channel.Id),
-++		"CHANNEL_IS_MULTI_KEY=" + isMultiKey,
-++		"CHANNEL_STATE=" + channel.BalanceScriptState,
-++		"BALANCE_SCRIPT_SOURCE=" + script,
-++	}
-++
- +	// prlimit applies RLIMIT_* before exec; child python3 inherits the limits.
- +	cmd := exec.CommandContext(ctx, "prlimit",
- +		fmt.Sprintf("--as=%d", balanceScriptMemoryLimit),
- +		fmt.Sprintf("--cpu=%d", balanceScriptCPULimit),
- +		fmt.Sprintf("--nproc=%d", balanceScriptNprocLimit),
--+		"--", "python3", "-c", script)
--+	cmd.Env = append(os.Environ(),
--+		"CHANNEL_BASE_URL="+channel.GetBaseURL(),
--+		"CHANNEL_KEY="+keyEnv,
--+		"CHANNEL_TYPE="+strconv.Itoa(channel.Type),
--+		"CHANNEL_ID="+strconv.Itoa(channel.Id),
--+		"CHANNEL_IS_MULTI_KEY="+isMultiKey,
--+	)
-++		"--", "python3", "-I", "-c", balanceScriptHarness)
-++	cmd.Env = cmdEnv
- +	// Run in its own process group so we can kill any subprocesses on timeout.
- +	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
- +
--+	// Cap stdout/stderr at 64KB each so a runaway print doesn't blow up our memory.
-++	// Cap stdout/stderr so a runaway print doesn't blow up our memory.
- +	var stdout, stderr bytes.Buffer
- +	cmd.Stdout = &limitWriter{w: &stdout, n: balanceScriptMaxOutputLen}
- +	cmd.Stderr = &limitWriter{w: &stderr, n: balanceScriptMaxOutputLen}
-@@ -180,16 +196,37 @@ index 00000000..32a46989
- +		return 0, waitErr
- +	}
- +
--+	balance, err := strconv.ParseFloat(strings.TrimSpace(stdout.String()), 64)
-++	// Parse output: JSON object or plain number
-++	output := strings.TrimSpace(stdout.String())
-++	if strings.HasPrefix(output, "{") {
-++		var result struct {
-++			Balance float64          `json:"balance"`
-++			State   json.RawMessage  `json:"state"`
-++		}
-++		if err := json.Unmarshal([]byte(output), &result); err != nil {
-++			return 0, fmt.Errorf("balance script invalid JSON: %w, output: %s", err, output)
-++		}
-++		if len(result.State) > balanceScriptMaxStateLen {
-++			return 0, fmt.Errorf("balance script state exceeds %d bytes", balanceScriptMaxStateLen)
-++		}
-++		// Atomic update: write state first, then balance
-++		if err := channel.UpdateBalanceScriptState(string(result.State)); err != nil {
-++			return 0, fmt.Errorf("failed to save balance script state: %w", err)
-++		}
-++		channel.UpdateBalance(result.Balance)
-++		return result.Balance, nil
-++	}
-++
-++	// Backward compatible: plain number output, state unchanged
-++	balance, err := strconv.ParseFloat(output, 64)
- +	if err != nil {
--+		return 0, fmt.Errorf("balance script output invalid (expected number): %s", stdout.String())
-++		return 0, fmt.Errorf("balance script output invalid (expected number or JSON): %s", output)
- +	}
- +	channel.UpdateBalance(balance)
- +	return balance, nil
- +}
- +
- +// limitWriter writes to w until n bytes have been written, then silently discards the rest.
--+// This caps script output without erroring (we still want to surface partial output for debugging).
- +type limitWriter struct {
- +	w io.Writer
- +	n int64
-@@ -211,6 +248,102 @@ index 00000000..32a46989
- +	lw.n -= int64(n)
- +	return n, err
- +}
-++
-++// balanceScriptHarness is the trusted Python wrapper that runs the user script.
-++// It enforces RestrictedPython + seccomp before executing untrusted code.
-++const balanceScriptHarness = `
-++import os, json
-++
-++# Pre-import all allowed modules BEFORE seccomp filter is installed
-++import urllib, urllib.request, urllib.parse, urllib.error
-++import math, datetime, re, base64, hashlib, hmac
-++import time, ssl, socket, http
-++import collections, itertools, functools, string
-++import random, secrets, uuid, decimal
-++
-++# Now import RestrictedPython and seccomp
-++from RestrictedPython import compile_restricted, safe_builtins
-++from RestrictedPython.Guards import safer_getattr, guarded_iter_unpack_sequence
-++from RestrictedPython.Eval import default_guarded_getiter
-++
-++# Install seccomp filter BEFORE executing user code
-++try:
-++    from seccomp import SyscallFilter, Action, Arg
-++    O_ACCMODE = 3
-++    f = SyscallFilter(def_action=Action.ERRNO(1))
-++    # Allow syscalls needed for Python runtime and network I/O
-++    for s in [
-++        'read', 'write', 'close', 'mmap', 'mprotect', 'munmap', 'brk',
-++        'rt_sigaction', 'rt_sigprocmask', 'rt_sigreturn', 'ioctl',
-++        'poll', 'ppoll', 'pselect6', 'nanosleep', 'clock_gettime', 'clock_nanosleep',
-++        'stat', 'lstat', 'newfstatat', 'readlink', 'readlinkat', 'getcwd',
-++        'access', 'faccessat', 'fcntl', 'dup', 'dup2', 'dup3',
-++        'getrandom', 'futex', 'prlimit64', 'arch_prctl', 'rseq',
-++        'set_tid_address', 'set_robust_list', 'madvise', 'sched_yield',
-++        'getpid', 'gettid', 'getuid', 'geteuid', 'getgid', 'getegid',
-++        'socket', 'connect', 'bind', 'listen', 'accept', 'accept4',
-++        'sendto', 'recvfrom', 'sendmsg', 'recvmsg', 'shutdown',
-++        'setsockopt', 'getsockopt', 'getsockname', 'getpeername',
-++        'uname', 'sysinfo', 'getdents64', 'pread64', 'pwrite64',
-++    ]:
-++        f.add_rule(Action.ALLOW, s)
-++    # Allow read-only open/openat
-++    f.add_rule(Action.ALLOW, 'openat', [Arg(2, 'masked_eq', O_ACCMODE, 0)])
-++    f.add_rule(Action.ERRNO(1), 'openat')
-++    f.add_rule(Action.ALLOW, 'open', [Arg(1, 'masked_eq', O_ACCMODE, 0)])
-++    f.add_rule(Action.ERRNO(1), 'open')
-++    # Default ERRNO(1) blocks: execve, execveat, fork, vfork, clone,
-++    # unlink, rename, mkdir, chmod, chown, truncate, creat, etc.
-++    f.load()
-++except Exception as e:
-++    # seccomp not available (e.g., in dev environment), continue without it
-++    pass
-++
-++# User script source from env
-++user_script = os.environ.get("BALANCE_SCRIPT_SOURCE", "")
-++
-++# RestrictedPython: compile with guards
-++ALLOWED_MODS = {
-++    'urllib', 'urllib.request', 'urllib.parse', 'urllib.error',
-++    'json', 'math', 'datetime', 're', 'base64', 'hashlib', 'hmac',
-++    'time', 'ssl', 'socket', 'http', 'collections', 'itertools',
-++    'functools', 'string', 'random', 'secrets', 'uuid', 'decimal',
-++}
-++
-++def _safe_import(name, g=None, l=None, ff=(), level=0):
-++    root = name.split('.')[0]
-++    if root not in ALLOWED_MODS:
-++        raise ImportError(f"module '{name}' is not allowed in balance script")
-++    return __builtins__.__import__(name, g, l, ff, level)
-++
-++# Build restricted builtins
-++b = dict(safe_builtins)
-++b['__import__'] = _safe_import
-++b['print'] = print  # Python 3 print is not rewritten by RestrictedPython
-++
-++# Build restricted globals with guards
-++g = {
-++    '__builtins__': b,
-++    '__metaclass__': type,
-++    '__name__': '__main__',
-++    '_getattr_': safer_getattr,  # Blocks __subclasses__, __globals__, etc.
-++    '_getitem_': lambda o, k: o[k],
-++    '_write_': lambda o: o,
-++    '_getiter_': default_guarded_getiter,
-++    '_iter_unpack_sequence_': guarded_iter_unpack_sequence,
-++}
-++
-++# Compile and execute user script
-++try:
-++    code = compile_restricted(user_script, '<balance_script>', 'exec')
-++    exec(code, g)
-++except SyntaxError as e:
-++    print(json.dumps({"error": f"syntax error: {e}"}), file=__import__('sys').stderr)
-++    raise SystemExit(2)
-++except Exception as e:
-++    print(json.dumps({"error": str(e)}), file=__import__('sys').stderr)
-++    raise SystemExit(1)
-++`
- diff --git a/dto/channel_settings.go b/dto/channel_settings.go
- index dc037739..c52514f9 100644
- --- a/dto/channel_settings.go
-@@ -223,6 +356,31 @@ index dc037739..c52514f9 100644
-  }
-  
-  func (s *ChannelOtherSettings) IsOpenRouterEnterprise() bool {
-+diff --git a/model/channel.go b/model/channel.go
-+index dbd1deae..f112d658 100644
-+--- a/model/channel.go
-++++ b/model/channel.go
-+@@ -36,6 +36,7 @@ type Channel struct {
-+ 	Other              string  `json:"other"`
-+ 	Balance            float64 `json:"balance"` // in USD
-+ 	BalanceUpdatedTime int64   `json:"balance_updated_time" gorm:"bigint"`
-++	BalanceScriptState string  `json:"balance_script_state" gorm:"type:text"` // state for custom balance script (max 65536 bytes)
-+ 	Models             string  `json:"models"`
-+ 	Group              string  `json:"group" gorm:"type:varchar(64);default:'default'"`
-+ 	UsedQuota          int64   `json:"used_quota" gorm:"bigint;default:0"`
-+@@ -592,6 +593,12 @@ func (channel *Channel) UpdateBalance(balance float64) {
-+ 	}
-+ }
-+ 
-++func (channel *Channel) UpdateBalanceScriptState(state string) error {
-++	return DB.Model(channel).Select("balance_script_state").Updates(Channel{
-++		BalanceScriptState: state,
-++	}).Error
-++}
-++
-+ func (channel *Channel) Delete() error {
-+ 	var err error
-+ 	err = DB.Delete(channel).Error
- diff --git a/web/default/src/features/channels/components/drawers/channel-mutate-drawer.tsx b/web/default/src/features/channels/components/drawers/channel-mutate-drawer.tsx
- index b766d481..0360244f 100644
- --- a/web/default/src/features/channels/components/drawers/channel-mutate-drawer.tsx
-@@ -259,10 +417,10 @@ index b766d481..0360244f 100644
-                                    <span className='text-foreground font-medium'>
- diff --git a/web/default/src/features/channels/components/drawers/sections/balance-script-section.tsx b/web/default/src/features/channels/components/drawers/sections/balance-script-section.tsx
- new file mode 100644
--index 00000000..44904362
-+index 00000000..40458044
- --- /dev/null
- +++ b/web/default/src/features/channels/components/drawers/sections/balance-script-section.tsx
--@@ -0,0 +1,102 @@
-+@@ -0,0 +1,107 @@
- +/*
- +Copyright (C) 2023-2026 QuantumNous
- +
-@@ -297,13 +455,18 @@ index 00000000..44904362
- +
- +const BALANCE_SCRIPT_TEMPLATE = `import urllib.request, json, os
- +
-++# Read previous state (empty on first run)
-++state = json.loads(os.environ.get("CHANNEL_STATE") or "{}")
-++
- +url = os.environ["CHANNEL_BASE_URL"] + "/v1/user/balance"
- +req = urllib.request.Request(url, headers={
- +    "Authorization": "Bearer " + os.environ["CHANNEL_KEY"]
- +})
- +with urllib.request.urlopen(req, timeout=15) as resp:
- +    data = json.loads(resp.read())
--+print(data["balance"])
-++
-++# Output JSON with balance and state (state unchanged in this example)
-++print(json.dumps({"balance": data["balance"], "state": state}))
- +`
- +
- +interface BalanceScriptFieldProps<TFieldValues extends FieldValues> {
-@@ -328,7 +491,7 @@ index 00000000..44904362
- +              <FormLabel>{t('Custom Balance Script (Python)')}</FormLabel>
- +              <FormDescription>
- +                {t(
--+                  'Python script to fetch channel balance. Stdlib only. Read CHANNEL_BASE_URL/CHANNEL_KEY env vars, print balance number to stdout.'
-++                  'Python script to fetch channel balance. Stdlib only. Env vars: CHANNEL_BASE_URL, CHANNEL_KEY, CHANNEL_STATE. Output JSON {"balance":..., "state":...} or plain number.'
- +                )}
- +              </FormDescription>
- +            </div>
+ type ChannelMutateDrawerProps = {
+@@ -2714,6 +2715,11 @@ export function ChannelMutateDrawer({
+                               />
+                             )}
+ 
++                            <BalanceScriptField
++                              control={form.control}
++                              name='balance_script'
++                            />
++
+                             <ChannelAuthSection>
+                               {!isEditing && (
+                                 <FormField
+diff --git a/web/default/src/features/channels/components/drawers/sections/balance-script-section.tsx b/web/default/src/features/channels/components/drawers/sections/balance-script-section.tsx
+new file mode 100644
+index 0000000..4045804
+--- /dev/null
++++ b/web/default/src/features/channels/components/drawers/sections/balance-script-section.tsx
+@@ -0,0 +1,107 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/
++import { useTranslation } from 'react-i18next'
++import { Button } from '@/components/ui/button'
++import { Textarea } from '@/components/ui/textarea'
++import {
++  FormControl,
++  FormDescription,
++  FormItem,
++  FormLabel,
++  FormMessage,
++} from '@/components/ui/form'
++import type { FieldPath, FieldValues } from 'react-hook-form'
++import type { Control } from 'react-hook-form'
++import { FormField } from '@/components/ui/form'
++
++const BALANCE_SCRIPT_TEMPLATE = `import urllib.request, json, os
++
++# Read previous state (empty on first run)
++state = json.loads(os.environ.get("CHANNEL_STATE") or "{}")
++
++url = os.environ["CHANNEL_BASE_URL"] + "/v1/user/balance"
++req = urllib.request.Request(url, headers={
++    "Authorization": "Bearer " + os.environ["CHANNEL_KEY"]
++})
++with urllib.request.urlopen(req, timeout=15) as resp:
++    data = json.loads(resp.read())
++
++# Output JSON with balance and state (state unchanged in this example)
++print(json.dumps({"balance": data["balance"], "state": state}))
++`
++
++interface BalanceScriptFieldProps<TFieldValues extends FieldValues> {
++  control: Control<TFieldValues>
++  name: FieldPath<TFieldValues>
++}
++
++export function BalanceScriptField<TFieldValues extends FieldValues>({
++  control,
++  name,
++}: BalanceScriptFieldProps<TFieldValues>) {
++  const { t } = useTranslation()
++
++  return (
++    <FormField
++      control={control}
++      name={name}
++      render={({ field }) => (
++        <FormItem className='space-y-3 border-t pt-4'>
++          <div className='flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between'>
++            <div className='space-y-1'>
++              <FormLabel>{t('Custom Balance Script (Python)')}</FormLabel>
++              <FormDescription>
++                {t(
++                  'Python script to fetch channel balance. Stdlib only. Env vars: CHANNEL_BASE_URL, CHANNEL_KEY, CHANNEL_STATE. Output JSON {"balance":..., "state":...} or plain number.'
++                )}
++              </FormDescription>
++            </div>
++            <div className='flex flex-wrap gap-2'>
++              <Button
++                type='button'
++                variant='outline'
++                size='sm'
++                onClick={() => field.onChange(BALANCE_SCRIPT_TEMPLATE)}
++              >
++                {t('Fill Template')}
++              </Button>
++              <Button
++                type='button'
++                variant='ghost'
++                size='sm'
++                onClick={() => field.onChange('')}
++              >
++                {t('Clear')}
++              </Button>
++            </div>
++          </div>
++          <FormControl>
++            <Textarea
++              {...field}
++              rows={10}
++              className='font-mono text-xs'
++              placeholder={t('Leave empty to use the default balance API')}
++            />
++          </FormControl>
++          <FormMessage />
++        </FormItem>
++      )}
++    />
++  )
++}
+diff --git a/web/default/src/features/channels/components/drawers/sections/index.ts b/web/default/src/features/channels/components/drawers/sections/index.ts
+index ce62a58..37df465 100644
+--- a/web/default/src/features/channels/components/drawers/sections/index.ts
++++ b/web/default/src/features/channels/components/drawers/sections/index.ts
+@@ -22,3 +22,4 @@ export * from './channel-auth-section'
+ export * from './channel-basic-section'
+ export * from './channel-editor-loading-state'
+ export * from './channel-models-section'
++export * from './balance-script-section'
+diff --git a/web/default/src/features/channels/lib/channel-form.ts b/web/default/src/features/channels/lib/channel-form.ts
+index 33a5fb7..f9506e2 100644
+--- a/web/default/src/features/channels/lib/channel-form.ts
++++ b/web/default/src/features/channels/lib/channel-form.ts
+@@ -209,6 +209,7 @@ export const channelFormSchema = z
+     upstream_model_update_check_enabled: z.boolean().optional(),
+     upstream_model_update_auto_sync_enabled: z.boolean().optional(),
+     upstream_model_update_ignored_models: z.string().optional(),
++    balance_script: z.string().optional(),
+   })
+   .superRefine((data, ctx) => {
+     if ([3, 8, 36, 45].includes(data.type) && !data.base_url?.trim()) {
+@@ -349,6 +350,7 @@ export const CHANNEL_FORM_DEFAULT_VALUES: ChannelFormValues = {
+   upstream_model_update_auto_sync_enabled: false,
+   upstream_model_update_ignored_models: '',
+   advanced_custom: '',
++  balance_script: '',
+ }
+ 
+ // ============================================================================
+@@ -405,6 +407,7 @@ export function transformChannelToFormDefaults(
+   let upstreamModelUpdateAutoSyncEnabled = false
+   let upstreamModelUpdateIgnoredModels = ''
+   let advancedCustom = ''
++  let balanceScript = ''
+ 
+   if (channel.settings) {
+     try {
+@@ -433,6 +436,7 @@ export function transformChannelToFormDefaults(
+       if (parsed.advanced_custom) {
+         advancedCustom = stringifyAdvancedCustomConfig(parsed.advanced_custom)
+       }
++      balanceScript = parsed.balance_script || ''
+     } catch (error) {
+       // eslint-disable-next-line no-console
+       console.error('Failed to parse channel settings:', error)
+@@ -484,6 +488,7 @@ export function transformChannelToFormDefaults(
+     upstream_model_update_auto_sync_enabled: upstreamModelUpdateAutoSyncEnabled,
+     upstream_model_update_ignored_models: upstreamModelUpdateIgnoredModels,
+     advanced_custom: advancedCustom,
++    balance_script: balanceScript,
+   }
+ }
+ 
+@@ -622,6 +627,13 @@ function buildSettingsJSON(formData: ChannelFormValues): string {
+     delete settingsObj.advanced_custom
+   }
+ 
++  // Custom balance script (Python) — applies to any channel type
++  if (formData.balance_script && formData.balance_script.trim()) {
++    settingsObj.balance_script = formData.balance_script
++  } else if ('balance_script' in settingsObj) {
++    delete settingsObj.balance_script
++  }
++
+   return JSON.stringify(settingsObj)
+ }
+ 
+diff --git a/web/default/src/features/channels/types.ts b/web/default/src/features/channels/types.ts
+index 6d9b7b1..6824d44 100644
+--- a/web/default/src/features/channels/types.ts
++++ b/web/default/src/features/channels/types.ts
+@@ -107,6 +107,7 @@ export interface ChannelOtherSettings {
+   upstream_model_update_last_check_time?: number
+   upstream_model_update_last_detected_models?: string[]
+   advanced_custom?: AdvancedCustomConfig
++  balance_script?: string
+ }
+ 
+ export interface AdvancedCustomConfig {
 -- 
 2.54.0
 
