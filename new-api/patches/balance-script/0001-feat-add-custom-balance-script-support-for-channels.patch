@@ -1,4 +1,4 @@
-From 13981a416c77e216654e7421855ab7ba732df64c Mon Sep 17 00:00:00 2001
+From d52165689e6b7fc6fe60919e47e35aac07811c23 Mon Sep 17 00:00:00 2001
 From: lzc256 <i@lzc256.com>
 Date: Sun, 5 Jul 2026 10:20:31 +0800
 Subject: [PATCH] feat: add custom balance script support for channels
@@ -16,15 +16,15 @@ Subject: [PATCH] feat: add custom balance script support for channels
 ---
  Dockerfile                                    |   2 +
  controller/channel-billing.go                 |  12 +-
- controller/channel_balance_script.go          | 278 ++++++++++++++++++
+ controller/channel_balance_script.go          | 312 ++++++++++++++++++
  dto/channel_settings.go                       |   1 +
  model/channel.go                              |   7 +
  .../drawers/channel-mutate-drawer.tsx         |   6 +
- .../sections/balance-script-section.tsx       | 107 +++++++
+ .../sections/balance-script-section.tsx       | 108 ++++++
  .../components/drawers/sections/index.ts      |   1 +
  .../src/features/channels/lib/channel-form.ts |  12 +
  web/default/src/features/channels/types.ts    |   1 +
- 10 files changed, 424 insertions(+), 3 deletions(-)
+ 10 files changed, 459 insertions(+), 3 deletions(-)
  create mode 100644 controller/channel_balance_script.go
  create mode 100644 web/default/src/features/channels/components/drawers/sections/balance-script-section.tsx
 
@@ -80,10 +80,10 @@ index 751ee36..7254d4d 100644
  		//if channel.Type != common.ChannelTypeOpenAI && channel.Type != common.ChannelTypeCustom {
 diff --git a/controller/channel_balance_script.go b/controller/channel_balance_script.go
 new file mode 100644
-index 0000000..d3e5829
+index 0000000..bb1b2b5
 --- /dev/null
 +++ b/controller/channel_balance_script.go
-@@ -0,0 +1,278 @@
+@@ -0,0 +1,312 @@
 +package controller
 +
 +import (
@@ -272,7 +272,6 @@ index 0000000..d3e5829
 +from RestrictedPython import compile_restricted, safe_builtins
 +from RestrictedPython.Guards import safer_getattr, guarded_iter_unpack_sequence
 +from RestrictedPython.Eval import default_guarded_getiter
-+from RestrictedPython.PrintCollector import PrintCollector
 +
 +# Install seccomp filter BEFORE executing user code
 +try:
@@ -310,12 +309,61 @@ index 0000000..d3e5829
 +# User script source from env
 +user_script = os.environ.get("BALANCE_SCRIPT_SOURCE", "")
 +
-+# RestrictedPython: compile with guards
++# Build restricted builtins.
++# RestrictedPython rewrites print(x) into _print_.write(x) at compile time.
++# We provide a custom _print_ factory whose instance writes directly to real
++# stdout (so print output is observable by the Go side), and accumulates text
++# into 'printed' for RestrictedPython's own expectations.
++b = dict(safe_builtins)
++b['__import__'] = _safe_import
++
++class _StdoutPrintCollector:
++    """RestrictedPython _print_ guard: writes to real stdout AND accumulates.
++
++    RestrictedPython calls `_print_()` (no args) to get a collector instance,
++    then `collector.write(text)` for each print argument, and finally binds
++    the collector's string form to the `printed` global.
++    """
++    def __init__(self):
++        self.txt = []
++    def write(self, text):
++        s = str(text)
++        sys.stdout.write(s)
++        self.txt.append(s)
++    def __call__(self):
++        # RestrictedPython may call the instance to get the final string
++        return ''.join(self.txt)
++
++# A fake module exposing channel inputs to user scripts without giving them
++# `os` (which would also expose os.system, os.popen, etc.).
++class _NewApiModule:
++    """Minimal namespace exposing balance-script inputs.
++
++    Usage in user scripts:
++        from newapi import environ
++        env = environ  # dict with CHANNEL_BASE_URL/CHANNEL_KEY/CHANNEL_STATE/...
++    """
++    environ = {
++        'CHANNEL_BASE_URL': os.environ.get('CHANNEL_BASE_URL', ''),
++        'CHANNEL_KEY':      os.environ.get('CHANNEL_KEY', ''),
++        'CHANNEL_TYPE':     os.environ.get('CHANNEL_TYPE', ''),
++        'CHANNEL_ID':       os.environ.get('CHANNEL_ID', ''),
++        'CHANNEL_IS_MULTI_KEY': os.environ.get('CHANNEL_IS_MULTI_KEY', ''),
++        'CHANNEL_STATE':    os.environ.get('CHANNEL_STATE', ''),
++    }
++
++# Register the synthetic `newapi` module so `from newapi import environ` works.
++import sys as _sys, types as _types
++_newapi_mod = _types.ModuleType('newapi')
++_newapi_mod.environ = _NewApiModule.environ
++_sys.modules['newapi'] = _newapi_mod
++
 +ALLOWED_MODS = {
 +    'urllib', 'urllib.request', 'urllib.parse', 'urllib.error',
 +    'json', 'math', 'datetime', 're', 'base64', 'hashlib', 'hmac',
 +    'time', 'ssl', 'socket', 'http', 'collections', 'itertools',
 +    'functools', 'string', 'random', 'secrets', 'uuid', 'decimal',
++    'newapi',
 +}
 +
 +def _safe_import(name, g=None, l=None, ff=(), level=0):
@@ -323,13 +371,6 @@ index 0000000..d3e5829
 +    if root not in ALLOWED_MODS:
 +        raise ImportError(f"module '{name}' is not allowed in balance script")
 +    return __builtins__.__import__(name, g, l, ff, level)
-+
-+# Build restricted builtins.
-+# RestrictedPython rewrites print(x) into _print_.write(x) at compile time,
-+# collecting output into the 'printed' variable. We use the official
-+# PrintCollector and flush 'printed' to real stdout after exec.
-+b = dict(safe_builtins)
-+b['__import__'] = _safe_import
 +
 +# Build restricted globals with guards
 +g = {
@@ -341,7 +382,7 @@ index 0000000..d3e5829
 +    '_write_': lambda o: o,
 +    '_getiter_': default_guarded_getiter,
 +    '_iter_unpack_sequence_': guarded_iter_unpack_sequence,
-+    '_print_': PrintCollector,
++    '_print_': _StdoutPrintCollector,
 +}
 +
 +# Compile and execute user script
@@ -354,13 +395,6 @@ index 0000000..d3e5829
 +except Exception as e:
 +    print(json.dumps({"error": str(e)}), file=sys.stderr)
 +    raise SystemExit(1)
-+
-+# Flush collected print output (the 'printed' variable) to real stdout
-+_printed = g.get('printed', '')
-+if _printed:
-+    sys.stdout.write(_printed)
-+    if not _printed.endswith('\n'):
-+        sys.stdout.write('\n')
 +`
 diff --git a/dto/channel_settings.go b/dto/channel_settings.go
 index dc03773..542a58f 100644
@@ -425,10 +459,10 @@ index f21228c..7f2855c 100644
                                  <FormField
 diff --git a/web/default/src/features/channels/components/drawers/sections/balance-script-section.tsx b/web/default/src/features/channels/components/drawers/sections/balance-script-section.tsx
 new file mode 100644
-index 0000000..4045804
+index 0000000..ed07082
 --- /dev/null
 +++ b/web/default/src/features/channels/components/drawers/sections/balance-script-section.tsx
-@@ -0,0 +1,107 @@
+@@ -0,0 +1,108 @@
 +/*
 +Copyright (C) 2023-2026 QuantumNous
 +
@@ -461,14 +495,15 @@ index 0000000..4045804
 +import type { Control } from 'react-hook-form'
 +import { FormField } from '@/components/ui/form'
 +
-+const BALANCE_SCRIPT_TEMPLATE = `import urllib.request, json, os
++const BALANCE_SCRIPT_TEMPLATE = `import urllib.request, json
++from newapi import environ
 +
 +# Read previous state (empty on first run)
-+state = json.loads(os.environ.get("CHANNEL_STATE") or "{}")
++state = json.loads(environ.get("CHANNEL_STATE") or "{}")
 +
-+url = os.environ["CHANNEL_BASE_URL"] + "/v1/user/balance"
++url = environ["CHANNEL_BASE_URL"] + "/v1/user/balance"
 +req = urllib.request.Request(url, headers={
-+    "Authorization": "Bearer " + os.environ["CHANNEL_KEY"]
++    "Authorization": "Bearer " + environ["CHANNEL_KEY"]
 +})
 +with urllib.request.urlopen(req, timeout=15) as resp:
 +    data = json.loads(resp.read())
@@ -499,7 +534,7 @@ index 0000000..4045804
 +              <FormLabel>{t('Custom Balance Script (Python)')}</FormLabel>
 +              <FormDescription>
 +                {t(
-+                  'Python script to fetch channel balance. Stdlib only. Env vars: CHANNEL_BASE_URL, CHANNEL_KEY, CHANNEL_STATE. Output JSON {"balance":..., "state":...} or plain number.'
++                  'Python script to fetch channel balance. Stdlib only. Use `from newapi import environ` to access CHANNEL_BASE_URL/CHANNEL_KEY/CHANNEL_STATE. Output JSON {"balance":..., "state":...} or plain number.'
 +                )}
 +              </FormDescription>
 +            </div>
