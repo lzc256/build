@@ -1,4 +1,4 @@
-From 4137ae9652a5564177460287336590fff0fd124b Mon Sep 17 00:00:00 2001
+From 13981a416c77e216654e7421855ab7ba732df64c Mon Sep 17 00:00:00 2001
 From: lzc256 <i@lzc256.com>
 Date: Sun, 5 Jul 2026 10:20:31 +0800
 Subject: [PATCH] feat: add custom balance script support for channels
@@ -16,7 +16,7 @@ Subject: [PATCH] feat: add custom balance script support for channels
 ---
  Dockerfile                                    |   2 +
  controller/channel-billing.go                 |  12 +-
- controller/channel_balance_script.go          | 281 ++++++++++++++++++
+ controller/channel_balance_script.go          | 278 ++++++++++++++++++
  dto/channel_settings.go                       |   1 +
  model/channel.go                              |   7 +
  .../drawers/channel-mutate-drawer.tsx         |   6 +
@@ -24,7 +24,7 @@ Subject: [PATCH] feat: add custom balance script support for channels
  .../components/drawers/sections/index.ts      |   1 +
  .../src/features/channels/lib/channel-form.ts |  12 +
  web/default/src/features/channels/types.ts    |   1 +
- 10 files changed, 427 insertions(+), 3 deletions(-)
+ 10 files changed, 424 insertions(+), 3 deletions(-)
  create mode 100644 controller/channel_balance_script.go
  create mode 100644 web/default/src/features/channels/components/drawers/sections/balance-script-section.tsx
 
@@ -80,10 +80,10 @@ index 751ee36..7254d4d 100644
  		//if channel.Type != common.ChannelTypeOpenAI && channel.Type != common.ChannelTypeCustom {
 diff --git a/controller/channel_balance_script.go b/controller/channel_balance_script.go
 new file mode 100644
-index 0000000..339d0f6
+index 0000000..d3e5829
 --- /dev/null
 +++ b/controller/channel_balance_script.go
-@@ -0,0 +1,281 @@
+@@ -0,0 +1,278 @@
 +package controller
 +
 +import (
@@ -272,6 +272,7 @@ index 0000000..339d0f6
 +from RestrictedPython import compile_restricted, safe_builtins
 +from RestrictedPython.Guards import safer_getattr, guarded_iter_unpack_sequence
 +from RestrictedPython.Eval import default_guarded_getiter
++from RestrictedPython.PrintCollector import PrintCollector
 +
 +# Install seccomp filter BEFORE executing user code
 +try:
@@ -324,22 +325,11 @@ index 0000000..339d0f6
 +    return __builtins__.__import__(name, g, l, ff, level)
 +
 +# Build restricted builtins.
-+# RestrictedPython rewrites print(x) into _print_.write(x) calls at compile time,
-+# so we must provide a _print_ that writes directly to stdout (not PrintCollector
-+# which swallows output into a 'printed' variable).
++# RestrictedPython rewrites print(x) into _print_.write(x) at compile time,
++# collecting output into the 'printed' variable. We use the official
++# PrintCollector and flush 'printed' to real stdout after exec.
 +b = dict(safe_builtins)
 +b['__import__'] = _safe_import
-+
-+class _StdoutPrint:
-+    """Print collector that writes directly to stdout instead of collecting."""
-+    def __init__(self):
-+        self.txt = []
-+    def write(self, text):
-+        s = str(text)
-+        sys.stdout.write(s)
-+        self.txt.append(s)
-+    def __call__(self):
-+        return ''.join(self.txt)
 +
 +# Build restricted globals with guards
 +g = {
@@ -351,7 +341,7 @@ index 0000000..339d0f6
 +    '_write_': lambda o: o,
 +    '_getiter_': default_guarded_getiter,
 +    '_iter_unpack_sequence_': guarded_iter_unpack_sequence,
-+    '_print_': _StdoutPrint(),
++    '_print_': PrintCollector,
 +}
 +
 +# Compile and execute user script
@@ -364,6 +354,13 @@ index 0000000..339d0f6
 +except Exception as e:
 +    print(json.dumps({"error": str(e)}), file=sys.stderr)
 +    raise SystemExit(1)
++
++# Flush collected print output (the 'printed' variable) to real stdout
++_printed = g.get('printed', '')
++if _printed:
++    sys.stdout.write(_printed)
++    if not _printed.endswith('\n'):
++        sys.stdout.write('\n')
 +`
 diff --git a/dto/channel_settings.go b/dto/channel_settings.go
 index dc03773..542a58f 100644
