@@ -1,4 +1,4 @@
-From ea5ab237377e04d788a01d482c3098a3a6bac819 Mon Sep 17 00:00:00 2001
+From d5e745bca8daaf3d7744c6e2f4e82c3a60c88e76 Mon Sep 17 00:00:00 2001
 From: lzc256 <i@lzc256.com>
 Date: Sun, 5 Jul 2026 10:20:31 +0800
 Subject: [PATCH] feat: add custom balance script support for channels
@@ -16,7 +16,7 @@ Subject: [PATCH] feat: add custom balance script support for channels
 ---
  Dockerfile                                    |   2 +
  controller/channel-billing.go                 |  12 +-
- controller/channel_balance_script.go          | 267 ++++++++++++++++++
+ controller/channel_balance_script.go          | 281 ++++++++++++++++++
  dto/channel_settings.go                       |   1 +
  model/channel.go                              |   7 +
  .../drawers/channel-mutate-drawer.tsx         |   6 +
@@ -24,7 +24,7 @@ Subject: [PATCH] feat: add custom balance script support for channels
  .../components/drawers/sections/index.ts      |   1 +
  .../src/features/channels/lib/channel-form.ts |  12 +
  web/default/src/features/channels/types.ts    |   1 +
- 10 files changed, 413 insertions(+), 3 deletions(-)
+ 10 files changed, 427 insertions(+), 3 deletions(-)
  create mode 100644 controller/channel_balance_script.go
  create mode 100644 web/default/src/features/channels/components/drawers/sections/balance-script-section.tsx
 
@@ -80,10 +80,10 @@ index 751ee36..7254d4d 100644
  		//if channel.Type != common.ChannelTypeOpenAI && channel.Type != common.ChannelTypeCustom {
 diff --git a/controller/channel_balance_script.go b/controller/channel_balance_script.go
 new file mode 100644
-index 0000000..3869cb7
+index 0000000..2eebaec
 --- /dev/null
 +++ b/controller/channel_balance_script.go
-@@ -0,0 +1,267 @@
+@@ -0,0 +1,281 @@
 +package controller
 +
 +import (
@@ -259,7 +259,7 @@ index 0000000..3869cb7
 +// balanceScriptHarness is the trusted Python wrapper that runs the user script.
 +// It enforces RestrictedPython + seccomp before executing untrusted code.
 +const balanceScriptHarness = `
-+import os, json
++import os, json, sys
 +
 +# Pre-import all allowed modules BEFORE seccomp filter is installed
 +import urllib, urllib.request, urllib.parse, urllib.error
@@ -323,10 +323,23 @@ index 0000000..3869cb7
 +        raise ImportError(f"module '{name}' is not allowed in balance script")
 +    return __builtins__.__import__(name, g, l, ff, level)
 +
-+# Build restricted builtins
++# Build restricted builtins.
++# RestrictedPython rewrites print(x) into _print_.write(x) calls at compile time,
++# so we must provide a _print_ that writes directly to stdout (not PrintCollector
++# which swallows output into a 'printed' variable).
 +b = dict(safe_builtins)
 +b['__import__'] = _safe_import
-+b['print'] = print  # Python 3 print is not rewritten by RestrictedPython
++
++class _StdoutPrint:
++    """Print collector that writes directly to stdout instead of collecting."""
++    def __init__(self):
++        self.txt = []
++    def write(self, text):
++        s = str(text)
++        sys.stdout.write(s)
++        self.txt.append(s)
++    def __call__(self):
++        return ''.join(self.txt)
 +
 +# Build restricted globals with guards
 +g = {
@@ -338,6 +351,7 @@ index 0000000..3869cb7
 +    '_write_': lambda o: o,
 +    '_getiter_': default_guarded_getiter,
 +    '_iter_unpack_sequence_': guarded_iter_unpack_sequence,
++    '_print_': _StdoutPrint,
 +}
 +
 +# Compile and execute user script
@@ -345,10 +359,10 @@ index 0000000..3869cb7
 +    code = compile_restricted(user_script, '<balance_script>', 'exec')
 +    exec(code, g)
 +except SyntaxError as e:
-+    print(json.dumps({"error": f"syntax error: {e}"}), file=__import__('sys').stderr)
++    print(json.dumps({"error": f"syntax error: {e}"}), file=sys.stderr)
 +    raise SystemExit(2)
 +except Exception as e:
-+    print(json.dumps({"error": str(e)}), file=__import__('sys').stderr)
++    print(json.dumps({"error": str(e)}), file=sys.stderr)
 +    raise SystemExit(1)
 +`
 diff --git a/dto/channel_settings.go b/dto/channel_settings.go
