@@ -49,6 +49,10 @@ The framework operates across multiple project directories, each with its own `p
 2. Each patch script is executed with the target directory as argument
 3. CI workflows (`.github/workflows/*.yml`) run builds after patches are applied
 
+## Upstream Repositories
+
+The `.upstream-repos/` directory contains cloned upstream repositories used for patch development and testing. These are temporary working directories that Claude can freely modify (reset, apply patches, make changes, generate new patches). The user does not manually modify these directories.
+
 ## Adding a New Project
 
 1. Create project directory and patches subdirectory: `mkdir -p new-project/patches`
