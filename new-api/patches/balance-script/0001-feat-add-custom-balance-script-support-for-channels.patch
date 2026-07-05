@@ -1,4 +1,4 @@
-From d5e745bca8daaf3d7744c6e2f4e82c3a60c88e76 Mon Sep 17 00:00:00 2001
+From 4137ae9652a5564177460287336590fff0fd124b Mon Sep 17 00:00:00 2001
 From: lzc256 <i@lzc256.com>
 Date: Sun, 5 Jul 2026 10:20:31 +0800
 Subject: [PATCH] feat: add custom balance script support for channels
@@ -80,7 +80,7 @@ index 751ee36..7254d4d 100644
  		//if channel.Type != common.ChannelTypeOpenAI && channel.Type != common.ChannelTypeCustom {
 diff --git a/controller/channel_balance_script.go b/controller/channel_balance_script.go
 new file mode 100644
-index 0000000..2eebaec
+index 0000000..339d0f6
 --- /dev/null
 +++ b/controller/channel_balance_script.go
 @@ -0,0 +1,281 @@
@@ -351,7 +351,7 @@ index 0000000..2eebaec
 +    '_write_': lambda o: o,
 +    '_getiter_': default_guarded_getiter,
 +    '_iter_unpack_sequence_': guarded_iter_unpack_sequence,
-+    '_print_': _StdoutPrint,
++    '_print_': _StdoutPrint(),
 +}
 +
 +# Compile and execute user script
