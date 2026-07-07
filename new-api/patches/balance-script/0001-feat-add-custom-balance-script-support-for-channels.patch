@@ -1,4 +1,4 @@
-From d52165689e6b7fc6fe60919e47e35aac07811c23 Mon Sep 17 00:00:00 2001
+From b56793f0997edc34da68decb27897b88f0950177 Mon Sep 17 00:00:00 2001
 From: lzc256 <i@lzc256.com>
 Date: Sun, 5 Jul 2026 10:20:31 +0800
 Subject: [PATCH] feat: add custom balance script support for channels
@@ -80,7 +80,7 @@ index 751ee36..7254d4d 100644
  		//if channel.Type != common.ChannelTypeOpenAI && channel.Type != common.ChannelTypeCustom {
 diff --git a/controller/channel_balance_script.go b/controller/channel_balance_script.go
 new file mode 100644
-index 0000000..bb1b2b5
+index 0000000..15502a9
 --- /dev/null
 +++ b/controller/channel_balance_script.go
 @@ -0,0 +1,312 @@
@@ -320,9 +320,9 @@ index 0000000..bb1b2b5
 +class _StdoutPrintCollector:
 +    """RestrictedPython _print_ guard: writes to real stdout AND accumulates.
 +
-+    RestrictedPython calls `_print_()` (no args) to get a collector instance,
-+    then `collector.write(text)` for each print argument, and finally binds
-+    the collector's string form to the `printed` global.
++    RestrictedPython calls _print_() (no args) to get a collector instance,
++    then collector.write(text) for each print argument, and finally binds
++    the collector string form to the printed global.
 +    """
 +    def __init__(self):
 +        self.txt = []
@@ -335,7 +335,7 @@ index 0000000..bb1b2b5
 +        return ''.join(self.txt)
 +
 +# A fake module exposing channel inputs to user scripts without giving them
-+# `os` (which would also expose os.system, os.popen, etc.).
++# os (which would also expose os.system, os.popen, etc.).
 +class _NewApiModule:
 +    """Minimal namespace exposing balance-script inputs.
 +
@@ -352,7 +352,7 @@ index 0000000..bb1b2b5
 +        'CHANNEL_STATE':    os.environ.get('CHANNEL_STATE', ''),
 +    }
 +
-+# Register the synthetic `newapi` module so `from newapi import environ` works.
++# Register the synthetic newapi module so "from newapi import environ" works.
 +import sys as _sys, types as _types
 +_newapi_mod = _types.ModuleType('newapi')
 +_newapi_mod.environ = _NewApiModule.environ
