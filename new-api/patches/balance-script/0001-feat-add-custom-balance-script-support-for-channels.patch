@@ -1,4 +1,4 @@
-From b56793f0997edc34da68decb27897b88f0950177 Mon Sep 17 00:00:00 2001
+From ba1da7fe0d3b22f1806ba396f37388f2f3b3c2c2 Mon Sep 17 00:00:00 2001
 From: lzc256 <i@lzc256.com>
 Date: Sun, 5 Jul 2026 10:20:31 +0800
 Subject: [PATCH] feat: add custom balance script support for channels
@@ -16,15 +16,15 @@ Subject: [PATCH] feat: add custom balance script support for channels
 ---
  Dockerfile                                    |   2 +
  controller/channel-billing.go                 |  12 +-
- controller/channel_balance_script.go          | 312 ++++++++++++++++++
+ controller/channel_balance_script.go          | 354 ++++++++++++++++++
  dto/channel_settings.go                       |   1 +
  model/channel.go                              |   7 +
  .../drawers/channel-mutate-drawer.tsx         |   6 +
- .../sections/balance-script-section.tsx       | 108 ++++++
+ .../sections/balance-script-section.tsx       | 107 ++++++
  .../components/drawers/sections/index.ts      |   1 +
  .../src/features/channels/lib/channel-form.ts |  12 +
  web/default/src/features/channels/types.ts    |   1 +
- 10 files changed, 459 insertions(+), 3 deletions(-)
+ 10 files changed, 500 insertions(+), 3 deletions(-)
  create mode 100644 controller/channel_balance_script.go
  create mode 100644 web/default/src/features/channels/components/drawers/sections/balance-script-section.tsx
 
@@ -80,10 +80,10 @@ index 751ee36..7254d4d 100644
  		//if channel.Type != common.ChannelTypeOpenAI && channel.Type != common.ChannelTypeCustom {
 diff --git a/controller/channel_balance_script.go b/controller/channel_balance_script.go
 new file mode 100644
-index 0000000..15502a9
+index 0000000..ad92473
 --- /dev/null
 +++ b/controller/channel_balance_script.go
-@@ -0,0 +1,312 @@
+@@ -0,0 +1,354 @@
 +package controller
 +
 +import (
@@ -258,27 +258,49 @@ index 0000000..15502a9
 +
 +// balanceScriptHarness is the trusted Python wrapper that runs the user script.
 +// It enforces RestrictedPython + seccomp before executing untrusted code.
++//
++// User scripts interact via the newapi module:
++//
++//	from newapi import environ, state, balance
++//	prev = state.get() or {}            # previous state (JSON-parsed)
++//	state.save({"token": new_token})    # save new state
++//	balance.set(123.45)                  # set balance
++//
++// print() in user scripts goes to stderr (debug only). Results are emitted
++// to stdout by the harness as JSON: {"balance":..., "state":...}.
++// For backward compat, if a script never calls balance.set()/state.save()
++// but uses print(number), the printed text is used as the balance.
 +const balanceScriptHarness = `
 +import os, json, sys
 +
-+# Pre-import all allowed modules BEFORE seccomp filter is installed
++# Read channel inputs before seccomp filter is installed.
++_channel_env = {
++    'CHANNEL_BASE_URL':     os.environ.get('CHANNEL_BASE_URL', ''),
++    'CHANNEL_KEY':          os.environ.get('CHANNEL_KEY', ''),
++    'CHANNEL_TYPE':         os.environ.get('CHANNEL_TYPE', ''),
++    'CHANNEL_ID':           os.environ.get('CHANNEL_ID', ''),
++    'CHANNEL_IS_MULTI_KEY': os.environ.get('CHANNEL_IS_MULTI_KEY', ''),
++}
++_channel_state_raw = os.environ.get('CHANNEL_STATE', '')
++_user_script = os.environ.get('BALANCE_SCRIPT_SOURCE', '')
++
++# Pre-import all allowed modules BEFORE seccomp filter is installed.
 +import urllib, urllib.request, urllib.parse, urllib.error
 +import math, datetime, re, base64, hashlib, hmac
 +import time, ssl, socket, http
 +import collections, itertools, functools, string
 +import random, secrets, uuid, decimal
 +
-+# Now import RestrictedPython and seccomp
++# RestrictedPython
 +from RestrictedPython import compile_restricted, safe_builtins
 +from RestrictedPython.Guards import safer_getattr, guarded_iter_unpack_sequence
 +from RestrictedPython.Eval import default_guarded_getiter
 +
-+# Install seccomp filter BEFORE executing user code
++# Install seccomp filter before executing user code.
 +try:
 +    from seccomp import SyscallFilter, Action, Arg
 +    O_ACCMODE = 3
 +    f = SyscallFilter(def_action=Action.ERRNO(1))
-+    # Allow syscalls needed for Python runtime and network I/O
 +    for s in [
 +        'read', 'write', 'close', 'mmap', 'mprotect', 'munmap', 'brk',
 +        'rt_sigaction', 'rt_sigprocmask', 'rt_sigreturn', 'ioctl',
@@ -294,68 +316,73 @@ index 0000000..15502a9
 +        'uname', 'sysinfo', 'getdents64', 'pread64', 'pwrite64',
 +    ]:
 +        f.add_rule(Action.ALLOW, s)
-+    # Allow read-only open/openat
 +    f.add_rule(Action.ALLOW, 'openat', [Arg(2, 'masked_eq', O_ACCMODE, 0)])
 +    f.add_rule(Action.ERRNO(1), 'openat')
 +    f.add_rule(Action.ALLOW, 'open', [Arg(1, 'masked_eq', O_ACCMODE, 0)])
 +    f.add_rule(Action.ERRNO(1), 'open')
-+    # Default ERRNO(1) blocks: execve, execveat, fork, vfork, clone,
-+    # unlink, rename, mkdir, chmod, chown, truncate, creat, etc.
 +    f.load()
-+except Exception as e:
-+    # seccomp not available (e.g., in dev environment), continue without it
++except Exception:
 +    pass
 +
-+# User script source from env
-+user_script = os.environ.get("BALANCE_SCRIPT_SOURCE", "")
++# --------------------------------------------------------------------------
++# newapi module: the only interface user scripts should use.
++#   newapi.environ             dict of CHANNEL_* inputs
++#   newapi.state.get()         previous state parsed as JSON (or None)
++#   newapi.state.getRaw()      previous state as raw string (or '')
++#   newapi.state.save(obj)     save state (JSON-serialized)
++#   newapi.state.saveRaw(s)    save state as raw string
++#   newapi.balance.set(v)      set channel balance (number)
++# --------------------------------------------------------------------------
 +
-+# Build restricted builtins.
-+# RestrictedPython rewrites print(x) into _print_.write(x) at compile time.
-+# We provide a custom _print_ factory whose instance writes directly to real
-+# stdout (so print output is observable by the Go side), and accumulates text
-+# into 'printed' for RestrictedPython's own expectations.
-+b = dict(safe_builtins)
-+b['__import__'] = _safe_import
++class _State:
++    _raw = _channel_state_raw
++    _saved = None  # sentinel: not saved
 +
-+class _StdoutPrintCollector:
-+    """RestrictedPython _print_ guard: writes to real stdout AND accumulates.
++    @staticmethod
++    def get():
++        if not _State._raw:
++            return None
++        return json.loads(_State._raw)
 +
-+    RestrictedPython calls _print_() (no args) to get a collector instance,
-+    then collector.write(text) for each print argument, and finally binds
-+    the collector string form to the printed global.
-+    """
++    @staticmethod
++    def getRaw():
++        return _State._raw
++
++    @staticmethod
++    def save(obj):
++        _State._saved = json.dumps(obj)
++
++    @staticmethod
++    def saveRaw(s):
++        _State._saved = str(s)
++
++class _Balance:
++    _value = None  # sentinel: not set
++
++    @staticmethod
++    def set(value):
++        _Balance._value = float(value)
++
++# Print collector: writes to stderr (debug only), accumulates for backward
++# compat (scripts that print a number instead of calling balance.set()).
++class _PrintCollector:
++    _collected = []
++
 +    def __init__(self):
-+        self.txt = []
++        pass
 +    def write(self, text):
 +        s = str(text)
-+        sys.stdout.write(s)
-+        self.txt.append(s)
++        _PrintCollector._collected.append(s)
++        sys.stderr.write(s)
 +    def __call__(self):
-+        # RestrictedPython may call the instance to get the final string
-+        return ''.join(self.txt)
++        return ''.join(_PrintCollector._collected)
 +
-+# A fake module exposing channel inputs to user scripts without giving them
-+# os (which would also expose os.system, os.popen, etc.).
-+class _NewApiModule:
-+    """Minimal namespace exposing balance-script inputs.
-+
-+    Usage in user scripts:
-+        from newapi import environ
-+        env = environ  # dict with CHANNEL_BASE_URL/CHANNEL_KEY/CHANNEL_STATE/...
-+    """
-+    environ = {
-+        'CHANNEL_BASE_URL': os.environ.get('CHANNEL_BASE_URL', ''),
-+        'CHANNEL_KEY':      os.environ.get('CHANNEL_KEY', ''),
-+        'CHANNEL_TYPE':     os.environ.get('CHANNEL_TYPE', ''),
-+        'CHANNEL_ID':       os.environ.get('CHANNEL_ID', ''),
-+        'CHANNEL_IS_MULTI_KEY': os.environ.get('CHANNEL_IS_MULTI_KEY', ''),
-+        'CHANNEL_STATE':    os.environ.get('CHANNEL_STATE', ''),
-+    }
-+
-+# Register the synthetic newapi module so "from newapi import environ" works.
++# Register the synthetic newapi module.
 +import sys as _sys, types as _types
 +_newapi_mod = _types.ModuleType('newapi')
-+_newapi_mod.environ = _NewApiModule.environ
++_newapi_mod.environ = _channel_env
++_newapi_mod.state = _State
++_newapi_mod.balance = _Balance
 +_sys.modules['newapi'] = _newapi_mod
 +
 +ALLOWED_MODS = {
@@ -369,32 +396,47 @@ index 0000000..15502a9
 +def _safe_import(name, g=None, l=None, ff=(), level=0):
 +    root = name.split('.')[0]
 +    if root not in ALLOWED_MODS:
-+        raise ImportError(f"module '{name}' is not allowed in balance script")
++        raise ImportError("module '%s' is not allowed in balance script" % name)
 +    return __builtins__.__import__(name, g, l, ff, level)
 +
-+# Build restricted globals with guards
++b = dict(safe_builtins)
++b['__import__'] = _safe_import
++
 +g = {
 +    '__builtins__': b,
 +    '__metaclass__': type,
 +    '__name__': '__main__',
-+    '_getattr_': safer_getattr,  # Blocks __subclasses__, __globals__, etc.
++    '_getattr_': safer_getattr,
 +    '_getitem_': lambda o, k: o[k],
 +    '_write_': lambda o: o,
 +    '_getiter_': default_guarded_getiter,
 +    '_iter_unpack_sequence_': guarded_iter_unpack_sequence,
-+    '_print_': _StdoutPrintCollector,
++    '_print_': _PrintCollector,
 +}
 +
-+# Compile and execute user script
 +try:
-+    code = compile_restricted(user_script, '<balance_script>', 'exec')
++    code = compile_restricted(_user_script, '<balance_script>', 'exec')
 +    exec(code, g)
 +except SyntaxError as e:
-+    print(json.dumps({"error": f"syntax error: {e}"}), file=sys.stderr)
++    sys.stderr.write(json.dumps({"error": "syntax error: %s" % e}) + "\n")
 +    raise SystemExit(2)
 +except Exception as e:
-+    print(json.dumps({"error": str(e)}), file=sys.stderr)
++    sys.stderr.write(json.dumps({"error": str(e)}) + "\n")
 +    raise SystemExit(1)
++
++# Collect results: prefer function API, fall back to print for backward compat.
++_output = {}
++if _Balance._value is not None:
++    _output['balance'] = _Balance._value
++if _State._saved is not None:
++    _output['state'] = _State._saved
++
++if _output:
++    sys.stdout.write(json.dumps(_output))
++else:
++    _printed = ''.join(_PrintCollector._collected).strip()
++    if _printed:
++        sys.stdout.write(_printed)
 +`
 diff --git a/dto/channel_settings.go b/dto/channel_settings.go
 index dc03773..542a58f 100644
@@ -459,10 +501,10 @@ index f21228c..7f2855c 100644
                                  <FormField
 diff --git a/web/default/src/features/channels/components/drawers/sections/balance-script-section.tsx b/web/default/src/features/channels/components/drawers/sections/balance-script-section.tsx
 new file mode 100644
-index 0000000..ed07082
+index 0000000..6cffe4a
 --- /dev/null
 +++ b/web/default/src/features/channels/components/drawers/sections/balance-script-section.tsx
-@@ -0,0 +1,108 @@
+@@ -0,0 +1,107 @@
 +/*
 +Copyright (C) 2023-2026 QuantumNous
 +
@@ -496,10 +538,7 @@ index 0000000..ed07082
 +import { FormField } from '@/components/ui/form'
 +
 +const BALANCE_SCRIPT_TEMPLATE = `import urllib.request, json
-+from newapi import environ
-+
-+# Read previous state (empty on first run)
-+state = json.loads(environ.get("CHANNEL_STATE") or "{}")
++from newapi import environ, state, balance
 +
 +url = environ["CHANNEL_BASE_URL"] + "/v1/user/balance"
 +req = urllib.request.Request(url, headers={
@@ -508,8 +547,10 @@ index 0000000..ed07082
 +with urllib.request.urlopen(req, timeout=15) as resp:
 +    data = json.loads(resp.read())
 +
-+# Output JSON with balance and state (state unchanged in this example)
-+print(json.dumps({"balance": data["balance"], "state": state}))
++balance.set(data["balance"])
++# Save state (example: persist unchanged state)
++s = state.get() or {}
++state.save(s)
 +`
 +
 +interface BalanceScriptFieldProps<TFieldValues extends FieldValues> {
@@ -534,7 +575,7 @@ index 0000000..ed07082
 +              <FormLabel>{t('Custom Balance Script (Python)')}</FormLabel>
 +              <FormDescription>
 +                {t(
-+                  'Python script to fetch channel balance. Stdlib only. Use `from newapi import environ` to access CHANNEL_BASE_URL/CHANNEL_KEY/CHANNEL_STATE. Output JSON {"balance":..., "state":...} or plain number.'
++                  'Python script to fetch channel balance. Stdlib only. Use newapi.environ for inputs, newapi.state.get()/save() for state, newapi.balance.set() for result.'
 +                )}
 +              </FormDescription>
 +            </div>
