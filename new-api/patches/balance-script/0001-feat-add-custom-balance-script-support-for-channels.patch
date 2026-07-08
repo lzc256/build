@@ -1,4 +1,4 @@
-From 7f430560e287f7aaeb6fb88be10a7cb407d65305 Mon Sep 17 00:00:00 2001
+From 8e067caa1a5c42b63b9c24f5ffa81f8756ae845f Mon Sep 17 00:00:00 2001
 From: lzc256 <i@lzc256.com>
 Date: Sun, 5 Jul 2026 10:20:31 +0800
 Subject: [PATCH] feat: add custom balance script support for channels
@@ -80,7 +80,7 @@ index 751ee36..7254d4d 100644
  		//if channel.Type != common.ChannelTypeOpenAI && channel.Type != common.ChannelTypeCustom {
 diff --git a/controller/channel_balance_script.go b/controller/channel_balance_script.go
 new file mode 100644
-index 0000000..c1c6733
+index 0000000..8e596dd
 --- /dev/null
 +++ b/controller/channel_balance_script.go
 @@ -0,0 +1,338 @@
@@ -327,7 +327,7 @@ index 0000000..c1c6733
 +
 +class _State:
 +    _raw = _channel_state_raw
-+    _saved = None
++    _saved = None  # None = not saved; otherwise the raw object/string to be JSON-encoded
 +
 +    @staticmethod
 +    def get():
@@ -339,11 +339,11 @@ index 0000000..c1c6733
 +
 +    @staticmethod
 +    def save(obj):
-+        _State._saved = json.dumps(obj)
++        _State._saved = obj  # store object; json.dumps(out) serializes once
 +
 +    @staticmethod
 +    def saveRaw(s):
-+        _State._saved = str(s)
++        _State._saved = str(s)  # store string; json.dumps encodes as JSON string value
 +
 +class _Balance:
 +    _value = None
