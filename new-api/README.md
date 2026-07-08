@@ -28,7 +28,7 @@ For saving login tokens, session data, etc. across balance checks.
 
 | Method | Description |
 |--------|-------------|
-| `state.get()` | Returns previous state as JSON-parsed object, or `None` on first run |
+| `state.get()` | Returns previous state as JSON-parsed object, or `{}` on first run |
 | `state.getRaw()` | Returns previous state as raw string, or `""` on first run |
 | `state.save(obj)` | Save state (any JSON-serializable object) |
 | `state.saveRaw(s)` | Save state as raw string |
@@ -86,8 +86,8 @@ balance.set(data["balance"])
 import urllib.request, json
 from newapi import environ, state, balance
 
-# Load previous state
-s = state.get() or {}
+# Load previous state (returns {} on first run)
+s = state.get()
 token = s.get("token")
 
 # If no token, login first

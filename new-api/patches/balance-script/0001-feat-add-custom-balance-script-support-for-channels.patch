@@ -1,4 +1,4 @@
-From a58eb457bfeaae9b4c6473c7d88dab9d0bb2e9cf Mon Sep 17 00:00:00 2001
+From 7f430560e287f7aaeb6fb88be10a7cb407d65305 Mon Sep 17 00:00:00 2001
 From: lzc256 <i@lzc256.com>
 Date: Sun, 5 Jul 2026 10:20:31 +0800
 Subject: [PATCH] feat: add custom balance script support for channels
@@ -80,7 +80,7 @@ index 751ee36..7254d4d 100644
  		//if channel.Type != common.ChannelTypeOpenAI && channel.Type != common.ChannelTypeCustom {
 diff --git a/controller/channel_balance_script.go b/controller/channel_balance_script.go
 new file mode 100644
-index 0000000..5889dc6
+index 0000000..c1c6733
 --- /dev/null
 +++ b/controller/channel_balance_script.go
 @@ -0,0 +1,338 @@
@@ -331,7 +331,7 @@ index 0000000..5889dc6
 +
 +    @staticmethod
 +    def get():
-+        return json.loads(_State._raw) if _State._raw else None
++        return json.loads(_State._raw) if _State._raw else {}
 +
 +    @staticmethod
 +    def getRaw():
@@ -485,7 +485,7 @@ index f21228c..7f2855c 100644
                                  <FormField
 diff --git a/web/default/src/features/channels/components/drawers/sections/balance-script-section.tsx b/web/default/src/features/channels/components/drawers/sections/balance-script-section.tsx
 new file mode 100644
-index 0000000..6cffe4a
+index 0000000..92293e0
 --- /dev/null
 +++ b/web/default/src/features/channels/components/drawers/sections/balance-script-section.tsx
 @@ -0,0 +1,107 @@
@@ -532,8 +532,8 @@ index 0000000..6cffe4a
 +    data = json.loads(resp.read())
 +
 +balance.set(data["balance"])
-+# Save state (example: persist unchanged state)
-+s = state.get() or {}
++# Save state (state.get() returns {} on first run)
++s = state.get()
 +state.save(s)
 +`
 +
