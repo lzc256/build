@@ -6,9 +6,9 @@ This document describes the custom balance script feature for new-api channels.
 
 Balance scripts allow you to fetch channel balance using custom Python code. This is useful for providers that don't have built-in balance API support, or for implementing custom authentication/login flows.
 
-## API Reference
+**Important**: Scripts MUST call `balance.set()` to return the balance. `print()` is disabled.
 
-Scripts run in a sandboxed Python environment with the `newapi` module as the primary interface:
+## API Reference
 
 ### `newapi.environ` (dict, read-only)
 
@@ -35,11 +35,17 @@ For saving login tokens, session data, etc. across balance checks.
 
 State size limit: 65536 bytes.
 
-### `newapi.balance` — Result Output
+### `newapi.balance` — Result Output (Required)
 
 | Method | Description |
 |--------|-------------|
-| `balance.set(value)` | Set channel balance (float) |
+| `balance.set(value)` | Set channel balance (float). **Must be called exactly once.** |
+
+### `newapi.debug` — Debug Output
+
+| Method | Description |
+|--------|-------------|
+| `debug.log(*args, **kwargs)` | Write to stderr (visible in error messages) |
 
 ## Available Python Modules
 
@@ -54,7 +60,7 @@ Only Python standard library is available:
 - `string`, `random`, `secrets`, `uuid` — String/ID generation
 - `decimal` — Precise decimals
 
-`os`, `sys`, `subprocess`, and other modules with filesystem/system access are **not available**.
+`os`, `sys`, `subprocess`, `print()`, and other modules/functions with filesystem/system access are **not available**.
 
 ## Example Scripts
 
@@ -114,39 +120,24 @@ if "new_token" in data:
     state.save(s)
 ```
 
-### Multi-Key Channel
-
-For multi-key channels, `environ["CHANNEL_KEY"]` contains only the first key. To iterate all keys:
+### Debugging
 
 ```python
 import urllib.request, json
-from newapi import environ, state, balance
+from newapi import environ, balance, debug
 
-# Multi-key channels need custom logic
-# environ["CHANNEL_KEY"] is the first key only
-# Use environ["CHANNEL_IS_MULTI_KEY"] to detect multi-key mode
+debug.log("Fetching balance for channel:", environ["CHANNEL_ID"])
 
-if environ["CHANNEL_IS_MULTI_KEY"] == "1":
-    # Implement multi-key balance logic
-    # Example: sum balances across all keys
-    pass
-else:
-    url = environ["CHANNEL_BASE_URL"] + "/v1/user/balance"
-    req = urllib.request.Request(url, headers={
-        "Authorization": "Bearer " + environ["CHANNEL_KEY"]
-    })
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        data = json.loads(resp.read())
-    balance.set(data["balance"])
+url = environ["CHANNEL_BASE_URL"] + "/v1/user/balance"
+req = urllib.request.Request(url, headers={
+    "Authorization": "Bearer " + environ["CHANNEL_KEY"]
+})
+with urllib.request.urlopen(req, timeout=15) as resp:
+    data = json.loads(resp.read())
+
+debug.log("Balance response:", data)
+balance.set(data["balance"])
 ```
-
-## Backward Compatibility
-
-For legacy scripts that don't use `balance.set()`:
-
-- If script prints a number → used as balance, state unchanged
-- If script prints JSON `{"balance": ..., "state": ...}` → parsed accordingly
-- `print()` output goes to stderr (debug only)
 
 ## Security
 
@@ -162,6 +153,7 @@ Scripts run with the following restrictions:
    - 128MB memory
    - 25s CPU time
    - 64 max processes
+5. **print() disabled**: Use `newapi.debug.log()` for debug output
 
 ## Error Handling
 
@@ -176,10 +168,5 @@ Common errors:
 - `module 'xxx' is not allowed` — Tried to import a blocked module
 - `balance script timed out` — Exceeded 30s timeout
 - `balance script state exceeds 65536 bytes` — State too large
-- `balance script output invalid` — Output not a valid number or JSON
-
-## Debugging
-
-- `print()` statements go to stderr, visible in channel logs
-- Use `print(json.dumps({...}), file=__import__('sys').stderr)` for debug output
-- Check stderr output in the balance check response error message
+- `balance.set() was never called` — Script didn't set balance
+- `print() is disabled in balance scripts` — Used `print()` instead of `debug.log()`

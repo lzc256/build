@@ -1,4 +1,4 @@
-From ba1da7fe0d3b22f1806ba396f37388f2f3b3c2c2 Mon Sep 17 00:00:00 2001
+From a58eb457bfeaae9b4c6473c7d88dab9d0bb2e9cf Mon Sep 17 00:00:00 2001
 From: lzc256 <i@lzc256.com>
 Date: Sun, 5 Jul 2026 10:20:31 +0800
 Subject: [PATCH] feat: add custom balance script support for channels
@@ -16,7 +16,7 @@ Subject: [PATCH] feat: add custom balance script support for channels
 ---
  Dockerfile                                    |   2 +
  controller/channel-billing.go                 |  12 +-
- controller/channel_balance_script.go          | 354 ++++++++++++++++++
+ controller/channel_balance_script.go          | 338 ++++++++++++++++++
  dto/channel_settings.go                       |   1 +
  model/channel.go                              |   7 +
  .../drawers/channel-mutate-drawer.tsx         |   6 +
@@ -24,7 +24,7 @@ Subject: [PATCH] feat: add custom balance script support for channels
  .../components/drawers/sections/index.ts      |   1 +
  .../src/features/channels/lib/channel-form.ts |  12 +
  web/default/src/features/channels/types.ts    |   1 +
- 10 files changed, 500 insertions(+), 3 deletions(-)
+ 10 files changed, 484 insertions(+), 3 deletions(-)
  create mode 100644 controller/channel_balance_script.go
  create mode 100644 web/default/src/features/channels/components/drawers/sections/balance-script-section.tsx
 
@@ -80,10 +80,10 @@ index 751ee36..7254d4d 100644
  		//if channel.Type != common.ChannelTypeOpenAI && channel.Type != common.ChannelTypeCustom {
 diff --git a/controller/channel_balance_script.go b/controller/channel_balance_script.go
 new file mode 100644
-index 0000000..ad92473
+index 0000000..5889dc6
 --- /dev/null
 +++ b/controller/channel_balance_script.go
-@@ -0,0 +1,354 @@
+@@ -0,0 +1,338 @@
 +package controller
 +
 +import (
@@ -259,17 +259,14 @@ index 0000000..ad92473
 +// balanceScriptHarness is the trusted Python wrapper that runs the user script.
 +// It enforces RestrictedPython + seccomp before executing untrusted code.
 +//
-+// User scripts interact via the newapi module:
++// User scripts MUST use the newapi module to communicate results:
 +//
 +//	from newapi import environ, state, balance
-+//	prev = state.get() or {}            # previous state (JSON-parsed)
-+//	state.save({"token": new_token})    # save new state
-+//	balance.set(123.45)                  # set balance
++//	prev = state.get() or {}
++//	state.save({"token": new_token})
++//	balance.set(123.45)
 +//
-+// print() in user scripts goes to stderr (debug only). Results are emitted
-+// to stdout by the harness as JSON: {"balance":..., "state":...}.
-+// For backward compat, if a script never calls balance.set()/state.save()
-+// but uses print(number), the printed text is used as the balance.
++// print() is disabled. Use stderr for debugging if needed.
 +const balanceScriptHarness = `
 +import os, json, sys
 +
@@ -326,23 +323,15 @@ index 0000000..ad92473
 +
 +# --------------------------------------------------------------------------
 +# newapi module: the only interface user scripts should use.
-+#   newapi.environ             dict of CHANNEL_* inputs
-+#   newapi.state.get()         previous state parsed as JSON (or None)
-+#   newapi.state.getRaw()      previous state as raw string (or '')
-+#   newapi.state.save(obj)     save state (JSON-serialized)
-+#   newapi.state.saveRaw(s)    save state as raw string
-+#   newapi.balance.set(v)      set channel balance (number)
 +# --------------------------------------------------------------------------
 +
 +class _State:
 +    _raw = _channel_state_raw
-+    _saved = None  # sentinel: not saved
++    _saved = None
 +
 +    @staticmethod
 +    def get():
-+        if not _State._raw:
-+            return None
-+        return json.loads(_State._raw)
++        return json.loads(_State._raw) if _State._raw else None
 +
 +    @staticmethod
 +    def getRaw():
@@ -357,33 +346,35 @@ index 0000000..ad92473
 +        _State._saved = str(s)
 +
 +class _Balance:
-+    _value = None  # sentinel: not set
++    _value = None
 +
 +    @staticmethod
 +    def set(value):
 +        _Balance._value = float(value)
 +
-+# Print collector: writes to stderr (debug only), accumulates for backward
-+# compat (scripts that print a number instead of calling balance.set()).
-+class _PrintCollector:
-+    _collected = []
-+
-+    def __init__(self):
-+        pass
-+    def write(self, text):
-+        s = str(text)
-+        _PrintCollector._collected.append(s)
-+        sys.stderr.write(s)
-+    def __call__(self):
-+        return ''.join(_PrintCollector._collected)
++class _Debug:
++    @staticmethod
++    def log(*args, **kwargs):
++        print(*args, file=sys.stderr, **kwargs)
 +
 +# Register the synthetic newapi module.
-+import sys as _sys, types as _types
++import types as _types
 +_newapi_mod = _types.ModuleType('newapi')
 +_newapi_mod.environ = _channel_env
 +_newapi_mod.state = _State
 +_newapi_mod.balance = _Balance
-+_sys.modules['newapi'] = _newapi_mod
++_newapi_mod.debug = _Debug
++sys.modules['newapi'] = _newapi_mod
++
++# Disable print in user scripts (RestrictedPython rewrites to _print_.write)
++def _disabled_print_write(text):
++    raise RuntimeError("print() is disabled in balance scripts; use newapi.debug.log() for debugging")
++
++class _DisabledPrint:
++    def __init__(self, *args, **kwargs):
++        pass
++    def write(self, text):
++        raise RuntimeError("print() is disabled in balance scripts; use newapi.debug.log() for debugging")
 +
 +ALLOWED_MODS = {
 +    'urllib', 'urllib.request', 'urllib.parse', 'urllib.error',
@@ -396,7 +387,7 @@ index 0000000..ad92473
 +def _safe_import(name, g=None, l=None, ff=(), level=0):
 +    root = name.split('.')[0]
 +    if root not in ALLOWED_MODS:
-+        raise ImportError("module '%s' is not allowed in balance script" % name)
++        raise ImportError("module '%s' is not allowed" % name)
 +    return __builtins__.__import__(name, g, l, ff, level)
 +
 +b = dict(safe_builtins)
@@ -411,32 +402,25 @@ index 0000000..ad92473
 +    '_write_': lambda o: o,
 +    '_getiter_': default_guarded_getiter,
 +    '_iter_unpack_sequence_': guarded_iter_unpack_sequence,
-+    '_print_': _PrintCollector,
++    '_print_': _DisabledPrint,
 +}
 +
 +try:
 +    code = compile_restricted(_user_script, '<balance_script>', 'exec')
 +    exec(code, g)
-+except SyntaxError as e:
-+    sys.stderr.write(json.dumps({"error": "syntax error: %s" % e}) + "\n")
-+    raise SystemExit(2)
 +except Exception as e:
 +    sys.stderr.write(json.dumps({"error": str(e)}) + "\n")
 +    raise SystemExit(1)
 +
-+# Collect results: prefer function API, fall back to print for backward compat.
-+_output = {}
-+if _Balance._value is not None:
-+    _output['balance'] = _Balance._value
-+if _State._saved is not None:
-+    _output['state'] = _State._saved
++# Output result
++if _Balance._value is None:
++    sys.stderr.write(json.dumps({"error": "balance.set() was never called"}) + "\n")
++    raise SystemExit(1)
 +
-+if _output:
-+    sys.stdout.write(json.dumps(_output))
-+else:
-+    _printed = ''.join(_PrintCollector._collected).strip()
-+    if _printed:
-+        sys.stdout.write(_printed)
++out = {"balance": _Balance._value}
++if _State._saved is not None:
++    out["state"] = _State._saved
++sys.stdout.write(json.dumps(out))
 +`
 diff --git a/dto/channel_settings.go b/dto/channel_settings.go
 index dc03773..542a58f 100644
