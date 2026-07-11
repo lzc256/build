@@ -1,4 +1,4 @@
-From 7a4dc5a871f35cf761a5c7902c02cb2566fb1ebc Mon Sep 17 00:00:00 2001
+From 19a017c19c03304cc62567e518a96112898503b9 Mon Sep 17 00:00:00 2001
 From: lzc256 <i@lzc256.com>
 Date: Sun, 5 Jul 2026 10:20:31 +0800
 Subject: [PATCH] feat: add custom balance script support for channels
@@ -16,15 +16,15 @@ Subject: [PATCH] feat: add custom balance script support for channels
 ---
  Dockerfile                                    |   2 +
  controller/channel-billing.go                 |  12 +-
- controller/channel_balance_script.go          | 359 ++++++++++++++++++
+ controller/channel_balance_script.go          | 394 ++++++++++++++++++
  dto/channel_settings.go                       |   1 +
  model/channel.go                              |   7 +
  .../drawers/channel-mutate-drawer.tsx         |   6 +
- .../sections/balance-script-section.tsx       | 107 ++++++
+ .../sections/balance-script-section.tsx       | 107 +++++
  .../components/drawers/sections/index.ts      |   1 +
  .../src/features/channels/lib/channel-form.ts |  12 +
  web/default/src/features/channels/types.ts    |   1 +
- 10 files changed, 505 insertions(+), 3 deletions(-)
+ 10 files changed, 540 insertions(+), 3 deletions(-)
  create mode 100644 controller/channel_balance_script.go
  create mode 100644 web/default/src/features/channels/components/drawers/sections/balance-script-section.tsx
 
@@ -80,10 +80,10 @@ index 751ee36..7254d4d 100644
  		//if channel.Type != common.ChannelTypeOpenAI && channel.Type != common.ChannelTypeCustom {
 diff --git a/controller/channel_balance_script.go b/controller/channel_balance_script.go
 new file mode 100644
-index 0000000..6ce689f
+index 0000000..b13d6d4
 --- /dev/null
 +++ b/controller/channel_balance_script.go
-@@ -0,0 +1,359 @@
+@@ -0,0 +1,394 @@
 +package controller
 +
 +import (
@@ -412,6 +412,41 @@ index 0000000..6ce689f
 +
 +b = dict(safe_builtins)
 +b['__import__'] = _safe_import
++
++# Guard for inplace operations (x += 1, x -= 1, etc.)
++# RestrictedPython rewrites 'x += y' to 'x = _inplacevar_("+=", x, y)'
++def _inplacevar_(op, obj, val):
++    if op == '+=': return obj + val
++    if op == '-=': return obj - val
++    if op == '*=': return obj * val
++    if op == '/=': return obj / val
++    if op == '//=': return obj // val
++    if op == '%=': return obj % val
++    if op == '**=': return obj ** val
++    if op == '<<=': return obj << val
++    if op == '>>=': return obj >> val
++    if op == '&=': return obj & val
++    if op == '|=': return obj | val
++    if op == '^=': return obj ^ val
++    raise TypeError(f"unsupported inplace operator: {op}")
++
++b['_inplacevar_'] = _inplacevar_
++
++# RestrictedPython's safe_builtins omits basic Python types; add them back
++_builtins_dict = __builtins__ if isinstance(__builtins__, dict) else __builtins__.__dict__
++for _name in ('dict', 'list', 'tuple', 'set', 'frozenset',
++              'int', 'float', 'str', 'bytes', 'bytearray', 'bool',
++              'None', 'True', 'False', 'type', 'object',
++              'len', 'range', 'enumerate', 'zip', 'sorted', 'reversed',
++              'min', 'max', 'sum', 'abs', 'round', 'pow', 'divmod',
++              'isinstance', 'issubclass', 'hasattr', 'getattr', 'setattr', 'delattr',
++              'KeyError', 'ValueError', 'TypeError', 'AttributeError',
++              'IndexError', 'StopIteration', 'RuntimeError', 'Exception',
++              'ArithmeticError', 'ZeroDivisionError', 'OverflowError',
++              'AssertionError', 'ImportError', 'LookupError', 'NameError',
++              'OSError', 'IOError', 'FileNotFoundError'):
++    if _name in _builtins_dict:
++        b[_name] = _builtins_dict[_name]
 +
 +g = {
 +    '__builtins__': b,
