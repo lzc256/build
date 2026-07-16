@@ -1,4 +1,4 @@
-From 19a017c19c03304cc62567e518a96112898503b9 Mon Sep 17 00:00:00 2001
+From 19a3a35494ab0dbb096ea6707f0a4fe184a6337e Mon Sep 17 00:00:00 2001
 From: lzc256 <i@lzc256.com>
 Date: Sun, 5 Jul 2026 10:20:31 +0800
 Subject: [PATCH] feat: add custom balance script support for channels
@@ -15,16 +15,17 @@ Subject: [PATCH] feat: add custom balance script support for channels
 - Update Dockerfile to install python3, RestrictedPython, python3-seccomp
 ---
  Dockerfile                                    |   2 +
- controller/channel-billing.go                 |  12 +-
- controller/channel_balance_script.go          | 394 ++++++++++++++++++
+ controller/channel-billing.go                 |  55 ++-
+ controller/channel_balance_script.go          | 400 ++++++++++++++++++
  dto/channel_settings.go                       |   1 +
  model/channel.go                              |   7 +
  .../drawers/channel-mutate-drawer.tsx         |   6 +
  .../sections/balance-script-section.tsx       | 107 +++++
  .../components/drawers/sections/index.ts      |   1 +
+ .../features/channels/lib/channel-actions.ts  |  11 +-
  .../src/features/channels/lib/channel-form.ts |  12 +
  web/default/src/features/channels/types.ts    |   1 +
- 10 files changed, 540 insertions(+), 3 deletions(-)
+ 11 files changed, 578 insertions(+), 25 deletions(-)
  create mode 100644 controller/channel_balance_script.go
  create mode 100644 web/default/src/features/channels/components/drawers/sections/balance-script-section.tsx
 
@@ -42,13 +43,15 @@ index e2788f5..6dfc965 100644
      && update-ca-certificates
  
 diff --git a/controller/channel-billing.go b/controller/channel-billing.go
-index 751ee36..7254d4d 100644
+index 751ee36..4590f5f 100644
 --- a/controller/channel-billing.go
 +++ b/controller/channel-billing.go
-@@ -357,6 +357,12 @@ func updateChannelMoonshotBalance(channel *model.Channel) (float64, error) {
+@@ -356,7 +356,13 @@ func updateChannelMoonshotBalance(channel *model.Channel) (float64, error) {
+ 	return availableBalanceUsd, nil
  }
  
- func updateChannelBalance(channel *model.Channel) (float64, error) {
+-func updateChannelBalance(channel *model.Channel) (float64, error) {
++func updateChannelBalance(channel *model.Channel) (float64, string, error) {
 +	// Custom balance script takes priority over built-in balance fetchers
 +	settings := channel.GetOtherSettings()
 +	if settings.BalanceScript != "" {
@@ -58,7 +61,84 @@ index 751ee36..7254d4d 100644
  	baseURL := constant.ChannelBaseURLs[channel.Type]
  	if channel.GetBaseURL() == "" {
  		channel.BaseURL = &baseURL
-@@ -432,7 +438,7 @@ func UpdateChannelBalance(c *gin.Context) {
+@@ -367,38 +373,45 @@ func updateChannelBalance(channel *model.Channel) (float64, error) {
+ 			baseURL = channel.GetBaseURL()
+ 		}
+ 	case constant.ChannelTypeAzure:
+-		return 0, errors.New("尚未实现")
++		return 0, "", errors.New("尚未实现")
+ 	case constant.ChannelTypeCustom:
+ 		baseURL = channel.GetBaseURL()
+ 	//case common.ChannelTypeOpenAISB:
+ 	//	return updateChannelOpenAISBBalance(channel)
+ 	case constant.ChannelTypeAIProxy:
+-		return updateChannelAIProxyBalance(channel)
++		b, err := updateChannelAIProxyBalance(channel)
++		return b, "", err
+ 	case constant.ChannelTypeAPI2GPT:
+-		return updateChannelAPI2GPTBalance(channel)
++		b, err := updateChannelAPI2GPTBalance(channel)
++		return b, "", err
+ 	case constant.ChannelTypeAIGC2D:
+-		return updateChannelAIGC2DBalance(channel)
++		b, err := updateChannelAIGC2DBalance(channel)
++		return b, "", err
+ 	case constant.ChannelTypeSiliconFlow:
+-		return updateChannelSiliconFlowBalance(channel)
++		b, err := updateChannelSiliconFlowBalance(channel)
++		return b, "", err
+ 	case constant.ChannelTypeDeepSeek:
+-		return updateChannelDeepSeekBalance(channel)
++		b, err := updateChannelDeepSeekBalance(channel)
++		return b, "", err
+ 	case constant.ChannelTypeOpenRouter:
+-		return updateChannelOpenRouterBalance(channel)
++		b, err := updateChannelOpenRouterBalance(channel)
++		return b, "", err
+ 	case constant.ChannelTypeMoonshot:
+-		return updateChannelMoonshotBalance(channel)
++		b, err := updateChannelMoonshotBalance(channel)
++		return b, "", err
+ 	default:
+-		return 0, errors.New("尚未实现")
++		return 0, "", errors.New("尚未实现")
+ 	}
+ 	url := fmt.Sprintf("%s/v1/dashboard/billing/subscription", baseURL)
+ 
+ 	body, err := GetResponseBody("GET", url, channel, GetAuthHeader(channel.Key))
+ 	if err != nil {
+-		return 0, err
++		return 0, "", err
+ 	}
+ 	subscription := OpenAISubscriptionResponse{}
+ 	err = json.Unmarshal(body, &subscription)
+ 	if err != nil {
+-		return 0, err
++		return 0, "", err
+ 	}
+ 	now := time.Now()
+ 	startDate := fmt.Sprintf("%s-01", now.Format("2006-01"))
+@@ -409,16 +422,16 @@ func updateChannelBalance(channel *model.Channel) (float64, error) {
+ 	url = fmt.Sprintf("%s/v1/dashboard/billing/usage?start_date=%s&end_date=%s", baseURL, startDate, endDate)
+ 	body, err = GetResponseBody("GET", url, channel, GetAuthHeader(channel.Key))
+ 	if err != nil {
+-		return 0, err
++		return 0, "", err
+ 	}
+ 	usage := OpenAIUsageResponse{}
+ 	err = json.Unmarshal(body, &usage)
+ 	if err != nil {
+-		return 0, err
++		return 0, "", err
+ 	}
+ 	balance := subscription.HardLimitUSD - usage.TotalUsage/100
+ 	channel.UpdateBalance(balance)
+-	return balance, nil
++	return balance, "", nil
+ }
+ 
+ func UpdateChannelBalance(c *gin.Context) {
+@@ -432,21 +445,21 @@ func UpdateChannelBalance(c *gin.Context) {
  		common.ApiError(c, err)
  		return
  	}
@@ -67,7 +147,23 @@ index 751ee36..7254d4d 100644
  		c.JSON(http.StatusOK, gin.H{
  			"success": false,
  			"message": "多密钥渠道不支持余额查询",
-@@ -460,8 +466,8 @@ func updateAllChannelsBalance() error {
+ 		})
+ 		return
+ 	}
+-	balance, err := updateChannelBalance(channel)
++	balance, message, err := updateChannelBalance(channel)
+ 	if err != nil {
+ 		common.ApiError(c, err)
+ 		return
+ 	}
+ 	c.JSON(http.StatusOK, gin.H{
+ 		"success": true,
+-		"message": "",
++		"message": message,
+ 		"balance": balance,
+ 	})
+ }
+@@ -460,14 +473,14 @@ func updateAllChannelsBalance() error {
  		if channel.Status != common.ChannelStatusEnabled {
  			continue
  		}
@@ -78,12 +174,19 @@ index 751ee36..7254d4d 100644
  		}
  		// TODO: support Azure
  		//if channel.Type != common.ChannelTypeOpenAI && channel.Type != common.ChannelTypeCustom {
+ 		//	continue
+ 		//}
+-		balance, err := updateChannelBalance(channel)
++		balance, _, err := updateChannelBalance(channel)
+ 		if err != nil {
+ 			continue
+ 		} else {
 diff --git a/controller/channel_balance_script.go b/controller/channel_balance_script.go
 new file mode 100644
-index 0000000..b13d6d4
+index 0000000..8e5e4a4
 --- /dev/null
 +++ b/controller/channel_balance_script.go
-@@ -0,0 +1,394 @@
+@@ -0,0 +1,400 @@
 +package controller
 +
 +import (
@@ -130,7 +233,7 @@ index 0000000..b13d6d4
 +//  2. seccomp: allow read-only open + network, deny write/execve/fork
 +//  3. prlimit: CPU/memory/process limits
 +//  4. env whitelist: only CHANNEL_* + minimal PATH/HOME/LANG
-+func updateChannelBalanceScript(channel *model.Channel, script string) (float64, error) {
++func updateChannelBalanceScript(channel *model.Channel, script string) (float64, string, error) {
 +	// Acquire per-channel lock to serialize state read/write
 +	lock := model.GetChannelPollingLock(channel.Id)
 +	lock.Lock()
@@ -179,7 +282,7 @@ index 0000000..b13d6d4
 +	cmd.Stderr = &limitWriter{w: &stderr, n: balanceScriptMaxOutputLen}
 +
 +	if err := cmd.Start(); err != nil {
-+		return 0, fmt.Errorf("balance script start failed: %w", err)
++		return 0, "", fmt.Errorf("balance script start failed: %w", err)
 +	}
 +
 +	// On context timeout, signal the whole process group (negative pid).
@@ -191,16 +294,16 @@ index 0000000..b13d6d4
 +	case <-ctx.Done():
 +		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 +		<-done
-+		return 0, fmt.Errorf("balance script timed out after %s", balanceScriptTimeout)
++		return 0, "", fmt.Errorf("balance script timed out after %s", balanceScriptTimeout)
 +	case waitErr = <-done:
 +	}
 +
 +	if waitErr != nil {
 +		var exitErr *exec.ExitError
 +		if errors.As(waitErr, &exitErr) {
-+			return 0, fmt.Errorf("balance script error: %s", strings.TrimSpace(stderr.String()))
++			return 0, "", fmt.Errorf("balance script error: %s", strings.TrimSpace(stderr.String()))
 +		}
-+		return 0, waitErr
++		return 0, "", waitErr
 +	}
 +
 +	// Parse output: JSON object or plain number
@@ -209,28 +312,29 @@ index 0000000..b13d6d4
 +		var result struct {
 +			Balance float64         `json:"balance"`
 +			State   json.RawMessage `json:"state"`
++			Message string          `json:"message"`
 +		}
 +		if err := json.Unmarshal([]byte(output), &result); err != nil {
-+			return 0, fmt.Errorf("balance script invalid JSON: %w, output: %s", err, output)
++			return 0, "", fmt.Errorf("balance script invalid JSON: %w, output: %s", err, output)
 +		}
 +		if len(result.State) > balanceScriptMaxStateLen {
-+			return 0, fmt.Errorf("balance script state exceeds %d bytes", balanceScriptMaxStateLen)
++			return 0, "", fmt.Errorf("balance script state exceeds %d bytes", balanceScriptMaxStateLen)
 +		}
 +		// Atomic update: write state first, then balance
 +		if err := channel.UpdateBalanceScriptState(string(result.State)); err != nil {
-+			return 0, fmt.Errorf("failed to save balance script state: %w", err)
++			return 0, "", fmt.Errorf("failed to save balance script state: %w", err)
 +		}
 +		channel.UpdateBalance(result.Balance)
-+		return result.Balance, nil
++		return result.Balance, result.Message, nil
 +	}
 +
 +	// Backward compatible: plain number output, state unchanged
 +	balance, err := strconv.ParseFloat(output, 64)
 +	if err != nil {
-+		return 0, fmt.Errorf("balance script output invalid (expected number or JSON): %s", output)
++		return 0, "", fmt.Errorf("balance script output invalid (expected number or JSON): %s", output)
 +	}
 +	channel.UpdateBalance(balance)
-+	return balance, nil
++	return balance, "", nil
 +}
 +
 +// limitWriter writes to w until n bytes have been written, then silently discards the rest.
@@ -369,9 +473,12 @@ index 0000000..b13d6d4
 +        _Balance._value = float(value)
 +
 +class _Debug:
++    _lines = []
 +    @staticmethod
 +    def log(*args, **kwargs):
-+        print(*args, file=sys.stderr, **kwargs)
++        msg = ' '.join(str(a) for a in args)
++        _Debug._lines.append(msg)
++        print(msg, file=sys.stderr)
 +
 +# Register the synthetic newapi module.
 +import types as _types
@@ -476,6 +583,8 @@ index 0000000..b13d6d4
 +out = {"balance": _Balance._value}
 +if _State._saved is not None:
 +    out["state"] = _State._saved
++if _Debug._lines:
++    out["message"] = "\n".join(_Debug._lines)
 +sys.stdout.write(json.dumps(out))
 +`
 diff --git a/dto/channel_settings.go b/dto/channel_settings.go
@@ -661,6 +770,31 @@ index ce62a58..37df465 100644
  export * from './channel-editor-loading-state'
  export * from './channel-models-section'
 +export * from './balance-script-section'
+diff --git a/web/default/src/features/channels/lib/channel-actions.ts b/web/default/src/features/channels/lib/channel-actions.ts
+index 7efee24..7ab0ec5 100644
+--- a/web/default/src/features/channels/lib/channel-actions.ts
++++ b/web/default/src/features/channels/lib/channel-actions.ts
+@@ -374,13 +374,16 @@ export async function handleUpdateChannelBalance(
+     const response = await updateChannelBalance(id)
+     if (response.success && response.balance !== undefined) {
+       const balance = response.balance
+-      toast.success(
+-        i18next.t('Balance updated: {{balance}}', {
+-          balance: formatCurrencyFromUSD(balance, {
++      const display = response.message
++        ? response.message
++        : formatCurrencyFromUSD(balance, {
+             digitsLarge: 2,
+             digitsSmall: 4,
+             abbreviate: false,
+-          }),
++          })
++      toast.success(
++        i18next.t('Balance updated: {{balance}}', {
++          balance: display,
+         })
+       )
+       queryClient?.invalidateQueries({ queryKey: channelsQueryKeys.lists() })
 diff --git a/web/default/src/features/channels/lib/channel-form.ts b/web/default/src/features/channels/lib/channel-form.ts
 index 33a5fb7..f9506e2 100644
 --- a/web/default/src/features/channels/lib/channel-form.ts
