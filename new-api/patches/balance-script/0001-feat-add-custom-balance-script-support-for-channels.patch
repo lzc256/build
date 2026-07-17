@@ -1,4 +1,4 @@
-From 19a3a35494ab0dbb096ea6707f0a4fe184a6337e Mon Sep 17 00:00:00 2001
+From f387614aaaeb207355654766a04bc1432b974165 Mon Sep 17 00:00:00 2001
 From: lzc256 <i@lzc256.com>
 Date: Sun, 5 Jul 2026 10:20:31 +0800
 Subject: [PATCH] feat: add custom balance script support for channels
@@ -22,10 +22,10 @@ Subject: [PATCH] feat: add custom balance script support for channels
  .../drawers/channel-mutate-drawer.tsx         |   6 +
  .../sections/balance-script-section.tsx       | 107 +++++
  .../components/drawers/sections/index.ts      |   1 +
- .../features/channels/lib/channel-actions.ts  |  11 +-
+ .../features/channels/lib/channel-actions.ts  |  14 +-
  .../src/features/channels/lib/channel-form.ts |  12 +
  web/default/src/features/channels/types.ts    |   1 +
- 11 files changed, 578 insertions(+), 25 deletions(-)
+ 11 files changed, 580 insertions(+), 26 deletions(-)
  create mode 100644 controller/channel_balance_script.go
  create mode 100644 web/default/src/features/channels/components/drawers/sections/balance-script-section.tsx
 
@@ -771,10 +771,10 @@ index ce62a58..37df465 100644
  export * from './channel-models-section'
 +export * from './balance-script-section'
 diff --git a/web/default/src/features/channels/lib/channel-actions.ts b/web/default/src/features/channels/lib/channel-actions.ts
-index 7efee24..7ab0ec5 100644
+index 7efee24..de5f3b9 100644
 --- a/web/default/src/features/channels/lib/channel-actions.ts
 +++ b/web/default/src/features/channels/lib/channel-actions.ts
-@@ -374,13 +374,16 @@ export async function handleUpdateChannelBalance(
+@@ -374,14 +374,18 @@ export async function handleUpdateChannelBalance(
      const response = await updateChannelBalance(id)
      if (response.success && response.balance !== undefined) {
        const balance = response.balance
@@ -788,13 +788,16 @@ index 7efee24..7ab0ec5 100644
              digitsSmall: 4,
              abbreviate: false,
 -          }),
+-        })
 +          })
 +      toast.success(
 +        i18next.t('Balance updated: {{balance}}', {
 +          balance: display,
-         })
++        }),
++        { style: { whiteSpace: 'pre-line' } }
        )
        queryClient?.invalidateQueries({ queryKey: channelsQueryKeys.lists() })
+       onSuccess?.(balance)
 diff --git a/web/default/src/features/channels/lib/channel-form.ts b/web/default/src/features/channels/lib/channel-form.ts
 index 33a5fb7..f9506e2 100644
 --- a/web/default/src/features/channels/lib/channel-form.ts
