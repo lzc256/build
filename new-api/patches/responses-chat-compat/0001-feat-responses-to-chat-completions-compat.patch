@@ -808,7 +808,7 @@ new file mode 100644
 index 0000000..1111111
 --- /dev/null
 +++ b/service/relayconvert/policy.go
-@@ -0,0 +1,27 @@
+@@ -0,0 +1,32 @@
 +package relayconvert
 +
 +import (
