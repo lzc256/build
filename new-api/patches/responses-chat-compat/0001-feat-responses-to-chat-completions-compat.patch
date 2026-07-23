@@ -804,13 +804,18 @@ index 4db3727..d11335c 100644
 +	return relayconvert.ShouldResponsesUseChatCompletionsGlobal(channelID, channelType, model)
 +}
 diff --git a/service/relayconvert/policy.go b/service/relayconvert/policy.go
-index ee25e69..48db770 100644
---- a/service/relayconvert/policy.go
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
 +++ b/service/relayconvert/policy.go
-@@ -17,3 +17,22 @@ func ShouldChatCompletionsUseResponsesGlobal(channelID int, channelType int, mod
- 		model,
- 	)
- }
+@@ -0,0 +1,27 @@
++package relayconvert
++
++import (
++	"regexp"
++
++	"github.com/QuantumNous/new-api/setting/model_setting"
++)
 +
 +func ShouldResponsesUseChatCompletionsPolicy(policy model_setting.ResponsesToChatCompletionsPolicy, channelID int, channelType int, model string) bool {
 +	if !policy.IsChannelEnabled(channelID, channelType) {
@@ -819,7 +824,13 @@ index ee25e69..48db770 100644
 +	if len(policy.ModelPatterns) == 0 {
 +		return true
 +	}
-+	return matchAnyRegex(policy.ModelPatterns, model)
++	for _, pattern := range policy.ModelPatterns {
++		matched, err := regexp.MatchString(pattern, model)
++		if err == nil && matched {
++			return true
++		}
++	}
++	return false
 +}
 +
 +func ShouldResponsesUseChatCompletionsGlobal(channelID int, channelType int, model string) bool {
