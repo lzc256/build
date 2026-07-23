@@ -114,6 +114,11 @@ jobs:
           source scripts/common.sh
           apply_patch responses-chat-compat new-api-src
 
+      - name: Apply responses-chat-compat-i18n script
+        run: |
+          source scripts/common.sh
+          apply_patch responses-chat-compat-i18n new-api-src
+
       # - name: Apply zero-completion-compact-error patch
       #   run: |
       #     source scripts/common.sh
