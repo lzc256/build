@@ -109,6 +109,11 @@ jobs:
           source scripts/common.sh
           apply_patch billing-header-filter new-api-src
 
+      - name: Apply responses-chat-compat patch
+        run: |
+          source scripts/common.sh
+          apply_patch responses-chat-compat new-api-src
+
       # - name: Apply zero-completion-compact-error patch
       #   run: |
       #     source scripts/common.sh
@@ -121,6 +126,7 @@ jobs:
           test -f new-api-src/controller/channel_balance_script.go && echo "balance-script: channel_balance_script.go OK" || echo "balance-script: channel_balance_script.go MISSING"
           grep -q "handleUseDefault" new-api-src/web/default/src/features/models/components/dialogs/missing-models-dialog.tsx && echo "use-default-model: handleUseDefault OK" || echo "use-default-model: handleUseDefault MISSING"
           test -f new-api-src/relay/common/builtin_override.go && echo "billing-header-filter: builtin_override.go OK" || echo "billing-header-filter: builtin_override.go MISSING"
+          test -f new-api-src/relay/responses_via_chat_completions.go && echo "responses-chat-compat: responses_via_chat_completions.go OK" || echo "responses-chat-compat: responses_via_chat_completions.go MISSING"
 
       - name: Login to GHCR
         uses: docker/login-action@v4

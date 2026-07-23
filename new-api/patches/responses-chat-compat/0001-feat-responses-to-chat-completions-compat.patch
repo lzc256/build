@@ -1,0 +1,1560 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Rosons <rosons@users.noreply.github.com>
+Date: Sat, 31 May 2026 12:08:23 +0800
+Subject: [PATCH] feat: Responses -> ChatCompletions protocol downgrade
+ compatibility
+
+When /v1/responses requests hit channels that don't support the Responses
+API (e.g. DeepSeek, Zhipu GLM), convert to Chat Completions format
+automatically. Key points:
+- developer role auto-mapped to system
+- non-function tools filtered out
+- tool parameter schema patched
+- DeepSeek thinking mode adapted
+- Streaming and non-streaming response conversion
+
+Based on PR QuantumNous/new-api#5209
+(https://github.com/QuantumNous/new-api/pull/5209)
+
+Adapted for upstream refactoring (openaicompat -> relayconvert).
+Dockerfile and docker-compose.yml changes excluded (fork-specific build config).
+diff --git a/common/constants.go b/common/constants.go
+index 5a15f73..470cbc5 100644
+--- a/common/constants.go
++++ b/common/constants.go
+@@ -22,7 +22,7 @@ var TopUpLink = ""
+ var themeValue atomic.Value // stores string; safe for concurrent read/write
+ 
+ func init() {
+-	themeValue.Store("classic")
++	themeValue.Store("default")
+ }
+ 
+ func GetTheme() string {
+diff --git a/dto/openai_request.go b/dto/openai_request.go
+index fd0bed0..396e132 100644
+--- a/dto/openai_request.go
++++ b/dto/openai_request.go
+@@ -247,6 +247,7 @@ type FunctionRequest struct {
+ 	Description string `json:"description,omitempty"`
+ 	Name        string `json:"name"`
+ 	Parameters  any    `json:"parameters,omitempty"`
++	Strict      *bool  `json:"strict,omitempty"`
+ 	Arguments   string `json:"arguments,omitempty"`
+ }
+ 
+diff --git a/relay/channel/openai/chat_to_responses_stream.go b/relay/channel/openai/chat_to_responses_stream.go
+new file mode 100644
+index 0000000..eaf42a5
+--- /dev/null
++++ b/relay/channel/openai/chat_to_responses_stream.go
+@@ -0,0 +1,576 @@
++package openai
++
++import (
++	"encoding/json"
++	"fmt"
++	"io"
++	"net/http"
++	"strings"
++
++	"github.com/QuantumNous/new-api/common"
++	"github.com/QuantumNous/new-api/dto"
++	"github.com/QuantumNous/new-api/logger"
++	relaycommon "github.com/QuantumNous/new-api/relay/common"
++	"github.com/QuantumNous/new-api/relay/helper"
++	"github.com/QuantumNous/new-api/service"
++	"github.com/QuantumNous/new-api/types"
++
++	"github.com/gin-gonic/gin"
++)
++
++// OaiChatToResponsesHandler 将非流式的 Chat Completions 上游响应转换为 Responses API 格式写回客户端。
++// 用于 stream=false 时，读取完整响应体后通过 service.ChatCompletionsResponseToResponsesResponse 转换。
++func OaiChatToResponsesHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*dto.Usage, *types.NewAPIError) {
++	if resp == nil || resp.Body == nil {
++		return nil, types.NewOpenAIError(fmt.Errorf("invalid response"), types.ErrorCodeBadResponse, http.StatusInternalServerError)
++	}
++
++	defer service.CloseResponseBodyGracefully(resp)
++
++	var chatResp dto.OpenAITextResponse
++	body, err := io.ReadAll(resp.Body)
++	if err != nil {
++		return nil, types.NewOpenAIError(err, types.ErrorCodeReadResponseBodyFailed, http.StatusInternalServerError)
++	}
++
++	if err := common.Unmarshal(body, &chatResp); err != nil {
++		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
++	}
++
++	if oaiError := chatResp.GetOpenAIError(); oaiError != nil && oaiError.Type != "" {
++		return nil, types.WithOpenAIError(*oaiError, resp.StatusCode)
++	}
++
++	responsesResp, err := service.ChatCompletionsResponseToResponsesResponse(&chatResp)
++	if err != nil {
++		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
++	}
++
++	responseBody, err := common.Marshal(responsesResp)
++	if err != nil {
++		return nil, types.NewOpenAIError(err, types.ErrorCodeJsonMarshalFailed, http.StatusInternalServerError)
++	}
++
++	service.IOCopyBytesGracefully(c, resp, responseBody)
++
++	usage := &dto.Usage{}
++	if chatResp.Usage.PromptTokens > 0 || chatResp.Usage.CompletionTokens > 0 {
++		usage.PromptTokens = chatResp.Usage.PromptTokens
++		usage.InputTokens = chatResp.Usage.PromptTokens
++		usage.CompletionTokens = chatResp.Usage.CompletionTokens
++		usage.OutputTokens = chatResp.Usage.CompletionTokens
++		usage.TotalTokens = chatResp.Usage.TotalTokens
++		usage.PromptTokensDetails = chatResp.Usage.PromptTokensDetails
++		usage.CompletionTokenDetails = chatResp.Usage.CompletionTokenDetails
++	}
++
++	return usage, nil
++}
++
++// toolCallState 追踪流式构建中的单个 function_call 输出项。
++// Chat Completions 流式协议中，工具调用信息可能分多个 chunk 到达：
++// 第一个 chunk 包含 id + name + 空 arguments，后续 chunk 携带 arguments 增量。
++// 通过 Chat Completions 的 index 字段（而非 callID）来跨 chunk 关联同一个工具调用。
++type toolCallState struct {
++	callID   string
++	name     string
++	args     string
++	itemIdx  int
++	nameDone bool
++	addedEmitted bool
++}
++
++// OaiChatToResponsesStreamHandler 将流式 Chat Completions 上游响应（SSE 格式）转换为 Responses API SSE 事件写回客户端。
++// 用于 stream=true 时，实时转换每个 chunk。实现参考 codex-proxy 的 StreamTranslator 类：
++//
++// 事件序列（以含 reasoning + text + tool_calls 的响应为例）：
++//
++//	response.created
++//	→ output_item.added (reasoning) → summary_part.added → summary_text.delta × N → summary_part.done → output_item.done
++//	→ output_item.added (message) → content_part.added → output_text.delta × N → content_part.done → output_item.done
++//	→ output_item.added (function_call) → function_call_arguments.delta × N
++//	→ function_call_arguments.done → output_item.done
++//	→ response.completed (含完整 output 数组和 usage)
++//
++// 追踪三种并发输出类型（reasoning、text、function_call），各自维护独立的状态。
++// 当 content 或 tool_calls 到达时，自动关闭 reasoning 输出项。
++func OaiChatToResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*dto.Usage, *types.NewAPIError) {
++	if resp == nil || resp.Body == nil {
++		return nil, types.NewOpenAIError(fmt.Errorf("invalid response"), types.ErrorCodeBadResponse, http.StatusInternalServerError)
++	}
++
++	defer service.CloseResponseBodyGracefully(resp)
++
++	respID := helper.GetResponseID(c)
++	if !strings.HasPrefix(respID, "resp_") {
++		respID = "resp_" + respID
++	}
++	model := info.UpstreamModelName
++
++	var (
++		usage       = &dto.Usage{}
++		usageText   strings.Builder
++		streamErr   *types.NewAPIError
++		createdSent bool
++		isFinished  bool
++
++		// All output items accumulated during the stream
++		outputItems []dto.ResponsesOutput
++
++		// Reasoning state
++		reasStarted    bool
++		reasIdx        int
++		reasID         string
++		reasContentIdx int
++		reasBuf        strings.Builder
++
++		// Text/message state
++		textStarted    bool
++		textIdx        int
++		textContentIdx int
++		accumulatedText strings.Builder
++
++		// Tool call state keyed by the Chat Completions index field
++		tcBuf = make(map[int]*toolCallState)
++	)
++
++	// sendResponsesEvent sends a Responses SSE event to the client.
++	sendResponsesEvent := func(eventType string, data any) bool {
++		payload := map[string]any{"type": eventType}
++		switch v := data.(type) {
++		case map[string]any:
++			for k, val := range v {
++				payload[k] = val
++			}
++		default:
++			payload["data"] = data
++		}
++		jsonData, err := common.Marshal(payload)
++		if err != nil {
++			streamErr = types.NewOpenAIError(err, types.ErrorCodeJsonMarshalFailed, http.StatusInternalServerError)
++			return false
++		}
++		logger.LogDebug(c, "responses sse event: %s %s", eventType, string(jsonData))
++		helper.ResponseChunkData(c, dto.ResponsesStreamResponse{Type: eventType}, string(jsonData))
++		return true
++	}
++
++	// sendCreatedIfNeeded sends the response.created event once.
++	sendCreatedIfNeeded := func() bool {
++		if createdSent {
++			return true
++		}
++		event := map[string]any{
++			"response": map[string]any{
++				"id":     respID,
++				"object": "response",
++				"model":  model,
++				"status": "in_progress",
++				"output": []any{},
++			},
++		}
++		if !sendResponsesEvent("response.created", event) {
++			return false
++		}
++		createdSent = true
++		return true
++	}
++
++	// ── Reasoning handling ──
++
++	startReasoning := func() {
++		if reasStarted {
++			return
++		}
++		reasStarted = true
++		outputIdx := len(outputItems)
++		reasIdx = outputIdx
++		reasContentIdx = 0
++		reasBuf.Reset()
++		reasID = respID + "_reas_0"
++
++		item := dto.ResponsesOutput{
++			Type:   "reasoning",
++			ID:     reasID,
++			Status: "in_progress",
++			Content: []dto.ResponsesOutputContent{
++				{Type: "summary_text", Text: ""},
++			},
++		}
++		outputItems = append(outputItems, item)
++
++		if !sendCreatedIfNeeded() {
++			return
++		}
++		sendResponsesEvent("response.output_item.added", map[string]any{
++			"output_index": outputIdx,
++			"item":         outputItems[outputIdx],
++		})
++		sendResponsesEvent("response.reasoning_summary_part.added", map[string]any{
++			"output_index":  outputIdx,
++			"content_index": reasContentIdx,
++			"part":          outputItems[outputIdx].Content[0],
++		})
++	}
++
++	handleReasoning := func(delta string) {
++		if streamErr != nil {
++			return
++		}
++		if !reasStarted {
++			startReasoning()
++		}
++		if streamErr != nil {
++			return
++		}
++		reasBuf.WriteString(delta)
++		outputItems[reasIdx].Content[0].Text = reasBuf.String()
++
++		sendResponsesEvent("response.reasoning_summary_text.delta", map[string]any{
++			"output_index":  reasIdx,
++			"content_index": reasContentIdx,
++			"delta":         delta,
++		})
++	}
++
++	finalizeReasoning := func() {
++		if !reasStarted {
++			return
++		}
++		item := &outputItems[reasIdx]
++		item.Status = "completed"
++		item.Content[0].Text = reasBuf.String()
++
++		sendResponsesEvent("response.reasoning_summary_part.done", map[string]any{
++			"output_index":  reasIdx,
++			"content_index": reasContentIdx,
++			"part":          item.Content[0],
++		})
++		sendResponsesEvent("response.output_item.done", map[string]any{
++			"output_index": reasIdx,
++			"item":         *item,
++		})
++		reasStarted = false
++	}
++
++	// ── Text/message handling ──
++
++	startText := func() {
++		if textStarted {
++			return
++		}
++		textStarted = true
++		outputIdx := len(outputItems)
++		textIdx = outputIdx
++		textContentIdx = 0
++		accumulatedText.Reset()
++
++		item := dto.ResponsesOutput{
++			Type:   "message",
++			ID:     respID + "_msg_0",
++			Status: "in_progress",
++			Role:   "assistant",
++			Content: []dto.ResponsesOutputContent{
++				{Type: "output_text", Text: "", Annotations: []interface{}{}},
++			},
++		}
++		outputItems = append(outputItems, item)
++
++		if !sendCreatedIfNeeded() {
++			return
++		}
++		sendResponsesEvent("response.output_item.added", map[string]any{
++			"output_index": outputIdx,
++			"item":         outputItems[outputIdx],
++		})
++		sendResponsesEvent("response.content_part.added", map[string]any{
++			"output_index":  outputIdx,
++			"content_index": textContentIdx,
++			"part":          outputItems[outputIdx].Content[0],
++		})
++	}
++
++	handleText := func(delta string) {
++		if streamErr != nil {
++			return
++		}
++		if !textStarted {
++			startText()
++		}
++		if streamErr != nil {
++			return
++		}
++		accumulatedText.WriteString(delta)
++		usageText.WriteString(delta)
++		outputItems[textIdx].Content[0].Text = accumulatedText.String()
++
++		sendResponsesEvent("response.output_text.delta", map[string]any{
++			"output_index":  textIdx,
++			"content_index": textContentIdx,
++			"delta":         delta,
++		})
++	}
++
++	finalizeText := func() {
++		if !textStarted {
++			return
++		}
++		item := &outputItems[textIdx]
++		item.Status = "completed"
++		item.Content[0].Text = accumulatedText.String()
++
++		sendResponsesEvent("response.content_part.done", map[string]any{
++			"output_index":  textIdx,
++			"content_index": textContentIdx,
++			"part":          item.Content[0],
++		})
++		sendResponsesEvent("response.output_item.done", map[string]any{
++			"output_index": textIdx,
++			"item":         *item,
++		})
++		textStarted = false
++	}
++
++	// ── Tool call handling ──
++
++	handleToolCall := func(tc dto.ToolCallResponse) {
++		tcIndex := 0
++		if tc.Index != nil {
++			tcIndex = *tc.Index
++		}
++
++		buf, exists := tcBuf[tcIndex]
++		if !exists {
++			callID := tc.ID
++			if callID == "" {
++				callID = fmt.Sprintf("%s_tc_%d", respID, len(tcBuf))
++			}
++			fn := tc.Function
++			itemIdx := len(outputItems)
++			name := fn.Name
++
++			logger.LogDebug(c, "responses stream: new tool_call idx=%d name=%s callID=%s", tcIndex, name, callID)
++			buf = &toolCallState{
++				callID:   callID,
++				name:     name,
++				args:     "",
++				itemIdx:  itemIdx,
++				nameDone: name != "",
++			}
++			tcBuf[tcIndex] = buf
++
++			item := dto.ResponsesOutput{
++				Type:   "function_call",
++				ID:     callID,
++				Status: "in_progress",
++				CallId: callID,
++				Name:   name,
++			}
++			outputItems = append(outputItems, item)
++
++			// Only emit output_item.added if we have the name now
++			if name != "" {
++				if !sendCreatedIfNeeded() {
++					return
++				}
++				sendResponsesEvent("response.output_item.added", map[string]any{
++					"output_index": itemIdx,
++					"item":         outputItems[itemIdx],
++				})
++				buf.addedEmitted = true
++			}
++		}
++
++		fn := tc.Function
++
++		// Name arrives in a later chunk
++		if fn.Name != "" && !buf.nameDone {
++			buf.name = fn.Name
++			buf.nameDone = true
++			outputItems[buf.itemIdx].Name = fn.Name
++
++			if !buf.addedEmitted {
++				buf.addedEmitted = true
++				if !sendCreatedIfNeeded() {
++					return
++				}
++				sendResponsesEvent("response.output_item.added", map[string]any{
++					"output_index": buf.itemIdx,
++					"item":         outputItems[buf.itemIdx],
++				})
++			}
++		}
++
++		if !buf.addedEmitted && buf.nameDone {
++			buf.addedEmitted = true
++		}
++
++		// Arguments delta
++		if fn.Arguments != "" {
++			buf.args += fn.Arguments
++			// arguments must be a JSON string in the Responses API, not a raw JSON object
++			argsJSON, _ := json.Marshal(buf.args)
++			outputItems[buf.itemIdx].Arguments = argsJSON
++			usageText.WriteString(fn.Arguments)
++
++			sendResponsesEvent("response.function_call_arguments.delta", map[string]any{
++				"output_index": buf.itemIdx,
++				"call_id":      buf.callID,
++				"delta":        fn.Arguments,
++			})
++		}
++	}
++
++	finalizeAllToolCalls := func() {
++		for _, buf := range tcBuf {
++			item := &outputItems[buf.itemIdx]
++			item.Status = "completed"
++
++			sendResponsesEvent("response.function_call_arguments.done", map[string]any{
++				"output_index": buf.itemIdx,
++				"call_id":      buf.callID,
++				"arguments":    buf.args,
++			})
++			sendResponsesEvent("response.output_item.done", map[string]any{
++				"output_index": buf.itemIdx,
++				"item":         *item,
++			})
++		}
++		tcBuf = make(map[int]*toolCallState)
++	}
++
++	// ── Finish ──
++
++	finish := func() {
++		if isFinished {
++			return
++		}
++		logger.LogDebug(c, "responses stream finish called, reasStarted=%v textStarted=%v toolCalls=%d", reasStarted, textStarted, len(tcBuf))
++		isFinished = true
++
++		// Finalize active output items: reasoning → text → tool_calls
++		if reasStarted {
++			finalizeReasoning()
++		}
++		if textStarted {
++			finalizeText()
++		}
++		finalizeAllToolCalls()
++
++		if !sendCreatedIfNeeded() {
++			return
++		}
++
++		// Estimate usage if upstream did not provide it
++		if usage.TotalTokens == 0 {
++			usage = service.ResponseText2Usage(c, usageText.String(), info.UpstreamModelName, info.GetEstimatePromptTokens())
++		} else {
++			usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
++		}
++
++		sendResponsesEvent("response.completed", map[string]any{
++			"response": map[string]any{
++				"id":     respID,
++				"object": "response",
++				"model":  model,
++				"status": "completed",
++				"output": outputItems,
++				"usage": map[string]any{
++					"input_tokens":  usage.PromptTokens,
++					"output_tokens": usage.CompletionTokens,
++					"total_tokens":  usage.TotalTokens,
++				},
++			},
++		})
++	}
++
++	// ── Stream processing ──
++
++	helper.StreamScannerHandler(c, resp, info, func(data string, sr *helper.StreamResult) {
++		if streamErr != nil {
++			sr.Stop(streamErr)
++			return
++		}
++
++		if len(data) == 0 {
++			return
++		}
++
++		var streamResp dto.ChatCompletionsStreamResponse
++		if err := common.Unmarshal([]byte(data), &streamResp); err != nil {
++			logger.LogError(c, "failed to unmarshal chat stream chunk: "+err.Error())
++			sr.Error(err)
++			return
++		}
++
++		if streamResp.Id != "" {
++			respID = streamResp.Id
++			if !strings.HasPrefix(respID, "resp_") {
++				respID = "resp_" + respID
++			}
++		}
++		if streamResp.Model != "" {
++			model = streamResp.Model
++		}
++
++		if len(streamResp.Choices) == 0 {
++			if streamResp.Usage != nil && service.ValidUsage(streamResp.Usage) {
++				usage = streamResp.Usage
++			}
++			return
++		}
++
++		choice := streamResp.Choices[0]
++		delta := choice.Delta
++
++		// Reasoning content delta
++		if delta.ReasoningContent != nil && *delta.ReasoningContent != "" {
++			handleReasoning(*delta.ReasoningContent)
++		}
++
++		// Close reasoning when content or tool_calls arrives
++		if delta.Content != nil && *delta.Content != "" && reasStarted {
++			finalizeReasoning()
++		}
++		if len(delta.ToolCalls) > 0 && reasStarted {
++			finalizeReasoning()
++		}
++
++		// Content delta
++		if delta.Content != nil && *delta.Content != "" {
++			handleText(*delta.Content)
++		}
++
++		// Tool calls delta - use index field for tracking
++		if len(delta.ToolCalls) > 0 {
++			for _, tc := range delta.ToolCalls {
++				handleToolCall(tc)
++			}
++		}
++
++		// Finish reason
++		if choice.FinishReason != nil && *choice.FinishReason != "" {
++			finish()
++		}
++
++		// Extract usage from stream chunks
++		if streamResp.Usage != nil && service.ValidUsage(streamResp.Usage) {
++			usage = streamResp.Usage
++		}
++	})
++
++	// If the stream ended without finish_reason, force finish
++	if !isFinished {
++		logger.LogWarn(c, "stream ended without finish_reason, forcing finish")
++		finish()
++	}
++
++	if streamErr != nil {
++		return nil, streamErr
++	}
++
++
++
++
++	return usage, nil
++}
+diff --git a/relay/responses_handler.go b/relay/responses_handler.go
+index 010c38b..0705e3f 100644
+--- a/relay/responses_handler.go
++++ b/relay/responses_handler.go
+@@ -70,6 +70,22 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
+ 		return types.NewError(fmt.Errorf("invalid api type: %d", info.ApiType), types.ErrorCodeInvalidApiType, types.ErrOptionWithSkipRetry())
+ 	}
+ 	adaptor.Init(info)
++
++	passThroughGlobal := model_setting.GetGlobalSettings().PassThroughRequestEnabled
++	if !passThroughGlobal && !info.ChannelSetting.PassThroughBodyEnabled &&
++		service.ShouldResponsesUseChatCompletionsGlobal(info.ChannelId, info.ChannelType, info.OriginModelName) {
++		usage, newApiErr := responsesViaChatCompletions(c, info, request)
++		if newApiErr != nil {
++			return newApiErr
++		}
++		if strings.HasPrefix(info.OriginModelName, "gpt-4o-audio") {
++			service.PostAudioConsumeQuota(c, info, usage, "")
++		} else {
++			service.PostTextConsumeQuota(c, info, usage, nil)
++		}
++		return nil
++	}
++
+ 	var requestBody io.Reader
+ 	if model_setting.GetGlobalSettings().PassThroughRequestEnabled || info.ChannelSetting.PassThroughBodyEnabled {
+ 		storage, err := common.GetBodyStorage(c)
+diff --git a/relay/responses_via_chat_completions.go b/relay/responses_via_chat_completions.go
+new file mode 100644
+index 0000000..79bec15
+--- /dev/null
++++ b/relay/responses_via_chat_completions.go
+@@ -0,0 +1,128 @@
++package relay
++
++import (
++	"io"
++	"net/http"
++	"strings"
++
++	"github.com/QuantumNous/new-api/common"
++	"github.com/QuantumNous/new-api/dto"
++	openaichannel "github.com/QuantumNous/new-api/relay/channel/openai"
++	relaycommon "github.com/QuantumNous/new-api/relay/common"
++	relayconstant "github.com/QuantumNous/new-api/relay/constant"
++	"github.com/QuantumNous/new-api/service"
++	"github.com/QuantumNous/new-api/types"
++
++	"github.com/gin-gonic/gin"
++)
++
++// responsesViaChatCompletions 是 Responses→ChatCompletions 协议降级的编排函数。
++// 与 chatCompletionsViaResponses 对称，流程：
++// 1. 将 Responses 请求体转为 Chat Completions 格式
++// 2. 临时切换 RelayMode 和 RequestURLPath
++// 3. 调用 adaptor.ConvertOpenAIRequest 获取渠道特定请求
++// 4. 发送请求给上游 /v1/chat/completions
++// 5. 将上游响应（流式或非流式）转回 Responses 格式
++// 6. 恢复原始 RelayMode
++func responsesViaChatCompletions(c *gin.Context, info *relaycommon.RelayInfo, responsesReq *dto.OpenAIResponsesRequest) (*dto.Usage, *types.NewAPIError) {
++	chatReq, err := service.ResponsesRequestToChatCompletionsRequest(responsesReq)
++	if err != nil {
++		return nil, types.NewErrorWithStatusCode(err, types.ErrorCodeInvalidRequest, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
++	}
++
++	// Serialize and apply field removal + param override
++	chatJSON, err := common.Marshal(chatReq)
++	if err != nil {
++		return nil, types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
++	}
++
++	chatJSON, err = relaycommon.RemoveDisabledFields(chatJSON, info.ChannelOtherSettings, info.ChannelSetting.PassThroughBodyEnabled)
++	if err != nil {
++		return nil, types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
++	}
++
++	if len(info.ParamOverride) > 0 {
++		chatJSON, err = relaycommon.ApplyParamOverrideWithRelayInfo(chatJSON, info)
++		if err != nil {
++			return nil, newAPIErrorFromParamOverride(err)
++		}
++	}
++
++	var overriddenChatReq dto.GeneralOpenAIRequest
++	if err := common.Unmarshal(chatJSON, &overriddenChatReq); err != nil {
++		return nil, types.NewError(err, types.ErrorCodeChannelParamOverrideInvalid, types.ErrOptionWithSkipRetry())
++	}
++
++	// Temporarily switch to ChatCompletions mode for upstream request
++	savedRelayMode := info.RelayMode
++	savedRequestURLPath := info.RequestURLPath
++	defer func() {
++		info.RelayMode = savedRelayMode
++		info.RequestURLPath = savedRequestURLPath
++	}()
++
++	info.RelayMode = relayconstant.RelayModeChatCompletions
++	info.RequestURLPath = "/v1/chat/completions"
++
++	// Use the adaptor's ChatCompletions conversion path
++	adaptor := GetAdaptor(info.ApiType)
++	convertedRequest, err := adaptor.ConvertOpenAIRequest(c, info, &overriddenChatReq)
++	if err != nil {
++		return nil, types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
++	}
++	relaycommon.AppendRequestConversionFromRequest(info, convertedRequest)
++
++	jsonData, err := common.Marshal(convertedRequest)
++	if err != nil {
++		return nil, types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
++	}
++
++	jsonData, err = relaycommon.RemoveDisabledFields(jsonData, info.ChannelOtherSettings, info.ChannelSetting.PassThroughBodyEnabled)
++	if err != nil {
++		return nil, types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
++	}
++
++	body, size, closer, err := relaycommon.NewOutboundJSONBody(jsonData)
++	if err != nil {
++		return nil, types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
++	}
++	defer closer.Close()
++	jsonData = nil
++	info.UpstreamRequestBodySize = size
++	var requestBody io.Reader = body
++
++	var httpResp *http.Response
++	resp, err := adaptor.DoRequest(c, info, requestBody)
++	if err != nil {
++		return nil, types.NewOpenAIError(err, types.ErrorCodeDoRequestFailed, http.StatusInternalServerError)
++	}
++	if resp == nil {
++		return nil, types.NewOpenAIError(nil, types.ErrorCodeBadResponse, http.StatusInternalServerError)
++	}
++
++	statusCodeMappingStr := c.GetString("status_code_mapping")
++
++	httpResp = resp.(*http.Response)
++	info.IsStream = info.IsStream || strings.HasPrefix(httpResp.Header.Get("Content-Type"), "text/event-stream")
++	if httpResp.StatusCode != http.StatusOK {
++		newApiErr := service.RelayErrorHandler(c.Request.Context(), httpResp, false)
++		service.ResetStatusCode(newApiErr, statusCodeMappingStr)
++		return nil, newApiErr
++	}
++
++	if info.IsStream {
++		usage, newApiErr := openaichannel.OaiChatToResponsesStreamHandler(c, info, httpResp)
++		if newApiErr != nil {
++			service.ResetStatusCode(newApiErr, statusCodeMappingStr)
++			return nil, newApiErr
++		}
++		return usage, nil
++	}
++
++	usage, newApiErr := openaichannel.OaiChatToResponsesHandler(c, info, httpResp)
++	if newApiErr != nil {
++		service.ResetStatusCode(newApiErr, statusCodeMappingStr)
++		return nil, newApiErr
++	}
++	return usage, nil
++}
+\ No newline at end of file
+diff --git a/service/openai_chat_responses_mode.go b/service/openai_chat_responses_mode.go
+index 4db3727..d11335c 100644
+--- a/service/openai_chat_responses_mode.go
++++ b/service/openai_chat_responses_mode.go
+@@ -12,3 +12,11 @@ func ShouldChatCompletionsUseResponsesPolicy(policy model_setting.ChatCompletion
+ func ShouldChatCompletionsUseResponsesGlobal(channelID int, channelType int, model string) bool {
+ 	return relayconvert.ShouldChatCompletionsUseResponsesGlobal(channelID, channelType, model)
+ }
++
++func ShouldResponsesUseChatCompletionsPolicy(policy model_setting.ResponsesToChatCompletionsPolicy, channelID int, channelType int, model string) bool {
++	return relayconvert.ShouldResponsesUseChatCompletionsPolicy(policy, channelID, channelType, model)
++}
++
++func ShouldResponsesUseChatCompletionsGlobal(channelID int, channelType int, model string) bool {
++	return relayconvert.ShouldResponsesUseChatCompletionsGlobal(channelID, channelType, model)
++}
+diff --git a/service/relayconvert/policy.go b/service/relayconvert/policy.go
+index ee25e69..48db770 100644
+--- a/service/relayconvert/policy.go
++++ b/service/relayconvert/policy.go
+@@ -17,3 +17,22 @@ func ShouldChatCompletionsUseResponsesGlobal(channelID int, channelType int, mod
+ 		model,
+ 	)
+ }
++
++func ShouldResponsesUseChatCompletionsPolicy(policy model_setting.ResponsesToChatCompletionsPolicy, channelID int, channelType int, model string) bool {
++	if !policy.IsChannelEnabled(channelID, channelType) {
++		return false
++	}
++	if len(policy.ModelPatterns) == 0 {
++		return true
++	}
++	return matchAnyRegex(policy.ModelPatterns, model)
++}
++
++func ShouldResponsesUseChatCompletionsGlobal(channelID int, channelType int, model string) bool {
++	return ShouldResponsesUseChatCompletionsPolicy(
++		model_setting.GetGlobalSettings().ResponsesToChatCompletionsPolicy,
++		channelID,
++		channelType,
++		model,
++	)
++}
+diff --git a/setting/model_setting/global.go b/setting/model_setting/global.go
+index d0c4d31..f57a0c7 100644
+--- a/setting/model_setting/global.go
++++ b/setting/model_setting/global.go
+@@ -15,6 +15,31 @@ type ChatCompletionsToResponsesPolicy struct {
+ 	ModelPatterns []string `json:"model_patterns,omitempty"`
+ }
+ 
++type ResponsesToChatCompletionsPolicy struct {
++	Enabled       bool     `json:"enabled"`
++	AllChannels   bool     `json:"all_channels"`
++	ChannelIDs    []int    `json:"channel_ids,omitempty"`
++	ChannelTypes  []int    `json:"channel_types,omitempty"`
++	ModelPatterns []string `json:"model_patterns,omitempty"`
++}
++
++func (p ResponsesToChatCompletionsPolicy) IsChannelEnabled(channelID int, channelType int) bool {
++	if !p.Enabled {
++		return false
++	}
++	if p.AllChannels {
++		return true
++	}
++
++	if channelID > 0 && len(p.ChannelIDs) > 0 && slices.Contains(p.ChannelIDs, channelID) {
++		return true
++	}
++	if channelType > 0 && len(p.ChannelTypes) > 0 && slices.Contains(p.ChannelTypes, channelType) {
++		return true
++	}
++	return false
++}
++
+ func (p ChatCompletionsToResponsesPolicy) IsChannelEnabled(channelID int, channelType int) bool {
+ 	if !p.Enabled {
+ 		return false
+@@ -35,7 +60,8 @@ func (p ChatCompletionsToResponsesPolicy) IsChannelEnabled(channelID int, channe
+ type GlobalSettings struct {
+ 	PassThroughRequestEnabled        bool                             `json:"pass_through_request_enabled"`
+ 	ThinkingModelBlacklist           []string                         `json:"thinking_model_blacklist"`
+-	ChatCompletionsToResponsesPolicy ChatCompletionsToResponsesPolicy `json:"chat_completions_to_responses_policy"`
++	ChatCompletionsToResponsesPolicy      ChatCompletionsToResponsesPolicy      `json:"chat_completions_to_responses_policy"`
++	ResponsesToChatCompletionsPolicy      ResponsesToChatCompletionsPolicy      `json:"responses_to_chat_completions_policy"`
+ }
+ 
+ // 默认配置
+@@ -49,6 +75,10 @@ var defaultOpenaiSettings = GlobalSettings{
+ 		Enabled:     false,
+ 		AllChannels: true,
+ 	},
++	ResponsesToChatCompletionsPolicy: ResponsesToChatCompletionsPolicy{
++		Enabled:     false,
++		AllChannels: true,
++	},
+ }
+ 
+ // 全局实例
+diff --git a/web/classic/src/i18n/locales/en.json b/web/classic/src/i18n/locales/en.json
+index 39e9e5a..ff78937 100644
+--- a/web/classic/src/i18n/locales/en.json
++++ b/web/classic/src/i18n/locales/en.json
+@@ -108,6 +108,7 @@
+     "Changing batch type to:": "Changing batch type to:",
+     "ChatCompletions→Responses 兼容配置": "ChatCompletions→Responses Compatibility Configuration",
+     "ChatCompletions→Responses 兼容配置（Beta）": "ChatCompletions→Responses Compatibility (Beta)",
++    "Responses→ChatCompletions 兼容配置": "Responses→ChatCompletions Compatibility Configuration",
+     "Claude 强制 beta=true": "Claude Force beta=true",
+     "Claude会在原有请求头基础上追加这些值，不会覆盖已有同名请求头；重复值会自动忽略。": "Claude appends these values on top of existing request headers. Existing headers are not overwritten, and duplicate values are ignored automatically.",
+     "Claude思考适配 BudgetTokens = MaxTokens * BudgetTokens 百分比": "Claude thinking adaptation BudgetTokens = MaxTokens * BudgetTokens percentage",
+diff --git a/web/classic/src/i18n/locales/fr.json b/web/classic/src/i18n/locales/fr.json
+index 5a696ce..cab1699 100644
+--- a/web/classic/src/i18n/locales/fr.json
++++ b/web/classic/src/i18n/locales/fr.json
+@@ -107,6 +107,7 @@
+     "Changing batch type to:": "Changement du type de lot en :",
+     "ChatCompletions→Responses 兼容配置": "Configuration de compatibilité ChatCompletions→Responses",
+     "ChatCompletions→Responses 兼容配置（Beta）": "Compatibilité ChatCompletions→Responses (bêta)",
++    "Responses→ChatCompletions 兼容配置": "Compatibilité Responses→ChatCompletions",
+     "Claude 强制 beta=true": "Claude forcer beta=true",
+     "Claude会在原有请求头基础上追加这些值，不会覆盖已有同名请求头；重复值会自动忽略。": "Claude ajoute ces valeurs aux en-tetes de requete existants. Les en-tetes existants ne sont pas remplaces et les valeurs en double sont ignorees automatiquement.",
+     "Claude思考适配 BudgetTokens = MaxTokens * BudgetTokens 百分比": "Adaptation de la pensée Claude BudgetTokens = MaxTokens * BudgetTokens pourcentage",
+diff --git a/web/classic/src/i18n/locales/ja.json b/web/classic/src/i18n/locales/ja.json
+index e73e0d8..696542c 100644
+--- a/web/classic/src/i18n/locales/ja.json
++++ b/web/classic/src/i18n/locales/ja.json
+@@ -101,6 +101,7 @@
+     "Changing batch type to:": "Changing batch type to:",
+     "ChatCompletions→Responses 兼容配置": "ChatCompletions→Responses 互換設定",
+     "ChatCompletions→Responses 兼容配置（Beta）": "ChatCompletions→Responses 互換設定（ベータ）",
++    "Responses→ChatCompletions 兼容配置": "Responses→ChatCompletions 互換設定",
+     "Claude 强制 beta=true": "Claude 強制 beta=true",
+     "Claude会在原有请求头基础上追加这些值，不会覆盖已有同名请求头；重复值会自动忽略。": "Claude は既存のリクエストヘッダーにこれらの値を追加します。既存の同名ヘッダーは上書きされず、重複した値は自動的に無視されます。",
+     "Claude思考适配 BudgetTokens = MaxTokens * BudgetTokens 百分比": "Claude思考モード：BudgetTokens = MaxTokens * BudgetTokensの割合",
+diff --git a/web/classic/src/i18n/locales/ru.json b/web/classic/src/i18n/locales/ru.json
+index 0b43f34..58334f4 100644
+--- a/web/classic/src/i18n/locales/ru.json
++++ b/web/classic/src/i18n/locales/ru.json
+@@ -111,6 +111,7 @@
+     "Changing batch type to:": "Изменение типа пакета на:",
+     "ChatCompletions→Responses 兼容配置": "Настройка совместимости ChatCompletions→Responses",
+     "ChatCompletions→Responses 兼容配置（Beta）": "Совместимость ChatCompletions→Responses (бета)",
++    "Responses→ChatCompletions 兼容配置": "Совместимость Responses→ChatCompletions",
+     "Claude 强制 beta=true": "Claude принудительно beta=true",
+     "Claude会在原有请求头基础上追加这些值，不会覆盖已有同名请求头；重复值会自动忽略。": "Claude добавляет эти значения поверх существующих заголовков запроса. Уже существующие заголовки не перезаписываются, а дублирующиеся значения автоматически игнорируются.",
+     "Claude思考适配 BudgetTokens = MaxTokens * BudgetTokens 百分比": "Адаптация мышления Claude BudgetTokens = MaxTokens * процент BudgetTokens",
+diff --git a/web/classic/src/i18n/locales/vi.json b/web/classic/src/i18n/locales/vi.json
+index 5aa6620..55c0fd9 100644
+--- a/web/classic/src/i18n/locales/vi.json
++++ b/web/classic/src/i18n/locales/vi.json
+@@ -101,6 +101,7 @@
+     "Changing batch type to:": "Đang thay đổi loại hàng loạt thành:",
+     "ChatCompletions→Responses 兼容配置": "Cấu hình tương thích ChatCompletions→Responses",
+     "ChatCompletions→Responses 兼容配置（Beta）": "Tương thích ChatCompletions→Responses (Beta)",
++    "Responses→ChatCompletions 兼容配置": "Tương thích Responses→ChatCompletions",
+     "Claude 强制 beta=true": "Claude buộc beta=true",
+     "Claude会在原有请求头基础上追加这些值，不会覆盖已有同名请求头；重复值会自动忽略。": "Claude sẽ thêm các giá trị này vào các tiêu đề yêu cầu hiện có. Các tiêu đề cùng tên sẽ không bị ghi đè và các giá trị trùng lặp sẽ tự động bị bỏ qua.",
+     "Claude思考适配 BudgetTokens = MaxTokens * BudgetTokens 百分比": "Thích ứng tư duy Claude BudgetTokens = MaxTokens * Tỷ lệ phần trăm BudgetTokens",
+diff --git a/web/classic/src/i18n/locales/zh-CN.json b/web/classic/src/i18n/locales/zh-CN.json
+index 974828c..92ec9d0 100644
+--- a/web/classic/src/i18n/locales/zh-CN.json
++++ b/web/classic/src/i18n/locales/zh-CN.json
+@@ -97,6 +97,7 @@
+     "Changing batch type to:": "Changing batch type to:",
+     "ChatCompletions→Responses 兼容配置": "ChatCompletions→Responses 兼容配置",
+     "ChatCompletions→Responses 兼容配置（Beta）": "ChatCompletions→Responses 兼容配置（Beta）",
++    "Responses→ChatCompletions 兼容配置": "Responses→ChatCompletions 兼容配置",
+     "Claude 强制 beta=true": "Claude 强制 beta=true",
+     "Claude会在原有请求头基础上追加这些值，不会覆盖已有同名请求头；重复值会自动忽略。": "Claude会在原有请求头基础上追加这些值，不会覆盖已有同名请求头；重复值会自动忽略。",
+     "Claude思考适配 BudgetTokens = MaxTokens * BudgetTokens 百分比": "Claude思考适配 BudgetTokens = MaxTokens * BudgetTokens 百分比",
+diff --git a/web/classic/src/i18n/locales/zh-TW.json b/web/classic/src/i18n/locales/zh-TW.json
+index 2c5f688..11ca4f5 100644
+--- a/web/classic/src/i18n/locales/zh-TW.json
++++ b/web/classic/src/i18n/locales/zh-TW.json
+@@ -100,6 +100,7 @@
+     "Changing batch type to:": "Changing batch type to:",
+     "ChatCompletions→Responses 兼容配置": "",
+     "ChatCompletions→Responses 兼容配置（Beta）": "ChatCompletions→Responses 兼容設定（Beta）",
++    "Responses→ChatCompletions 兼容配置": "Responses→ChatCompletions 兼容設定",
+     "Claude 强制 beta=true": "",
+     "Claude会在原有请求头基础上追加这些值，不会覆盖已有同名请求头；重复值会自动忽略。": "Claude會在原有請求頭基礎上追加這些值，不會覆蓋已有同名請求頭；重複值會自動忽略。",
+     "Claude思考适配 BudgetTokens = MaxTokens * BudgetTokens 百分比": "Claude思考相容 BudgetTokens = MaxTokens * BudgetTokens 百分比",
+diff --git a/web/classic/src/i18n/locales/zh.json b/web/classic/src/i18n/locales/zh.json
+index e8d0c21..d427fce 100644
+--- a/web/classic/src/i18n/locales/zh.json
++++ b/web/classic/src/i18n/locales/zh.json
+@@ -2589,6 +2589,7 @@
+     "签到奖励的最大额度": "签到奖励的最大额度",
+     "保存签到设置": "保存签到设置",
+     "ChatCompletions→Responses 兼容配置（Beta）": "ChatCompletions→Responses 兼容配置（Beta）",
++    "Responses→ChatCompletions 兼容配置": "Responses→ChatCompletions 兼容配置",
+     "提示：该功能为测试版，未来配置结构与功能行为可能发生变更，请勿在生产环境使用。": "提示：该功能为测试版，未来配置结构与功能行为可能发生变更，请勿在生产环境使用。",
+     "填充模板（指定渠道）": "填充模板（指定渠道）",
+     "填充模板（全渠道）": "填充模板（全渠道）",
+diff --git a/web/classic/src/pages/Setting/Model/SettingGlobalModel.jsx b/web/classic/src/pages/Setting/Model/SettingGlobalModel.jsx
+index 710f137..4942bea 100644
+--- a/web/classic/src/pages/Setting/Model/SettingGlobalModel.jsx
++++ b/web/classic/src/pages/Setting/Model/SettingGlobalModel.jsx
+@@ -66,10 +66,33 @@ const chatCompletionsToResponsesPolicyAllChannelsExample = JSON.stringify(
+   2,
+ );
+ 
++const responsesToChatCompletionsPolicyExample = JSON.stringify(
++  {
++    enabled: true,
++    all_channels: false,
++    channel_ids: [1, 2],
++    channel_types: [43, 16, 26],
++    model_patterns: ['^deepseek-.*$', '^glm-.*$'],
++  },
++  null,
++  2,
++);
++
++const responsesToChatCompletionsPolicyAllChannelsExample = JSON.stringify(
++  {
++    enabled: true,
++    all_channels: true,
++    model_patterns: ['^deepseek-.*$', '^glm-.*$'],
++  },
++  null,
++  2,
++);
++
+ const defaultGlobalSettingInputs = {
+   'global.pass_through_request_enabled': false,
+   'global.thinking_model_blacklist': '[]',
+   'global.chat_completions_to_responses_policy': '{}',
++  'global.responses_to_chat_completions_policy': '{}',
+   'general_setting.ping_interval_enabled': false,
+   'general_setting.ping_interval_seconds': 60,
+ };
+@@ -83,6 +106,8 @@ export default function SettingGlobalModel(props) {
+   const [inputsRow, setInputsRow] = useState(defaultGlobalSettingInputs);
+   const chatCompletionsToResponsesPolicyKey =
+     'global.chat_completions_to_responses_policy';
++  const responsesToChatCompletionsPolicyKey =
++    'global.responses_to_chat_completions_policy';
+ 
+   const setChatCompletionsToResponsesPolicyValue = (value) => {
+     setInputs((prev) => ({
+@@ -94,12 +119,23 @@ export default function SettingGlobalModel(props) {
+     }
+   };
+ 
++  const setResponsesToChatCompletionsPolicyValue = (value) => {
++    setInputs((prev) => ({
++      ...prev,
++      [responsesToChatCompletionsPolicyKey]: value,
++    }));
++    if (refForm.current) {
++      refForm.current.setValue(responsesToChatCompletionsPolicyKey, value);
++    }
++  };
++
+   const normalizeValueBeforeSave = (key, value) => {
+     if (key === 'global.thinking_model_blacklist') {
+       const text = typeof value === 'string' ? value.trim() : '';
+       return text === '' ? '[]' : value;
+     }
+-    if (key === 'global.chat_completions_to_responses_policy') {
++    if (key === 'global.chat_completions_to_responses_policy' ||
++        key === 'global.responses_to_chat_completions_policy') {
+       const text = typeof value === 'string' ? value.trim() : '';
+       return text === '' ? '{}' : value;
+     }
+@@ -156,7 +192,8 @@ export default function SettingGlobalModel(props) {
+             value = defaultGlobalSettingInputs[key];
+           }
+         }
+-        if (key === 'global.chat_completions_to_responses_policy') {
++        if (key === 'global.chat_completions_to_responses_policy' ||
++            key === 'global.responses_to_chat_completions_policy') {
+           try {
+             value =
+               value && String(value).trim() !== ''
+@@ -288,6 +325,9 @@ export default function SettingGlobalModel(props) {
+                         message: t('不是合法的 JSON 字符串'),
+                       },
+                     ]}
++                    extraText={t(
++                      'model_patterns 支持正则匹配模型名称，例如 ["^deepseek-.*$", "^glm-.*$"]，留空表示匹配所有模型',
++                    )}
+                     onChange={(value) =>
+                       setInputs((prev) => ({
+                         ...prev,
+@@ -355,6 +395,130 @@ export default function SettingGlobalModel(props) {
+               </Row>
+             </Form.Section>
+ 
++            <Form.Section
++              text={
++                <span
++                  style={{
++                    fontSize: 14,
++                    fontWeight: 600,
++                    display: 'inline-flex',
++                    alignItems: 'center',
++                    gap: 8,
++                    flexWrap: 'wrap',
++                  }}
++                >
++                  {t('Responses→ChatCompletions 兼容配置')}
++                  <Tag color='orange' size='small'>
++                    测试版
++                  </Tag>
++                </span>
++              }
++            >
++              <Row style={{ marginTop: 10 }}>
++                <Col span={24}>
++                  <Banner
++                    type='warning'
++                    description={t(
++                      '提示：该功能为测试版，未来配置结构与功能行为可能发生变更，请勿在生产环境使用。',
++                    )}
++                  />
++                </Col>
++              </Row>
++
++              <Row style={{ marginTop: 10 }}>
++                <Col span={24}>
++                  <Form.TextArea
++                    label={t('参数配置')}
++                    field={responsesToChatCompletionsPolicyKey}
++                    placeholder={
++                      t('例如（指定渠道）：') +
++                      '\n' +
++                      responsesToChatCompletionsPolicyExample +
++                      '\n\n' +
++                      t('例如（全渠道）：') +
++                      '\n' +
++                      responsesToChatCompletionsPolicyAllChannelsExample
++                    }
++                    rows={8}
++                    rules={[
++                      {
++                        validator: (rule, value) => {
++                          if (!value || value.trim() === '') return true;
++                          return verifyJSON(value);
++                        },
++                        message: t('不是合法的 JSON 字符串'),
++                      },
++                    ]}
++                    extraText={t(
++                      'model_patterns 支持正则匹配模型名称，例如 ["^deepseek-.*$", "^glm-.*$"]，留空表示匹配所有模型',
++                    )}
++                    onChange={(value) =>
++                      setInputs((prev) => ({
++                        ...prev,
++                        [responsesToChatCompletionsPolicyKey]: value,
++                      }))
++                    }
++                  />
++                </Col>
++              </Row>
++
++              <Row style={{ marginTop: 10, marginBottom: 16 }}>
++                <Col span={24}>
++                  <div
++                    style={{
++                      display: 'flex',
++                      gap: 8,
++                      flexWrap: 'wrap',
++                      alignItems: 'center',
++                    }}
++                  >
++                    <Button
++                      type='secondary'
++                      size='small'
++                      onClick={() =>
++                        setResponsesToChatCompletionsPolicyValue(
++                          responsesToChatCompletionsPolicyExample,
++                        )
++                      }
++                    >
++                      {t('填充模板（指定渠道）')}
++                    </Button>
++                    <Button
++                      type='secondary'
++                      size='small'
++                      onClick={() =>
++                        setResponsesToChatCompletionsPolicyValue(
++                          responsesToChatCompletionsPolicyAllChannelsExample,
++                        )
++                      }
++                    >
++                      {t('填充模板（全渠道）')}
++                    </Button>
++                    <Button
++                      type='secondary'
++                      size='small'
++                      onClick={() => {
++                        const raw = inputs[responsesToChatCompletionsPolicyKey];
++                        if (!raw || String(raw).trim() === '') return;
++                        try {
++                          const formatted = JSON.stringify(
++                            JSON.parse(raw),
++                            null,
++                            2,
++                          );
++                          setResponsesToChatCompletionsPolicyValue(formatted);
++                        } catch (error) {
++                          showError(t('不是合法的 JSON 字符串'));
++                        }
++                      }}
++                    >
++                      {t('格式化 JSON')}
++                    </Button>
++                  </div>
++                </Col>
++              </Row>
++            </Form.Section>
++
+             <Form.Section
+               text={
+                 <span style={{ fontSize: 14, fontWeight: 600 }}>
+diff --git a/web/default/src/features/models/components/drawers/model-mutate-drawer.tsx b/web/default/src/features/models/components/drawers/model-mutate-drawer.tsx
+index db8330e..1798107 100644
+--- a/web/default/src/features/models/components/drawers/model-mutate-drawer.tsx
++++ b/web/default/src/features/models/components/drawers/model-mutate-drawer.tsx
+@@ -168,6 +168,7 @@ export function ModelMutateDrawer({
+       'global.pass_through_request_enabled': false,
+       'global.thinking_model_blacklist': '[]',
+       'global.chat_completions_to_responses_policy': '{}',
++      'global.responses_to_chat_completions_policy': '{}',
+       'general_setting.ping_interval_enabled': false,
+       'general_setting.ping_interval_seconds': 60,
+       'gemini.safety_settings': '',
+diff --git a/web/default/src/features/system-settings/models/global-settings-card.tsx b/web/default/src/features/system-settings/models/global-settings-card.tsx
+index 8eb0181..105276c 100644
+--- a/web/default/src/features/system-settings/models/global-settings-card.tsx
++++ b/web/default/src/features/system-settings/models/global-settings-card.tsx
+@@ -76,6 +76,27 @@ const chatToResponsesPolicyAllChannelsExample = JSON.stringify(
+   2
+ )
+ 
++const responsesToChatCompletionsPolicyExample = JSON.stringify(
++  {
++    enabled: true,
++    all_channels: false,
++    channel_ids: [1, 2],
++    model_patterns: ['^deepseek-.*$', '^glm-.*$'],
++  },
++  null,
++  2
++)
++
++const responsesToChatCompletionsPolicyAllChannelsExample = JSON.stringify(
++  {
++    enabled: true,
++    all_channels: true,
++    model_patterns: ['^deepseek-.*$', '^glm-.*$'],
++  },
++  null,
++  2
++)
++
+ const jsonString = z.string().refine((value) => {
+   const trimmed = value.trim()
+   if (!trimmed) return true
+@@ -92,6 +113,7 @@ const schema = z.object({
+     pass_through_request_enabled: z.boolean(),
+     thinking_model_blacklist: jsonString,
+     chat_completions_to_responses_policy: jsonString,
++    responses_to_chat_completions_policy: jsonString,
+   }),
+   general_setting: z.object({
+     ping_interval_enabled: z.boolean(),
+@@ -106,6 +128,7 @@ type FlatGlobalModelSettings = {
+   'global.pass_through_request_enabled': boolean
+   'global.thinking_model_blacklist': string
+   'global.chat_completions_to_responses_policy': string
++  'global.responses_to_chat_completions_policy': string
+   'general_setting.ping_interval_enabled': boolean
+   'general_setting.ping_interval_seconds': number
+ }
+@@ -123,6 +146,10 @@ const flattenGlobalValues = (
+     values.global.chat_completions_to_responses_policy,
+     '{}'
+   ),
++  'global.responses_to_chat_completions_policy': normalizeJsonText(
++    values.global.responses_to_chat_completions_policy,
++    '{}'
++  ),
+   'general_setting.ping_interval_enabled':
+     values.general_setting.ping_interval_enabled,
+   'general_setting.ping_interval_seconds':
+@@ -161,6 +188,7 @@ export function GlobalSettingsCard({ defaultValues }: GlobalSettingsCardProps) {
+     field:
+       | 'global.thinking_model_blacklist'
+       | 'global.chat_completions_to_responses_policy'
++      | 'global.responses_to_chat_completions_policy'
+   ) => {
+     const raw = form.getValues(field)
+     if (!raw || !raw.trim()) return
+@@ -301,6 +329,9 @@ export function GlobalSettingsCard({ defaultValues }: GlobalSettingsCardProps) {
+                   </FormControl>
+                   <FormDescription>
+                     {t('Empty value will be saved as {}.')}
++                    <span className='block mt-1'>
++                      {t('Use model_patterns to match specific models by regex, e.g. ["^gpt-4o.*$"]. Leave empty to match all models.')}
++                    </span>
+                   </FormDescription>
+                   <div className='flex flex-wrap gap-2'>
+                     <Button
+@@ -352,6 +383,97 @@ export function GlobalSettingsCard({ defaultValues }: GlobalSettingsCardProps) {
+ 
+           <Separator />
+ 
++          <div className='space-y-4'>
++            <div className='flex items-center gap-2'>
++              <h3 className='text-base font-semibold'>
++                {t('Responses -> ChatCompletions Compatibility')}
++              </h3>
++              <StatusBadge
++                label={t('Preview')}
++                variant='neutral'
++                copyable={false}
++              />
++            </div>
++
++            <Alert>
++              <AlertTitle>{t('Warning')}</AlertTitle>
++              <AlertDescription>
++                {t(
++                  'This feature is experimental. Configuration format and behavior may change.'
++                )}
++              </AlertDescription>
++            </Alert>
++
++            <FormField
++              control={form.control}
++              name='global.responses_to_chat_completions_policy'
++              render={({ field }) => (
++                <FormItem>
++                  <FormLabel>{t('Policy JSON')}</FormLabel>
++                  <FormControl>
++                    <Textarea
++                      rows={8}
++                      placeholder={`${t('Example (specific channels):')}\n${responsesToChatCompletionsPolicyExample}\n\n${t('Example (all channels):')}\n${responsesToChatCompletionsPolicyAllChannelsExample}`}
++                      {...field}
++                      onChange={(event) => field.onChange(event.target.value)}
++                    />
++                  </FormControl>
++                  <FormDescription>
++                    {t('Empty value will be saved as {}.')}
++                    <span className='block mt-1'>
++                      {t('Use model_patterns to match specific models by regex, e.g. ["^deepseek-.*$", "^glm-.*$"]. Leave empty to match all models.')}
++                    </span>
++                  </FormDescription>
++                  <div className='flex flex-wrap gap-2'>
++                    <Button
++                      type='button'
++                      variant='outline'
++                      size='sm'
++                      onClick={() =>
++                        form.setValue(
++                          'global.responses_to_chat_completions_policy',
++                          responsesToChatCompletionsPolicyExample,
++                          { shouldDirty: true }
++                        )
++                      }
++                    >
++                      {t('Fill example (specific channels)')}
++                    </Button>
++                    <Button
++                      type='button'
++                      variant='outline'
++                      size='sm'
++                      onClick={() =>
++                        form.setValue(
++                          'global.responses_to_chat_completions_policy',
++                          responsesToChatCompletionsPolicyAllChannelsExample,
++                          { shouldDirty: true }
++                        )
++                      }
++                    >
++                      {t('Fill example (all channels)')}
++                    </Button>
++                    <Button
++                      type='button'
++                      variant='outline'
++                      size='sm'
++                      onClick={() =>
++                        formatJsonField(
++                          'global.responses_to_chat_completions_policy'
++                        )
++                      }
++                    >
++                      {t('Format JSON')}
++                    </Button>
++                  </div>
++                  <FormMessage />
++                </FormItem>
++              )}
++            />
++          </div>
++
++          <Separator />
++
+           <FormField
+             control={form.control}
+             name='general_setting.ping_interval_enabled'
+diff --git a/web/default/src/features/system-settings/models/index.tsx b/web/default/src/features/system-settings/models/index.tsx
+index e7a1ee1..706c49a 100644
+--- a/web/default/src/features/system-settings/models/index.tsx
++++ b/web/default/src/features/system-settings/models/index.tsx
+@@ -28,6 +28,7 @@ const defaultModelSettings: ModelSettings = {
+   'global.pass_through_request_enabled': false,
+   'global.thinking_model_blacklist': '[]',
+   'global.chat_completions_to_responses_policy': '{}',
++  'global.responses_to_chat_completions_policy': '{}',
+   'general_setting.ping_interval_enabled': false,
+   'general_setting.ping_interval_seconds': 60,
+   'gemini.safety_settings': '',
+diff --git a/web/default/src/features/system-settings/models/section-registry.tsx b/web/default/src/features/system-settings/models/section-registry.tsx
+index c210462..f5a03fa 100644
+--- a/web/default/src/features/system-settings/models/section-registry.tsx
++++ b/web/default/src/features/system-settings/models/section-registry.tsx
+@@ -54,6 +54,10 @@ const MODELS_SECTIONS = [
+               settings['global.chat_completions_to_responses_policy'],
+               '{}'
+             ),
++            responses_to_chat_completions_policy: formatJsonForEditor(
++              settings['global.responses_to_chat_completions_policy'],
++              '{}'
++            ),
+           },
+           general_setting: {
+             ping_interval_enabled:
+diff --git a/web/default/src/features/system-settings/types.ts b/web/default/src/features/system-settings/types.ts
+index 5f6e0c6..00e9bd1 100644
+--- a/web/default/src/features/system-settings/types.ts
++++ b/web/default/src/features/system-settings/types.ts
+@@ -190,6 +190,7 @@ export type ModelSettings = {
+   'global.pass_through_request_enabled': boolean
+   'global.thinking_model_blacklist': string
+   'global.chat_completions_to_responses_policy': string
++  'global.responses_to_chat_completions_policy': string
+   'general_setting.ping_interval_enabled': boolean
+   'general_setting.ping_interval_seconds': number
+   'gemini.safety_settings': string
+diff --git a/web/default/src/i18n/locales/en.json b/web/default/src/i18n/locales/en.json
+index 569dd49..b4d14ce 100644
+--- a/web/default/src/i18n/locales/en.json
++++ b/web/default/src/i18n/locales/en.json
+@@ -749,6 +749,7 @@
+     "Chat Presets": "Chat Presets",
+     "Chat session management": "Chat session management",
+     "ChatCompletions -> Responses Compatibility": "ChatCompletions -> Responses Compatibility",
++    "Responses -> ChatCompletions Compatibility": "Responses -> ChatCompletions Compatibility",
+     "ChatGPT Subscription (Codex)": "ChatGPT Subscription (Codex)",
+     "Check for updates": "Check for updates",
+     "Check in daily to receive random quota rewards": "Check in daily to receive random quota rewards",
+@@ -1504,6 +1505,8 @@
+     "Embeddings": "Embeddings",
+     "Empty": "Empty",
+     "Empty value will be saved as {}.": "Empty value will be saved as {}.",
++    "Use model_patterns to match specific models by regex, e.g. [\"^gpt-4o.*$\"]. Leave empty to match all models.": "Use model_patterns to match specific models by regex, e.g. [\"^gpt-4o.*$\"]. Leave empty to match all models.",
++    "Use model_patterns to match specific models by regex, e.g. [\"^deepseek-.*$\", \"^glm-.*$\"]. Leave empty to match all models.": "Use model_patterns to match specific models by regex, e.g. [\"^deepseek-.*$\", \"^glm-.*$\"]. Leave empty to match all models.",
+     "Enable": "Enable",
+     "Enable 2FA": "Enable 2FA",
+     "Enable All": "Enable All",
+diff --git a/web/default/src/i18n/locales/fr.json b/web/default/src/i18n/locales/fr.json
+index 8ff9c68..ad984ac 100644
+--- a/web/default/src/i18n/locales/fr.json
++++ b/web/default/src/i18n/locales/fr.json
+@@ -749,6 +749,7 @@
+     "Chat Presets": "Préréglages de chat",
+     "Chat session management": "Gestion des sessions de chat",
+     "ChatCompletions -> Responses Compatibility": "Compatibilité ChatCompletions -> Réponses",
++    "Responses -> ChatCompletions Compatibility": "Compatibilité Responses -> ChatCompletions",
+     "ChatGPT Subscription (Codex)": "ChatGPT Subscription (Codex)",
+     "Check for updates": "Vérifier les mises à jour",
+     "Check in daily to receive random quota rewards": "Connectez-vous quotidiennement pour recevoir des récompenses de quota aléatoires",
+@@ -1504,6 +1505,8 @@
+     "Embeddings": "Embeddings",
+     "Empty": "Vide",
+     "Empty value will be saved as {}.": "Une valeur vide sera enregistrée comme {}.",
++    "Use model_patterns to match specific models by regex, e.g. [\"^gpt-4o.*$\"]. Leave empty to match all models.": "model_patterns permet de filtrer par regex. Ex: [\"^gpt-4o.*$\"]. Laisser vide pour tout inclure.",
++    "Use model_patterns to match specific models by regex, e.g. [\"^deepseek-.*$\", \"^glm-.*$\"]. Leave empty to match all models.": "model_patterns permet de filtrer par regex. Ex: [\"^deepseek-.*$\", \"^glm-.*$\"]. Laisser vide pour tout inclure.",
+     "Enable": "Activer",
+     "Enable 2FA": "Activer 2FA",
+     "Enable All": "Tout activer",
+diff --git a/web/default/src/i18n/locales/ja.json b/web/default/src/i18n/locales/ja.json
+index 1bbcf89..ab572eb 100644
+--- a/web/default/src/i18n/locales/ja.json
++++ b/web/default/src/i18n/locales/ja.json
+@@ -749,6 +749,7 @@
+     "Chat Presets": "チャットプリセット",
+     "Chat session management": "チャットセッション管理",
+     "ChatCompletions -> Responses Compatibility": "ChatCompletions → レスポンス互換",
++    "Responses -> ChatCompletions Compatibility": "Responses -> ChatCompletions 互換",
+     "ChatGPT Subscription (Codex)": "ChatGPT Subscription (Codex)",
+     "Check for updates": "更新を確認",
+     "Check in daily to receive random quota rewards": "毎日チェックインして、ランダムなノルマ報酬を受け取りましょう",
+@@ -1504,6 +1505,8 @@
+     "Embeddings": "埋め込み",
+     "Empty": "空",
+     "Empty value will be saved as {}.": "空の値は {} として保存されます。",
++    "Use model_patterns to match specific models by regex, e.g. [\"^gpt-4o.*$\"]. Leave empty to match all models.": "model_patterns は正規表現でモデル名を指定します。例: [\"^gpt-4o.*$\"]、空欄の場合はすべてのモデルが対象。",
++    "Use model_patterns to match specific models by regex, e.g. [\"^deepseek-.*$\", \"^glm-.*$\"]. Leave empty to match all models.": "model_patterns は正規表現でモデル名を指定します。例: [\"^deepseek-.*$\", \"^glm-.*$\"]、空欄の場合はすべてのモデルが対象。",
+     "Enable": "有効にする",
+     "Enable 2FA": "2FA を有効にする",
+     "Enable All": "すべて有効にする",
+diff --git a/web/default/src/i18n/locales/ru.json b/web/default/src/i18n/locales/ru.json
+index a9044cb..afa8ee1 100644
+--- a/web/default/src/i18n/locales/ru.json
++++ b/web/default/src/i18n/locales/ru.json
+@@ -749,6 +749,7 @@
+     "Chat Presets": "Предустановки чата",
+     "Chat session management": "Управление сессиями чата",
+     "ChatCompletions -> Responses Compatibility": "Совместимость ChatCompletions → Ответы",
++    "Responses -> ChatCompletions Compatibility": "Совместимость Responses -> ChatCompletions",
+     "ChatGPT Subscription (Codex)": "ChatGPT Subscription (Codex)",
+     "Check for updates": "Проверить обновления",
+     "Check in daily to receive random quota rewards": "Регистрируйтесь ежедневно, чтобы получать случайные вознаграждения по квоте",
+@@ -1504,6 +1505,8 @@
+     "Embeddings": "Встраивания",
+     "Empty": "Пусто",
+     "Empty value will be saved as {}.": "Пустое значение будет сохранено как {}.",
++    "Use model_patterns to match specific models by regex, e.g. [\"^gpt-4o.*$\"]. Leave empty to match all models.": "model_patterns — регулярные выражения для фильтрации моделей. Пример: [\"^gpt-4o.*$\"]. Пусто = все модели.",
++    "Use model_patterns to match specific models by regex, e.g. [\"^deepseek-.*$\", \"^glm-.*$\"]. Leave empty to match all models.": "model_patterns — регулярные выражения для фильтрации моделей. Пример: [\"^deepseek-.*$\", \"^glm-.*$\"]. Пусто = все модели.",
+     "Enable": "Включить",
+     "Enable 2FA": "Включить 2FA",
+     "Enable All": "Включить все",
+diff --git a/web/default/src/i18n/locales/vi.json b/web/default/src/i18n/locales/vi.json
+index 0fb8237..226537b 100644
+--- a/web/default/src/i18n/locales/vi.json
++++ b/web/default/src/i18n/locales/vi.json
+@@ -749,6 +749,7 @@
+     "Chat Presets": "Cài đặt sẵn trò chuyện",
+     "Chat session management": "Quản lý phiên trò chuyện",
+     "ChatCompletions -> Responses Compatibility": "Tương thích ChatCompletions -> Phản hồi",
++    "Responses -> ChatCompletions Compatibility": "Tương thích Responses -> ChatCompletions",
+     "ChatGPT Subscription (Codex)": "ChatGPT Subscription (Codex)",
+     "Check for updates": "Kiểm tra cập nhật",
+     "Check in daily to receive random quota rewards": "Nhận phòng hàng ngày để nhận phần thưởng theo hạn ngạch ngẫu nhiên",
+@@ -1504,6 +1505,8 @@
+     "Embeddings": "Embeddings",
+     "Empty": "Trống",
+     "Empty value will be saved as {}.": "Giá trị trống sẽ được lưu thành {}.",
++    "Use model_patterns to match specific models by regex, e.g. [\"^gpt-4o.*$\"]. Leave empty to match all models.": "model_patterns khớp tên model bằng regex. VD: [\"^gpt-4o.*$\"]. Để trống = khớp tất cả.",
++    "Use model_patterns to match specific models by regex, e.g. [\"^deepseek-.*$\", \"^glm-.*$\"]. Leave empty to match all models.": "model_patterns khớp tên model bằng regex. VD: [\"^deepseek-.*$\", \"^glm-.*$\"]. Để trống = khớp tất cả.",
+     "Enable": "Bật",
+     "Enable 2FA": "Bật 2FA",
+     "Enable All": "Bật tất cả",
+diff --git a/web/default/src/i18n/locales/zh.json b/web/default/src/i18n/locales/zh.json
+index e78ac5b..1c339cc 100644
+--- a/web/default/src/i18n/locales/zh.json
++++ b/web/default/src/i18n/locales/zh.json
+@@ -749,6 +749,7 @@
+     "Chat Presets": "聊天预设",
+     "Chat session management": "聊天会话管理",
+     "ChatCompletions -> Responses Compatibility": "ChatCompletions → 响应兼容",
++    "Responses -> ChatCompletions Compatibility": "Responses -> ChatCompletions 兼容",
+     "ChatGPT Subscription (Codex)": "ChatGPT Subscription (Codex)",
+     "Check for updates": "检查更新",
+     "Check in daily to receive random quota rewards": "每日签到可获得随机额度奖励",
+@@ -1504,6 +1505,8 @@
+     "Embeddings": "嵌入",
+     "Empty": "空",
+     "Empty value will be saved as {}.": "空值将保存为 {}。",
++    "Use model_patterns to match specific models by regex, e.g. [\"^gpt-4o.*$\"]. Leave empty to match all models.": "model_patterns 支持正则匹配模型名称，例如 [\"^gpt-4o.*$\"]，留空表示匹配所有模型。",
++    "Use model_patterns to match specific models by regex, e.g. [\"^deepseek-.*$\", \"^glm-.*$\"]. Leave empty to match all models.": "model_patterns 支持正则匹配模型名称，例如 [\"^deepseek-.*$\", \"^glm-.*$\"]，留空表示匹配所有模型。",
+     "Enable": "启用",
+     "Enable 2FA": "启用 2FA",
+     "Enable All": "启用全部",
