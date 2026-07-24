@@ -861,3 +861,17 @@ index 5f6e0c6..00e9bd1 100644
    'general_setting.ping_interval_enabled': boolean
    'general_setting.ping_interval_seconds': number
    'gemini.safety_settings': string
+diff --git a/service/relayconvert/internal/oai_responses/to_oai_chat_req.go b/service/relayconvert/internal/oai_responses/to_oai_chat_req.go
+index 7779364..0c1e2bf 100644
+--- a/service/relayconvert/internal/oai_responses/to_oai_chat_req.go
++++ b/service/relayconvert/internal/oai_responses/to_oai_chat_req.go
+@@ -188,6 +188,9 @@ func responsesInputItemToChatMessages(item map[string]any, messages []dto.Messag
+ 	if role == "" {
+ 		role = "user"
+ 	}
++	if role == "developer" {
++		role = "system"
++	}
+ 	content, err := responsesInputContentToChatContent(item["content"])
+ 	if err != nil {
+ 		return nil, err
