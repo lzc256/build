@@ -19,7 +19,7 @@ Based on PR QuantumNous/new-api#5209
 Adapted for upstream refactoring (openaicompat -> relayconvert).
 i18n changes handled by separate script for cross-version compatibility.
 diff --git a/common/constants.go b/common/constants.go
-index 5a15f73..470cbc5 100644
+index 87d212f..3154dc2 100644
 --- a/common/constants.go
 +++ b/common/constants.go
 @@ -22,7 +22,7 @@ var TopUpLink = ""
@@ -32,7 +32,7 @@ index 5a15f73..470cbc5 100644
  
  func GetTheme() string {
 diff --git a/dto/openai_request.go b/dto/openai_request.go
-index fd0bed0..396e132 100644
+index 3bb2b34..af25ca9 100644
 --- a/dto/openai_request.go
 +++ b/dto/openai_request.go
 @@ -247,6 +247,7 @@ type FunctionRequest struct {
@@ -44,10 +44,10 @@ index fd0bed0..396e132 100644
  }
  
 diff --git a/relay/responses_handler.go b/relay/responses_handler.go
-index 010c38b..0705e3f 100644
+index 5fa23d0..a8dcc65 100644
 --- a/relay/responses_handler.go
 +++ b/relay/responses_handler.go
-@@ -70,6 +70,22 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
+@@ -80,6 +80,22 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
  		return types.NewError(fmt.Errorf("invalid api type: %d", info.ApiType), types.ErrorCodeInvalidApiType, types.ErrOptionWithSkipRetry())
  	}
  	adaptor.Init(info)
@@ -221,9 +221,204 @@ index 4db3727..d11335c 100644
 +func ShouldResponsesUseChatCompletionsGlobal(channelID int, channelType int, model string) bool {
 +	return relayconvert.ShouldResponsesUseChatCompletionsGlobal(channelID, channelType, model)
 +}
+diff --git a/service/relayconvert/internal/oai_responses/to_oai_chat_req.go b/service/relayconvert/internal/oai_responses/to_oai_chat_req.go
+index 7779364..d919263 100644
+--- a/service/relayconvert/internal/oai_responses/to_oai_chat_req.go
++++ b/service/relayconvert/internal/oai_responses/to_oai_chat_req.go
+@@ -49,6 +49,9 @@ func ResponsesRequestToChatCompletionsRequest(req *dto.OpenAIResponsesRequest) (
+ 	if err != nil {
+ 		return nil, err
+ 	}
++	if len(tools) == 0 {
++		toolChoice = nil
++	}
+ 
+ 	responseFormat, err := responsesRequestTextToChatResponseFormat(req.Text)
+ 	if err != nil {
+@@ -172,22 +175,31 @@ func responsesInputItemToChatMessages(item map[string]any, messages []dto.Messag
+ 			return nil, err
+ 		}
+ 		return appendToolCallToLastAssistant(messages, toolCall), nil
+-	case responsesInputTypeCustomToolCall:
+-		toolCall, err := responsesCustomToolCallItemToChatToolCall(item)
+-		if err != nil {
+-			return nil, err
+-		}
+-		return appendToolCallToLastAssistant(messages, toolCall), nil
++	case responsesInputTypeCustomToolCall, responsesInputTypeCustomToolOutput:
++		// Chat Completions-compatible upstreams only support function tool calls.
++		// Hosted/custom Responses tools such as apply_patch, shell, MCP, web search,
++		// and namespace calls have host-side execution semantics that cannot be
++		// represented safely as OpenAI Chat function calls, so omit them here.
++		return messages, nil
+ 	case responsesInputTypeFunctionCallOutput:
+ 		callID := strings.TrimSpace(common.Interface2String(item["call_id"]))
+ 		content := responseToolOutputToChatContent(item["output"])
+ 		return append(messages, dto.Message{Role: "tool", ToolCallId: callID, Content: content}), nil
+ 	}
+ 
++	if itemType != "" && item["role"] == nil && item["content"] == nil {
++		// Non-message Responses items (for example web_search_call, mcp_call,
++		// file_search_call, code_interpreter_call) are not valid Chat messages.
++		return messages, nil
++	}
++
+ 	role := strings.TrimSpace(common.Interface2String(item["role"]))
+ 	if role == "" {
+ 		role = "user"
+ 	}
++	if role == "developer" {
++		role = "system"
++	}
+ 	content, err := responsesInputContentToChatContent(item["content"])
+ 	if err != nil {
+ 		return nil, err
+@@ -331,25 +343,20 @@ func responsesRequestToolsToChat(raw json.RawMessage) ([]dto.ToolCallRequest, er
+ 	out := make([]dto.ToolCallRequest, 0, len(tools))
+ 	for _, tool := range tools {
+ 		toolType := strings.TrimSpace(common.Interface2String(tool["type"]))
+-		if toolType == "function" {
+-			out = append(out, dto.ToolCallRequest{
+-				Type: "function",
+-				Function: dto.FunctionRequest{
+-					Name:        strings.TrimSpace(common.Interface2String(tool["name"])),
+-					Description: common.Interface2String(tool["description"]),
+-					Parameters:  tool["parameters"],
+-				},
+-			})
++		if toolType != "function" {
++			// OpenAI-compatible Chat upstreams such as vLLM/NIM only accept function
++			// tool definitions. Responses hosted/custom tools (namespace, web_search,
++			// mcp, shell, apply_patch, etc.) cannot be represented in Chat tools.
+ 			continue
+ 		}
+ 
+-		rawTool, err := common.Marshal(tool)
+-		if err != nil {
+-			return nil, err
+-		}
+ 		out = append(out, dto.ToolCallRequest{
+-			Type:   toolType,
+-			Custom: rawTool,
++			Type: "function",
++			Function: dto.FunctionRequest{
++				Name:        strings.TrimSpace(common.Interface2String(tool["name"])),
++				Description: common.Interface2String(tool["description"]),
++				Parameters:  tool["parameters"],
++			},
+ 		})
+ 	}
+ 	return out, nil
+@@ -382,7 +389,7 @@ func responsesRequestToolChoiceToChat(raw json.RawMessage) (any, error) {
+ 			}, nil
+ 		}
+ 	}
+-	return choice, nil
++	return nil, nil
+ }
+ 
+ func RequestToolChoiceToChat(raw json.RawMessage) (any, error) {
+diff --git a/service/relayconvert/internal/oai_responses/to_oai_chat_req_test.go b/service/relayconvert/internal/oai_responses/to_oai_chat_req_test.go
+index 6924c82..b1e9118 100644
+--- a/service/relayconvert/internal/oai_responses/to_oai_chat_req_test.go
++++ b/service/relayconvert/internal/oai_responses/to_oai_chat_req_test.go
+@@ -199,29 +199,84 @@ func TestResponsesRequestToChatCompletionsRequestToolsToolChoiceAndTextFormat(t
+ 	assert.True(t, gjson.GetBytes(got.ResponseFormat.JsonSchema, "strict").Bool())
+ }
+ 
+-func TestResponsesRequestToChatCompletionsRequestCustomToolCallPreservesRawShape(t *testing.T) {
++func TestResponsesRequestToChatCompletionsRequestFiltersNonChatCompatibleToolsAndItems(t *testing.T) {
+ 	got, err := ResponsesRequestToChatCompletionsRequest(&dto.OpenAIResponsesRequest{
+ 		Model: "gpt-test",
+ 		Input: mustRawMessage(t, []map[string]any{
++			{
++				"role":    "user",
++				"content": "hello",
++			},
+ 			{
+ 				"type":    "custom_tool_call",
+ 				"call_id": "call_custom",
+ 				"name":    "apply_patch",
+ 				"input":   "patch body",
+ 			},
++			{
++				"type":    "custom_tool_call_output",
++				"call_id": "call_custom",
++				"output":  "ok",
++			},
++			{
++				"type":   "web_search_call",
++				"id":     "ws_1",
++				"status": "completed",
++			},
++			{
++				"type":      "function_call",
++				"call_id":   "call_1",
++				"name":      "lookup",
++				"arguments": map[string]any{"q": "x"},
++			},
++			{
++				"type":    "function_call_output",
++				"call_id": "call_1",
++				"output":  "found",
++			},
++		}),
++		Tools: mustRawMessage(t, []map[string]any{
++			{
++				"type":        "function",
++				"name":        "lookup",
++				"description": "Lookup data",
++			},
++			{
++				"type": "namespace",
++				"name": "tools",
++			},
++			{
++				"type": "web_search_preview",
++			},
++			{
++				"type": "custom",
++				"name": "apply_patch",
++			},
++		}),
++		ToolChoice: mustRawMessage(t, map[string]any{
++			"type": "web_search_preview",
+ 		}),
+ 	})
+ 	require.NoError(t, err)
+ 
+-	require.Len(t, got.Messages, 1)
+-	toolCalls := got.Messages[0].ParseToolCalls()
++	require.Len(t, got.Tools, 1)
++	assert.Equal(t, "function", got.Tools[0].Type)
++	assert.Equal(t, "lookup", got.Tools[0].Function.Name)
++	assert.Nil(t, got.ToolChoice)
++
++	require.Len(t, got.Messages, 3)
++	assert.Equal(t, "user", got.Messages[0].Role)
++	assert.Equal(t, "hello", got.Messages[0].StringContent())
++	assert.Equal(t, "assistant", got.Messages[1].Role)
++	toolCalls := got.Messages[1].ParseToolCalls()
+ 	require.Len(t, toolCalls, 1)
+-	assert.Equal(t, dto.CustomType, toolCalls[0].Type)
+-	assert.Equal(t, "call_custom", toolCalls[0].ID)
+-	assert.Equal(t, "apply_patch", toolCalls[0].Function.Name)
+-	assert.Equal(t, "patch body", toolCalls[0].Function.Arguments)
+-	assert.Equal(t, "custom_tool_call", gjson.GetBytes(toolCalls[0].Custom, "type").String())
+-	assert.Equal(t, "patch body", gjson.GetBytes(toolCalls[0].Custom, "input").String())
++	assert.Equal(t, "function", toolCalls[0].Type)
++	assert.Equal(t, "call_1", toolCalls[0].ID)
++	assert.Equal(t, "lookup", toolCalls[0].Function.Name)
++	assert.JSONEq(t, `{"q":"x"}`, toolCalls[0].Function.Arguments)
++	assert.Equal(t, "tool", got.Messages[2].Role)
++	assert.Equal(t, "call_1", got.Messages[2].ToolCallId)
++	assert.Equal(t, "found", got.Messages[2].StringContent())
+ }
+ 
+ func TestResponsesRequestToChatCompletionsRequestRejectsStatefulFields(t *testing.T) {
 diff --git a/service/relayconvert/policy.go b/service/relayconvert/policy.go
 new file mode 100644
-index 0000000..1111111
+index 0000000..45dcdce
 --- /dev/null
 +++ b/service/relayconvert/policy.go
 @@ -0,0 +1,32 @@
@@ -317,7 +512,7 @@ index d0c4d31..f57a0c7 100644
  
  // 全局实例
 diff --git a/web/classic/src/i18n/locales/en.json b/web/classic/src/i18n/locales/en.json
-index 39e9e5a..ff78937 100644
+index 363926b..85ca459 100644
 --- a/web/classic/src/i18n/locales/en.json
 +++ b/web/classic/src/i18n/locales/en.json
 @@ -108,6 +108,7 @@
@@ -329,7 +524,7 @@ index 39e9e5a..ff78937 100644
      "Claude会在原有请求头基础上追加这些值，不会覆盖已有同名请求头；重复值会自动忽略。": "Claude appends these values on top of existing request headers. Existing headers are not overwritten, and duplicate values are ignored automatically.",
      "Claude思考适配 BudgetTokens = MaxTokens * BudgetTokens 百分比": "Claude thinking adaptation BudgetTokens = MaxTokens * BudgetTokens percentage",
 diff --git a/web/classic/src/i18n/locales/fr.json b/web/classic/src/i18n/locales/fr.json
-index 5a696ce..cab1699 100644
+index 420206f..5e0ec3a 100644
 --- a/web/classic/src/i18n/locales/fr.json
 +++ b/web/classic/src/i18n/locales/fr.json
 @@ -107,6 +107,7 @@
@@ -341,7 +536,7 @@ index 5a696ce..cab1699 100644
      "Claude会在原有请求头基础上追加这些值，不会覆盖已有同名请求头；重复值会自动忽略。": "Claude ajoute ces valeurs aux en-tetes de requete existants. Les en-tetes existants ne sont pas remplaces et les valeurs en double sont ignorees automatiquement.",
      "Claude思考适配 BudgetTokens = MaxTokens * BudgetTokens 百分比": "Adaptation de la pensée Claude BudgetTokens = MaxTokens * BudgetTokens pourcentage",
 diff --git a/web/classic/src/i18n/locales/ja.json b/web/classic/src/i18n/locales/ja.json
-index e73e0d8..696542c 100644
+index d071b81..b200c26 100644
 --- a/web/classic/src/i18n/locales/ja.json
 +++ b/web/classic/src/i18n/locales/ja.json
 @@ -101,6 +101,7 @@
@@ -353,7 +548,7 @@ index e73e0d8..696542c 100644
      "Claude会在原有请求头基础上追加这些值，不会覆盖已有同名请求头；重复值会自动忽略。": "Claude は既存のリクエストヘッダーにこれらの値を追加します。既存の同名ヘッダーは上書きされず、重複した値は自動的に無視されます。",
      "Claude思考适配 BudgetTokens = MaxTokens * BudgetTokens 百分比": "Claude思考モード：BudgetTokens = MaxTokens * BudgetTokensの割合",
 diff --git a/web/classic/src/i18n/locales/ru.json b/web/classic/src/i18n/locales/ru.json
-index 0b43f34..58334f4 100644
+index 63660aa..ae4e3db 100644
 --- a/web/classic/src/i18n/locales/ru.json
 +++ b/web/classic/src/i18n/locales/ru.json
 @@ -111,6 +111,7 @@
@@ -365,7 +560,7 @@ index 0b43f34..58334f4 100644
      "Claude会在原有请求头基础上追加这些值，不会覆盖已有同名请求头；重复值会自动忽略。": "Claude добавляет эти значения поверх существующих заголовков запроса. Уже существующие заголовки не перезаписываются, а дублирующиеся значения автоматически игнорируются.",
      "Claude思考适配 BudgetTokens = MaxTokens * BudgetTokens 百分比": "Адаптация мышления Claude BudgetTokens = MaxTokens * процент BudgetTokens",
 diff --git a/web/classic/src/i18n/locales/vi.json b/web/classic/src/i18n/locales/vi.json
-index 5aa6620..55c0fd9 100644
+index 6a8f09e..288f46a 100644
 --- a/web/classic/src/i18n/locales/vi.json
 +++ b/web/classic/src/i18n/locales/vi.json
 @@ -101,6 +101,7 @@
@@ -377,7 +572,7 @@ index 5aa6620..55c0fd9 100644
      "Claude会在原有请求头基础上追加这些值，不会覆盖已有同名请求头；重复值会自动忽略。": "Claude sẽ thêm các giá trị này vào các tiêu đề yêu cầu hiện có. Các tiêu đề cùng tên sẽ không bị ghi đè và các giá trị trùng lặp sẽ tự động bị bỏ qua.",
      "Claude思考适配 BudgetTokens = MaxTokens * BudgetTokens 百分比": "Thích ứng tư duy Claude BudgetTokens = MaxTokens * Tỷ lệ phần trăm BudgetTokens",
 diff --git a/web/classic/src/i18n/locales/zh-CN.json b/web/classic/src/i18n/locales/zh-CN.json
-index 974828c..92ec9d0 100644
+index 906b850..9a99b24 100644
 --- a/web/classic/src/i18n/locales/zh-CN.json
 +++ b/web/classic/src/i18n/locales/zh-CN.json
 @@ -97,6 +97,7 @@
@@ -389,7 +584,7 @@ index 974828c..92ec9d0 100644
      "Claude会在原有请求头基础上追加这些值，不会覆盖已有同名请求头；重复值会自动忽略。": "Claude会在原有请求头基础上追加这些值，不会覆盖已有同名请求头；重复值会自动忽略。",
      "Claude思考适配 BudgetTokens = MaxTokens * BudgetTokens 百分比": "Claude思考适配 BudgetTokens = MaxTokens * BudgetTokens 百分比",
 diff --git a/web/classic/src/i18n/locales/zh-TW.json b/web/classic/src/i18n/locales/zh-TW.json
-index 2c5f688..11ca4f5 100644
+index d6f2060..8dda781 100644
 --- a/web/classic/src/i18n/locales/zh-TW.json
 +++ b/web/classic/src/i18n/locales/zh-TW.json
 @@ -100,6 +100,7 @@
@@ -850,10 +1045,10 @@ index c210462..f5a03fa 100644
            general_setting: {
              ping_interval_enabled:
 diff --git a/web/default/src/features/system-settings/types.ts b/web/default/src/features/system-settings/types.ts
-index 5f6e0c6..00e9bd1 100644
+index 11c51f0..45e7a36 100644
 --- a/web/default/src/features/system-settings/types.ts
 +++ b/web/default/src/features/system-settings/types.ts
-@@ -190,6 +190,7 @@ export type ModelSettings = {
+@@ -191,6 +191,7 @@ export type ModelSettings = {
    'global.pass_through_request_enabled': boolean
    'global.thinking_model_blacklist': string
    'global.chat_completions_to_responses_policy': string
@@ -861,17 +1056,3 @@ index 5f6e0c6..00e9bd1 100644
    'general_setting.ping_interval_enabled': boolean
    'general_setting.ping_interval_seconds': number
    'gemini.safety_settings': string
-diff --git a/service/relayconvert/internal/oai_responses/to_oai_chat_req.go b/service/relayconvert/internal/oai_responses/to_oai_chat_req.go
-index 7779364..0c1e2bf 100644
---- a/service/relayconvert/internal/oai_responses/to_oai_chat_req.go
-+++ b/service/relayconvert/internal/oai_responses/to_oai_chat_req.go
-@@ -188,6 +188,9 @@ func responsesInputItemToChatMessages(item map[string]any, messages []dto.Messag
- 	if role == "" {
- 		role = "user"
- 	}
-+	if role == "developer" {
-+		role = "system"
-+	}
- 	content, err := responsesInputContentToChatContent(item["content"])
- 	if err != nil {
- 		return nil, err
