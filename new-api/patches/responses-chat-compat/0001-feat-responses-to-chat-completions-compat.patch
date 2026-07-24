@@ -222,7 +222,7 @@ index 4db3727..d11335c 100644
 +	return relayconvert.ShouldResponsesUseChatCompletionsGlobal(channelID, channelType, model)
 +}
 diff --git a/service/relayconvert/internal/oai_responses/to_oai_chat_req.go b/service/relayconvert/internal/oai_responses/to_oai_chat_req.go
-index 7779364..d919263 100644
+index 7779364..e69eed6 100644
 --- a/service/relayconvert/internal/oai_responses/to_oai_chat_req.go
 +++ b/service/relayconvert/internal/oai_responses/to_oai_chat_req.go
 @@ -49,6 +49,9 @@ func ResponsesRequestToChatCompletionsRequest(req *dto.OpenAIResponsesRequest) (
@@ -235,7 +235,23 @@ index 7779364..d919263 100644
  
  	responseFormat, err := responsesRequestTextToChatResponseFormat(req.Text)
  	if err != nil {
-@@ -172,22 +175,31 @@ func responsesInputItemToChatMessages(item map[string]any, messages []dto.Messag
+@@ -87,12 +90,9 @@ func ResponsesRequestToChatCompletionsRequest(req *dto.OpenAIResponsesRequest) (
+ 			out.ParallelTooCalls = &parallelToolCalls
+ 		}
+ 	}
+-	if len(req.PromptCacheKey) > 0 && common.GetJsonType(req.PromptCacheKey) == "string" {
+-		var promptCacheKey string
+-		if err := common.Unmarshal(req.PromptCacheKey, &promptCacheKey); err == nil {
+-			out.PromptCacheKey = promptCacheKey
+-		}
+-	}
++	// prompt_cache_key is a Responses/OpenAI-specific request hint. OpenAI-compatible
++	// Chat upstreams such as NVIDIA NIM/vLLM reject unknown fields, so do not pass
++	// it through during Responses -> Chat fallback.
+ 
+ 	return out, nil
+ }
+@@ -172,22 +172,31 @@ func responsesInputItemToChatMessages(item map[string]any, messages []dto.Messag
  			return nil, err
  		}
  		return appendToolCallToLastAssistant(messages, toolCall), nil
@@ -273,7 +289,7 @@ index 7779364..d919263 100644
  	content, err := responsesInputContentToChatContent(item["content"])
  	if err != nil {
  		return nil, err
-@@ -331,25 +343,20 @@ func responsesRequestToolsToChat(raw json.RawMessage) ([]dto.ToolCallRequest, er
+@@ -331,25 +340,20 @@ func responsesRequestToolsToChat(raw json.RawMessage) ([]dto.ToolCallRequest, er
  	out := make([]dto.ToolCallRequest, 0, len(tools))
  	for _, tool := range tools {
  		toolType := strings.TrimSpace(common.Interface2String(tool["type"]))
@@ -309,7 +325,7 @@ index 7779364..d919263 100644
  		})
  	}
  	return out, nil
-@@ -382,7 +389,7 @@ func responsesRequestToolChoiceToChat(raw json.RawMessage) (any, error) {
+@@ -382,7 +386,7 @@ func responsesRequestToolChoiceToChat(raw json.RawMessage) (any, error) {
  			}, nil
  		}
  	}
@@ -319,9 +335,18 @@ index 7779364..d919263 100644
  
  func RequestToolChoiceToChat(raw json.RawMessage) (any, error) {
 diff --git a/service/relayconvert/internal/oai_responses/to_oai_chat_req_test.go b/service/relayconvert/internal/oai_responses/to_oai_chat_req_test.go
-index 6924c82..b1e9118 100644
+index 6924c82..2061367 100644
 --- a/service/relayconvert/internal/oai_responses/to_oai_chat_req_test.go
 +++ b/service/relayconvert/internal/oai_responses/to_oai_chat_req_test.go
+@@ -48,7 +48,7 @@ func TestResponsesRequestToChatCompletionsRequestInstructionsAndScalarInput(t *t
+ 	assert.Equal(t, 0.0, lo.FromPtr(got.Temperature))
+ 	assert.Equal(t, 0.9, lo.FromPtr(got.TopP))
+ 	assert.True(t, lo.FromPtr(got.ParallelTooCalls))
+-	assert.Equal(t, "cache-key", got.PromptCacheKey)
++	assert.Empty(t, got.PromptCacheKey)
+ 	assert.Equal(t, "medium", got.ReasoningEffort)
+ 	assert.Equal(t, `"user-1"`, string(got.User))
+ 	assert.Equal(t, `false`, string(got.Store))
 @@ -199,29 +199,84 @@ func TestResponsesRequestToChatCompletionsRequestToolsToolChoiceAndTextFormat(t
  	assert.True(t, gjson.GetBytes(got.ResponseFormat.JsonSchema, "strict").Bool())
  }
