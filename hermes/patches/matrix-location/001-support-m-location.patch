@@ -1,0 +1,27 @@
+diff --git a/plugins/platforms/matrix/adapter.py b/plugins/platforms/matrix/adapter.py
+index f9874e5..5f1b318 100644
+--- a/plugins/platforms/matrix/adapter.py
++++ b/plugins/platforms/matrix/adapter.py
+@@ -1916,6 +1916,22 @@ class MatrixAdapter(BasePlatformAdapter):
+             return
+         if msgtype in ("m.image", "m.audio", "m.video", "m.file"):
+             await self._handle_media_message(room_id, sender, event_id, event_ts, source_content, relates_to, msgtype)
++        elif str(msgtype).lower() == "m.location":
++            location_content = source_content.get("m.location") or {}
++            geo_uri = source_content.get("geo_uri") or location_content.get("uri") or source_content.get("body", "")
++            coords = str(geo_uri).removeprefix("geo:").split(";", 1)[0].split("?", 1)[0].split(",", 2)
++            latitude = coords[0] if len(coords) > 0 else ""
++            longitude = coords[1] if len(coords) > 1 else ""
++            source_content["body"] = (
++                "!! USER SENT A LOCATION PROMPT. !!\n"
++                f"GEO_URI: {geo_uri}\n"
++                f"LATITUDE: {latitude}\n"
++                f"LONGITUDE: {longitude}\n"
++                "MAP:\n"
++                f"1. https://www.google.com/maps/search/?api=1&query={latitude},{longitude}\n"
++                f"2. (AMAP Compatible) https://uri.amap.com/marker?position={longitude},{latitude}&coordinate=wgs84&callnative=0"
++            )
++            await self._handle_text_message(room_id, sender, event_id, event_ts, source_content, relates_to)
+         elif msgtype in ("m.text", "m.notice"):
+             await self._handle_text_message(room_id, sender, event_id, event_ts, source_content, relates_to)
+ 
