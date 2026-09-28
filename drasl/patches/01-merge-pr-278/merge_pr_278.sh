@@ -31,16 +31,37 @@ else
     done
 fi
 
-# The P2P implementation needs coordinated changes across the application
-# object, model, config, and service routes. The PR branch contains those
-# changes; use its versions for these files, while retaining the current
-# upstream db.go migration history to avoid duplicate V6 declarations.
-for file in config.go main.go model.go player.go services.go; do
-    git show pr-278/implement-p2p-multiplayer:"$file" > "$file"
-done
-perl -i -0pe 's/\nfunc LogInfo\(args \.\.\.any\) \{.*?\n\}\n//s; s/\nfunc LogError\(args \.\.\.any\) \{.*?\n\}\n//s' main.go
-if ! grep -q 'type V6Friendship = Friendship' db.go; then
-    perl -i -0pe 's/(type V6UserOIDCIdentity = UserOIDCIdentity\n)/$1type V6Friendship = Friendship\n/' db.go
+# Keep current upstream versions of coordinated files. Add the small state and
+# configuration surface required by the new friends/signaling files below.
+if ! grep -q 'FriendsETagStore' main.go; then
+    perl -i -0pe 's/(HeartbeatSaltMap\s+map\[ServerKey\]heartbeatSaltEntry\n)/$1\tPresenceStore *PresenceStore\n\tFriendsETagStore *FriendsETagStore\n\tFriendshipLocks *friendshipLocks\n\tSignalingHub *SignalingHub\n\tTURN *embeddedTURN\n/' main.go
+fi
+if ! grep -q 'FriendsETagStore: NewFriendsETagStore' main.go; then
+    perl -i -0pe 's/(HeartbeatLruList:\s+heartbeatLruList,\n)/$1\t\tPresenceStore: NewPresenceStore(),\n\t\tFriendsETagStore: NewFriendsETagStore(),\n\t\tFriendshipLocks: newFriendshipLocks(),\n\t\tSignalingHub: NewSignalingHub(),\n/' main.go
+fi
+if ! grep -q 'Pmid string' model.go; then
+    perl -i -0pe 's/(LastUsedAt\s+time\.Time\n)/$1\tPmid string `gorm:"-"`\n/' model.go
+fi
+if ! grep -q 'FriendsEnabled' model.go; then
+    perl -i -0pe 's/(Clients\s+\[\]Client `gorm:"constraint:OnDelete:CASCADE"`\n)/$1\tFriendsEnabled bool\n\tAcceptInvitesEnabled bool\n/' model.go
+fi
+if ! grep -q 'type Friendship struct' model.go; then
+    cat >> model.go <<'EOF'
+
+type Friendship struct {
+    ID uint `gorm:"primaryKey"`
+    RequesterUUID string `gorm:"uniqueIndex:friendship_pair_idx;not null"`
+    RecipientUUID string `gorm:"uniqueIndex:friendship_pair_idx;not null;index"`
+    Status string `gorm:"not null;default:pending"`
+    CreatedAt time.Time
+    UpdatedAt time.Time
+}
+EOF
+fi
+
+if ! grep -q 'type signalingConfig struct' config.go; then
+    perl -i -0pe 's/(type BaseConfig struct \{)/type signalingConfig struct {\n\tEnable bool\n\tTURNListenAddress string\n\tTURNPublicIP string\n\tTURNAuthSecret string\n}\n\ntype TURNServerConfig struct {\n\tUrls []string\n\tUsername string\n\tPassword string\n\tSecret string\n}\n\n$1/' config.go
+    perl -i -0pe 's/(type BaseConfig struct \{\n)/$1\tP2P signalingConfig\n/' config.go
 fi
 
 git add -A
