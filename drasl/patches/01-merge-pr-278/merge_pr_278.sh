@@ -40,7 +40,7 @@ if ! grep -q 'FriendsETagStore: NewFriendsETagStore' main.go; then
     perl -i -0pe 's/(HeartbeatLruList:\s+heartbeatLruList,\n)/$1\t\tPresenceStore: NewPresenceStore(),\n\t\tFriendsETagStore: NewFriendsETagStore(),\n\t\tFriendshipLocks: newFriendshipLocks(),\n\t\tSignalingHub: NewSignalingHub(),\n/' main.go
 fi
 if ! grep -q 'Pmid string' model.go; then
-    perl -i -0pe 's/(LastUsedAt\s+time\.Time\n)/$1\tPmid string `gorm:"-"`\n/' model.go
+    perl -i -0pe 's/(type Client struct \{.*?LastUsedAt[^\n]*\n)/$1\tPmid string `gorm:"-"`\n/s' model.go
 fi
 if ! grep -q 'FriendsEnabled' model.go; then
     perl -i -0pe 's/(Clients\s+\[\]Client `gorm:"constraint:OnDelete:CASCADE"`\n)/$1\tFriendsEnabled bool\n\tAcceptInvitesEnabled bool\n/' model.go
@@ -60,9 +60,14 @@ EOF
 fi
 
 if ! grep -q 'type signalingConfig struct' config.go; then
-    perl -i -0pe 's/(type BaseConfig struct \{)/type signalingConfig struct {\n\tEnable bool\n\tTURNListenAddress string\n\tTURNPublicIP string\n\tTURNAuthSecret string\n}\n\ntype TURNServerConfig struct {\n\tUrls []string\n\tUsername string\n\tPassword string\n\tSecret string\n}\n\n$1/' config.go
-    perl -i -0pe 's/(type BaseConfig struct \{\n)/$1\tP2P signalingConfig\n/' config.go
+    perl -i -0pe 's/(type Config struct \{)/type signalingConfig struct {\n\tEnable bool\n\tTURNListenAddress string\n\tTURNPublicIP string\n\tTURNAuthSecret string\n}\n\n$1/' config.go
+    perl -i -0pe 's/(type Config struct \{\n)/$1\tP2P signalingConfig\n/' config.go
 fi
+# Current upstream already defines these aliases. Remove any copies brought
+# by the old PR merge and leave exactly one declaration of each.
+perl -i -ne 'print unless /^type V6(User|Player|Client|UserOIDCIdentity) = /' db.go
+perl -i -0pe 's/(type V5UserOIDCIdentity = V6UserOIDCIdentity\n)/$1type V6User = User\ntype V6Player = Player\ntype V6Client = Client\ntype V6UserOIDCIdentity = UserOIDCIdentity\n/' db.go
+
 
 git add -A
 git commit --no-edit
