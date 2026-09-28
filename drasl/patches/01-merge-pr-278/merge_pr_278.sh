@@ -18,10 +18,21 @@ git fetch pr-278 implement-p2p-multiplayer --unshallow 2>/dev/null || git fetch 
 # Show what we fetched
 git branch -a | grep pr-278
 
-# Merge the PR branch. Prefer the PR side only where the current upstream
-# has conflicting edits: the patch's purpose is to carry the Friends/P2P
-# implementation, while non-conflicting upstream changes are retained.
-git merge --no-edit -X theirs pr-278/implement-p2p-multiplayer
+# Merge the PR branch while preserving current upstream definitions when the
+# old PR branch conflicts with newer migrations. Non-conflicting additions,
+# especially friends.go/signaling.go and their tests, are retained.
+if git merge --no-commit -X ours pr-278/implement-p2p-multiplayer; then
+    echo "PR merge completed without conflicts"
+else
+    echo "Resolving conflicts in favor of current upstream files"
+    git diff --name-only --diff-filter=U | while IFS= read -r file; do
+        git checkout --ours -- "$file"
+        git add -- "$file"
+    done
+fi
+
+git add -A
+git commit --no-edit
 
 # Do not let unresolved markers reach the build or produce a misleading cache
 # success marker.
@@ -34,4 +45,4 @@ if grep -R -n -E '^(<<<<<<<|=======|>>>>>>>)' --exclude-dir=.git .; then
     exit 1
 fi
 
-echo "PR merge completed without unresolved conflicts"
+echo "PR merge completed without unresolved conflict markers"

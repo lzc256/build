@@ -28,8 +28,9 @@ echo "Patching Dockerfile: $DOCKERFILE"
 
 perl -i -pe 's|^FROM debian:13\.4$|FROM debian:13.4-slim|' "$DOCKERFILE"
 
-# 2. Remove build packages from initial apt-get
-perl -i -pe 's/ gcc g\+\+ make cmake//' "$DOCKERFILE"
+# 2. Keep gcc/g++/make/cmake in the shared runtime base. The matrix extra
+# still builds python-olm in the separate python_deps stage, so removing these
+# packages from the base makes that stage fail with "make: not found".
 
 # 3. Remove openssh-client docker-cli
 perl -i -pe 's/ openssh-client docker-cli//' "$DOCKERFILE"
@@ -63,8 +64,6 @@ awk '
     # (qrcode from [messaging], defusedxml from [wecom]).
     # aiohttp is already provided by --extra matrix at 3.14.1, not pinned here.
     print "    && uv pip install qrcode==7.4.2 defusedxml==0.7.1 \\"
-    print "    && apt-get remove -y gcc g++ make cmake \\"
-    print "    && apt-get autoremove -y \\"
     print "    && rm -rf /var/lib/apt/lists/*"
     next
 }

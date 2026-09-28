@@ -75,13 +75,24 @@ jobs:
           source scripts/common.sh
           apply_all_patches open-notebook open-notebook-src
 
+      - name: Resolve Dockerfile
+        id: dockerfile
+        run: |
+          if [ -f open-notebook-src/Dockerfile.single ]; then
+            echo "path=open-notebook-src/Dockerfile.single" >> "$GITHUB_OUTPUT"
+          else
+            echo "path=open-notebook-src/Dockerfile" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Show patched Dockerfile diff
         run: |
           echo "=== Dockerfile Changes ==="
-          git -C open-notebook-src diff Dockerfile | head -150
-          echo ""
-          echo "=== Dockerfile.single Changes ==="
-          git -C open-notebook-src diff Dockerfile.single | head -150
+          git -C open-notebook-src diff -- Dockerfile | head -150
+          if [ -f open-notebook-src/Dockerfile.single ]; then
+            echo ""
+            echo "=== Dockerfile.single Changes ==="
+            git -C open-notebook-src diff -- Dockerfile.single | head -150
+          fi
 
       - name: Login to GHCR
         uses: docker/login-action@v4
@@ -97,7 +108,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: open-notebook-src
-          file: open-notebook-src/Dockerfile.single
+          file: ${{ steps.dockerfile.outputs.path }}
           push: true
           provenance: false
           tags: ${{ env.REGISTRY }}/${{ github.repository }}:open-notebook

@@ -6,9 +6,9 @@ on:
   workflow_dispatch:
     inputs:
       ref:
-        description: 'Upstream branch, tag, or commit to build (default: main)'
+        description: 'Upstream branch, tag, or commit (default: patch-compatible pinned commit)'
         required: false
-        default: main
+        default: ''
         type: string
   push:
     paths:
@@ -19,6 +19,7 @@ on:
 env:
   REGISTRY: ghcr.io
   UPSTREAM_REPO: QuantumNous/new-api
+  UPSTREAM_REF: 1ae757475f9e8dad4ffedf89b3e707756fe8ecf9
 
 jobs:
   check-update:
@@ -38,7 +39,7 @@ jobs:
         env:
           INPUT_REF: ${{ inputs.ref }}
         run: |
-          REF="${INPUT_REF:-main}"
+          REF="${INPUT_REF:-${UPSTREAM_REF}}"
           COMMIT=$(curl -fsSL "https://api.github.com/repos/${UPSTREAM_REPO}/commits/${REF}" | jq -r '.sha // empty')
           if [ -z "$COMMIT" ]; then
             echo "Failed to resolve upstream ref: $REF"
