@@ -1,22 +1,3 @@
-From 4300731e3a85b59c36c50668ee3b871275fb7565 Mon Sep 17 00:00:00 2001
-From: lzc256 <i@lzc256.com>
-Date: Fri, 17 Jul 2026 14:33:41 +0800
-Subject: [PATCH] feat: add balance script UI in channel drawer
-
-- Add BalanceScriptField component with syntax preview
-- Add balance_script to channel form schema
-- Display custom message from debug.log in balance toast
-- Support multiline output with pre-line whitespace
----
- .../drawers/channel-mutate-drawer.tsx         |   6 +
- .../sections/balance-script-section.tsx       | 107 ++++++++++++++++++
- .../components/drawers/sections/index.ts      |   1 +
- .../features/channels/lib/channel-actions.ts  |  14 ++-
- .../src/features/channels/lib/channel-form.ts |  12 ++
- web/default/src/features/channels/types.ts    |   1 +
- 6 files changed, 136 insertions(+), 5 deletions(-)
- create mode 100644 web/default/src/features/channels/components/drawers/sections/balance-script-section.tsx
-
 diff --git a/web/default/src/features/channels/components/drawers/channel-mutate-drawer.tsx b/web/default/src/features/channels/components/drawers/channel-mutate-drawer.tsx
 index f21228c..7f2855c 100644
 --- a/web/default/src/features/channels/components/drawers/channel-mutate-drawer.tsx
@@ -261,6 +242,3 @@ index 6d9b7b1..6824d44 100644
  }
  
  export interface AdvancedCustomConfig {
--- 
-2.54.0
-

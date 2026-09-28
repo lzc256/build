@@ -1,13 +1,13 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+Subject: [PATCH] fix: increase Fever items limit
+
+---
+ src/server/fever.go | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
 diff --git a/src/server/fever.go b/src/server/fever.go
-index 29a0b5b..a7dde8b 100644
 --- a/src/server/fever.go
 +++ b/src/server/fever.go
-@@ -228,7 +228,7 @@ func (s *Server) feverFaviconsHandler(c *router.Context) {
-
- // for memory pressure reasons, we only return a limited number of items
- // documented at https://github.com/DigitalDJ/tinytinyrss-fever-plugin/blob/master/fever-api.md#items
+@@ -228 +228 @@
 -const listLimit = 50
 +const listLimit = 512
-
- func (s *Server) feverItemsHandler(c *router.Context) {
- 	filter := model.ItemFilter{}

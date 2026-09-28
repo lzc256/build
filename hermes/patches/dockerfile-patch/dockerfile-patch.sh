@@ -26,22 +26,32 @@ fi
 
 echo "Patching Dockerfile: $DOCKERFILE"
 
-# 1. Base image: debian:13.4 -> debian:13.4-slim
-sed -i 's|^FROM debian:13\.4$|FROM debian:13.4-slim|' "$DOCKERFILE"
+perl -i -pe 's|^FROM debian:13\.4$|FROM debian:13.4-slim|' "$DOCKERFILE"
 
 # 2. Remove build packages from initial apt-get
-sed -i 's/ gcc g++ make cmake//' "$DOCKERFILE"
+perl -i -pe 's/ gcc g\+\+ make cmake//' "$DOCKERFILE"
 
 # 3. Remove openssh-client docker-cli
-sed -i 's/ openssh-client docker-cli//' "$DOCKERFILE"
+perl -i -pe 's/ openssh-client docker-cli//' "$DOCKERFILE"
 
 # 4. Remove web/ui-tui package.json COPY lines
-sed -i '\|^COPY web/package\.json web/$|d' "$DOCKERFILE"
-sed -i '\|^COPY ui-tui/package\.json ui-tui/$|d' "$DOCKERFILE"
-sed -i '\|^COPY ui-tui/packages/hermes-ink/|d' "$DOCKERFILE"
+perl -i -ne 'print unless /^COPY web\/package\.json web\/$/' "$DOCKERFILE"
+perl -i -ne 'print unless /^COPY ui-tui\/package\.json ui-tui\/$/' "$DOCKERFILE"
+perl -i -ne 'print unless /^COPY ui-tui\/packages\/hermes-ink\//' "$DOCKERFILE"
 
-# 5. Remove frontend build section
-sed -i '/^# ---------- Frontend build/,/^    cd \.\.\/ui-tui && npm run build$/d' "$DOCKERFILE"
+# 5. Remove the frontend build stage. The current upstream Dockerfile no
+# longer uses the old "# ---------- Frontend build" marker, so identify the
+# stage by its name and remove it up to the next FROM instruction.
+awk '
+    /^FROM .* AS frontend_build$/ { skip = 1; next }
+    skip && /^FROM / { skip = 0 }
+    !skip { print }
+' "$DOCKERFILE" > "$DOCKERFILE.tmp" && mv "$DOCKERFILE.tmp" "$DOCKERFILE"
+
+perl -i -ne 'print unless /^COPY --from=frontend_build /' "$DOCKERFILE"
+
+# Also remove the old marker-based frontend block when present in older images.
+perl -i -0pe 's/^# ---------- Frontend build.*?^    cd \.\.\/ui-tui && npm run build\n//ms' "$DOCKERFILE"
 
 # 6. Replace uv sync line: reduce extras to matrix, add build deps install + cleanup
 awk '
@@ -61,8 +71,7 @@ awk '
 { print }
 ' "$DOCKERFILE" > "$DOCKERFILE.tmp" && mv "$DOCKERFILE.tmp" "$DOCKERFILE"
 
-# Remove unused env vars
-sed -i '/^ENV HERMES_WEB_DIST=/d' "$DOCKERFILE"
-sed -i '/^ENV HERMES_TUI_DIR=/d' "$DOCKERFILE"
+perl -i -ne 'print unless /^ENV HERMES_WEB_DIST=/' "$DOCKERFILE"
+perl -i -ne 'print unless /^ENV HERMES_TUI_DIR=/' "$DOCKERFILE"
 
 echo "Dockerfile patched successfully"
