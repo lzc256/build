@@ -31,6 +31,18 @@ else
     done
 fi
 
+# The P2P implementation needs coordinated changes across the application
+# object, model, config, and service routes. The PR branch contains those
+# changes; use its versions for these files, while retaining the current
+# upstream db.go migration history to avoid duplicate V6 declarations.
+for file in config.go main.go model.go player.go services.go; do
+    git show pr-278/implement-p2p-multiplayer:"$file" > "$file"
+done
+perl -i -0pe 's/\nfunc LogInfo\(args \.\.\.any\) \{.*?\n\}\n//s; s/\nfunc LogError\(args \.\.\.any\) \{.*?\n\}\n//s' main.go
+if ! grep -q 'type V6Friendship = Friendship' db.go; then
+    perl -i -0pe 's/(type V6UserOIDCIdentity = UserOIDCIdentity\n)/$1type V6Friendship = Friendship\n/' db.go
+fi
+
 git add -A
 git commit --no-edit
 

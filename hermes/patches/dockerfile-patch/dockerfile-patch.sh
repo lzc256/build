@@ -35,24 +35,17 @@ perl -i -pe 's|^FROM debian:13\.4$|FROM debian:13.4-slim|' "$DOCKERFILE"
 # 3. Remove openssh-client docker-cli
 perl -i -pe 's/ openssh-client docker-cli//' "$DOCKERFILE"
 
-# 4. Remove web/ui-tui package.json COPY lines
-perl -i -ne 'print unless /^COPY web\/package\.json web\/$/' "$DOCKERFILE"
+# Keep web/package.json for the frontend stage; only the obsolete ui-tui
+# package inputs are removed.
 perl -i -ne 'print unless /^COPY ui-tui\/package\.json ui-tui\/$/' "$DOCKERFILE"
 perl -i -ne 'print unless /^COPY ui-tui\/packages\/hermes-ink\//' "$DOCKERFILE"
 
-# 5. Remove the frontend build stage. The current upstream Dockerfile no
-# longer uses the old "# ---------- Frontend build" marker, so identify the
-# stage by its name and remove it up to the next FROM instruction.
-awk '
-    /^FROM .* AS frontend_build$/ { skip = 1; next }
-    skip && /^FROM / { skip = 0 }
-    !skip { print }
-' "$DOCKERFILE" > "$DOCKERFILE.tmp" && mv "$DOCKERFILE.tmp" "$DOCKERFILE"
-
-perl -i -ne 'print unless /^COPY --from=frontend_build /' "$DOCKERFILE"
-
-# Also remove the old marker-based frontend block when present in older images.
-perl -i -0pe 's/^# ---------- Frontend build.*?^    cd \.\.\/ui-tui && npm run build\n//ms' "$DOCKERFILE"
+# 5. Keep the web frontend build: runtime assembly requires
+# hermes_cli/web_dist. Only remove the obsolete ui-tui workspace inputs and
+# request the current dependency helper to build the web workspace.
+perl -i -ne 'print unless /^COPY ui-tui\/package\.json ui-tui\/$/' "$DOCKERFILE"
+perl -i -ne 'print unless /^COPY ui-tui\/packages\/hermes-ink\//' "$DOCKERFILE"
+perl -i -pe 's/--workspace ui-tui --workspace web/--workspace web/' "$DOCKERFILE"
 
 # 6. Replace uv sync line: reduce extras to matrix, add build deps install + cleanup
 awk '
@@ -70,7 +63,7 @@ awk '
 { print }
 ' "$DOCKERFILE" > "$DOCKERFILE.tmp" && mv "$DOCKERFILE.tmp" "$DOCKERFILE"
 
-perl -i -ne 'print unless /^ENV HERMES_WEB_DIST=/' "$DOCKERFILE"
-perl -i -ne 'print unless /^ENV HERMES_TUI_DIR=/' "$DOCKERFILE"
+# Keep frontend environment variables: the runtime assembler and launcher use
+# them even when the TUI source workspace is omitted.
 
 echo "Dockerfile patched successfully"
