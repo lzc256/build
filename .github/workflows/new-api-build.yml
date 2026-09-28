@@ -23,9 +23,13 @@ jobs:
   check-update:
     runs-on: ubuntu-latest
     outputs:
-      should_build: ${{ steps.compare.outputs.should_build }}
+      should_build: ${{ steps.check.outputs.should_build }}
+      cache_key: ${{ steps.check.outputs.cache_key }}
       tag: ${{ steps.tag.outputs.tag }}
     steps:
+      - name: Checkout framework
+        uses: actions/checkout@v4
+
       - name: Get latest upstream release/tag
         id: tag
         run: |
@@ -47,34 +51,13 @@ jobs:
             exit 0
           fi
           echo "tag=$TAG" >> $GITHUB_OUTPUT
-          echo "combined_key=newapi-${TAG}" >> $GITHUB_OUTPUT
           echo "Latest upstream tag: $TAG"
 
-      - name: Cache check
-        if: github.event_name != 'push' && steps.tag.outputs.tag != ''
-        id: cache
-        uses: actions/cache@v4
+      - name: Check if build needed
+        id: check
+        uses: ./.github/workflows/utils/check-update
         with:
-          path: .build_success
-          key: ${{ steps.tag.outputs.combined_key }}
-
-      - name: Compare
-        id: compare
-        run: |
-          if [ -z "${{ steps.tag.outputs.tag }}" ]; then
-            echo "No tag found. Skipping."
-            echo "should_build=false" >> $GITHUB_OUTPUT
-          elif [ "${{ github.event_name }}" = "push" ]; then
-            echo "Push triggered. Building."
-            echo "should_build=true" >> $GITHUB_OUTPUT
-          elif [ -f .build_success ]; then
-            echo "Already built for ${{ steps.tag.outputs.tag }}. Skipping."
-            echo "should_build=false" >> $GITHUB_OUTPUT
-          else
-            echo "New tag ${{ steps.tag.outputs.tag }} detected. Building."
-            echo "should_build=true" >> $GITHUB_OUTPUT
-            echo "done" > .build_success
-          fi
+          cache_key: newapi-v2-${{ steps.tag.outputs.tag }}-${{ github.sha }}
 
   build:
     needs: check-update
@@ -154,6 +137,12 @@ jobs:
             ${{ env.REGISTRY }}/${{ github.repository }}:newapi-${{ needs.check-update.outputs.tag }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Commit successful build
+        if: success()
+        uses: ./.github/workflows/utils/commit-successful-update
+        with:
+          cache_key: ${{ needs.check-update.outputs.cache_key }}
 
       - name: Summary
         run: |

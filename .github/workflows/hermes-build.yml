@@ -18,9 +18,13 @@ jobs:
   check-update:
     runs-on: ubuntu-latest
     outputs:
-      should_build: ${{ steps.compare.outputs.should_build }}
+      should_build: ${{ steps.check.outputs.should_build }}
+      cache_key: ${{ steps.check.outputs.cache_key }}
       digest: ${{ steps.digest.outputs.digest }}
     steps:
+      - name: Checkout framework
+        uses: actions/checkout@v4
+
       - name: Get upstream digest
         id: digest
         run: |
@@ -34,31 +38,13 @@ jobs:
           DIGEST_HASH=$(echo "$DIGEST" | sed 's/sha256://')
           echo "digest=$DIGEST" >> $GITHUB_OUTPUT
           echo "digest_hash=$DIGEST_HASH" >> $GITHUB_OUTPUT
-          echo "combined_key=hermes-${DIGEST_HASH}" >> $GITHUB_OUTPUT
           echo "Upstream amd64 digest: $DIGEST"
 
-      - name: Cache check
-        if: github.event_name != 'push'
-        id: cache
-        uses: actions/cache@v4
+      - name: Check if build needed
+        id: check
+        uses: ./.github/workflows/utils/check-update
         with:
-          path: .build_success
-          key: ${{ steps.digest.outputs.combined_key }}
-
-      - name: Compare
-        id: compare
-        run: |
-          if [ "${{ github.event_name }}" = "push" ]; then
-            echo "Push triggered. Building."
-            echo "should_build=true" >> $GITHUB_OUTPUT
-          elif [ -f .build_success ]; then
-            echo "No updates detected. Skipping."
-            echo "should_build=false" >> $GITHUB_OUTPUT
-          else
-            echo "Updates detected. Proceeding to build."
-            echo "should_build=true" >> $GITHUB_OUTPUT
-            echo "done" > .build_success
-          fi
+          cache_key: hermes-v2-${{ steps.digest.outputs.digest_hash }}-${{ github.sha }}
 
   build:
     needs: check-update
@@ -107,6 +93,12 @@ jobs:
           tags: ${{ env.REGISTRY }}/${{ github.repository }}:hermes
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Commit successful build
+        if: success()
+        uses: ./.github/workflows/utils/commit-successful-update
+        with:
+          cache_key: ${{ needs.check-update.outputs.cache_key }}
 
       - name: Summary
         run: |

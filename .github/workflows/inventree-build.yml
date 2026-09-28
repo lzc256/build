@@ -25,10 +25,14 @@ jobs:
   check-update:
     runs-on: ubuntu-latest
     outputs:
-      should_build: ${{ steps.compare.outputs.should_build }}
+      should_build: ${{ steps.check.outputs.should_build }}
+      cache_key: ${{ steps.check.outputs.cache_key }}
       commit: ${{ steps.commit.outputs.commit }}
       version: ${{ steps.version.outputs.version }}
     steps:
+      - name: Checkout framework
+        uses: actions/checkout@v4
+
       - name: Get upstream commit and version
         id: commit
         run: |
@@ -41,7 +45,6 @@ jobs:
           SHORT_COMMIT=$(echo "$COMMIT" | cut -c1-7)
           echo "commit=$COMMIT" >> $GITHUB_OUTPUT
           echo "short_commit=$SHORT_COMMIT" >> $GITHUB_OUTPUT
-          echo "combined_key=inventree-${SHORT_COMMIT}" >> $GITHUB_OUTPUT
           echo "Upstream commit: $COMMIT"
 
       - name: Get version from latest release
@@ -56,28 +59,11 @@ jobs:
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "Version: $VERSION"
 
-      - name: Cache check
-        if: github.event_name != 'push'
-        id: cache
-        uses: actions/cache@v4
+      - name: Check if build needed
+        id: check
+        uses: ./.github/workflows/utils/check-update
         with:
-          path: .build_success
-          key: ${{ steps.commit.outputs.combined_key }}
-
-      - name: Compare
-        id: compare
-        run: |
-          if [ "${{ github.event_name }}" = "push" ]; then
-            echo "Push triggered. Building."
-            echo "should_build=true" >> $GITHUB_OUTPUT
-          elif [ -f .build_success ]; then
-            echo "No updates detected. Skipping."
-            echo "should_build=false" >> $GITHUB_OUTPUT
-          else
-            echo "Updates detected. Proceeding to build."
-            echo "should_build=true" >> $GITHUB_OUTPUT
-            echo "done" > .build_success
-          fi
+          cache_key: inventree-v2-${{ steps.commit.outputs.commit }}-${{ inputs.no_s3 || '1' }}-${{ github.sha }}
 
   build:
     needs: check-update
@@ -135,6 +121,12 @@ jobs:
             ${{ env.REGISTRY }}/${{ github.repository }}:inventree-${{ needs.check-update.outputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Commit successful build
+        if: success()
+        uses: ./.github/workflows/utils/commit-successful-update
+        with:
+          cache_key: ${{ needs.check-update.outputs.cache_key }}
 
       - name: Summary
         run: |

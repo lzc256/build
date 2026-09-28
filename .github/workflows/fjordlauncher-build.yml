@@ -52,10 +52,14 @@ jobs:
   check-update:
     runs-on: ubuntu-latest
     outputs:
-      should_build: ${{ steps.compare.outputs.should_build }}
+      should_build: ${{ steps.check.outputs.should_build }}
+      cache_key: ${{ steps.check.outputs.cache_key }}
       upstream_tag: ${{ steps.hashes.outputs.upstream_tag }}
       upstream_sha: ${{ steps.hashes.outputs.upstream_sha }}
     steps:
+      - name: Checkout framework
+        uses: actions/checkout@v4
+
       - name: Get Latest Release
         id: hashes
         run: |
@@ -72,34 +76,14 @@ jobs:
 
           echo "upstream_tag=$UPSTREAM_TAG" >> $GITHUB_OUTPUT
           echo "upstream_sha=$UPSTREAM_SHA" >> $GITHUB_OUTPUT
-          echo "combined_key=fjordlauncher-${UPSTREAM_TAG}" >> $GITHUB_OUTPUT
           echo "Upstream Release: $UPSTREAM_TAG (SHA: $UPSTREAM_SHA)"
 
-      - name: Cache Check
-        if: github.event_name != 'workflow_dispatch' && github.event_name != 'push'
-        id: cache_check
-        uses: actions/cache@v4
+      - name: Check if build needed
+        id: check
+        uses: ./.github/workflows/utils/check-update
         with:
-          path: build_status.txt
-          key: ${{ steps.hashes.outputs.combined_key }}
-
-      - name: Compare
-        id: compare
-        run: |
-          if [ "${{ github.event_name }}" = "push" ]; then
-            echo "Push triggered. Building."
-            echo "should_build=true" >> $GITHUB_OUTPUT
-          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "Manual dispatch triggered. Building."
-            echo "should_build=true" >> $GITHUB_OUTPUT
-          elif [ -f build_status.txt ]; then
-            echo "No updates detected. Skipping."
-            echo "should_build=false" >> $GITHUB_OUTPUT
-          else
-            echo "New release detected. Proceeding to build."
-            echo "should_build=true" >> $GITHUB_OUTPUT
-            echo "done" > build_status.txt
-          fi
+          cache_key: fjordlauncher-v2-${{ steps.hashes.outputs.upstream_tag }}-${{ github.sha }}
+          skip_cache: ${{ github.event_name == 'workflow_dispatch' }}
 
   build:
     needs: check-update
@@ -443,6 +427,9 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Checkout framework
+        uses: actions/checkout@v4
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -488,4 +475,10 @@ jobs:
           echo "## Release Created"
           echo "Release: fjordlauncher-${{ needs.check-update.outputs.upstream_tag }}"
           echo "Assets uploaded: $(ls release-assets/ | wc -l)"
+
+      - name: Commit successful build
+        if: success()
+        uses: ./.github/workflows/utils/commit-successful-update
+        with:
+          cache_key: ${{ needs.check-update.outputs.cache_key }}
 

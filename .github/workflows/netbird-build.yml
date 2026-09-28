@@ -17,9 +17,13 @@ jobs:
   check-update:
     runs-on: ubuntu-latest
     outputs:
-      should_build: ${{ steps.compare.outputs.should_build }}
+      should_build: ${{ steps.check.outputs.should_build }}
+      cache_key: ${{ steps.check.outputs.cache_key }}
       netbird_sha: ${{ steps.hashes.outputs.netbird_sha }}
     steps:
+      - name: Checkout framework
+        uses: actions/checkout@v4
+
       - name: Get Latest Hashes
         id: hashes
         run: |
@@ -27,30 +31,13 @@ jobs:
           ANET_SHA=$(curl -s https://api.github.com/repos/lzc256/anet/commits/android-build | jq -r .sha)
           
           echo "netbird_sha=$NETBIRD_SHA" >> $GITHUB_OUTPUT
-          echo "combined_key=build-${NETBIRD_SHA}-${ANET_SHA}" >> $GITHUB_OUTPUT
+          echo "anet_sha=$ANET_SHA" >> $GITHUB_OUTPUT
 
-      - name: Cache Check
-        if: github.event_name != 'push'
-        id: cache_check
-        uses: actions/cache@v4
+      - name: Check if build needed
+        id: check
+        uses: ./.github/workflows/utils/check-update
         with:
-          path: build_status.txt
-          key: ${{ steps.hashes.outputs.combined_key }}
-
-      - name: Compare
-        id: compare
-        run: |
-          if [ "${{ github.event_name }}" = "push" ]; then
-            echo "Push triggered. Building."
-            echo "should_build=true" >> $GITHUB_OUTPUT
-          elif [ -f build_status.txt ]; then
-            echo "No updates detected. Skipping."
-            echo "should_build=false" >> $GITHUB_OUTPUT
-          else
-            echo "Updates detected. Proceeding to build."
-            echo "should_build=true" >> $GITHUB_OUTPUT
-            echo "done" > build_status.txt
-          fi
+          cache_key: netbird-v2-${{ steps.hashes.outputs.netbird_sha }}-${{ steps.hashes.outputs.anet_sha }}-${{ github.sha }}
 
   build:
     needs: check-update
@@ -98,3 +85,9 @@ jobs:
           name: netbird-anet-linux-arm64-${{ needs.check-update.outputs.netbird_sha }}
           path: netbird-src/netbird-anet-linux-arm64
           retention-days: 90
+
+      - name: Commit successful build
+        if: success()
+        uses: ./.github/workflows/utils/commit-successful-update
+        with:
+          cache_key: ${{ needs.check-update.outputs.cache_key }}

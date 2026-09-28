@@ -57,7 +57,7 @@ jobs:
         id: check
         uses: ./.github/workflows/utils/check-update
         with:
-          cache_key: cmd2api-v2-${{ steps.upstream.outputs.commit }}
+          cache_key: cmd2api-v2-${{ steps.upstream.outputs.commit }}-${{ github.sha }}
 
   build:
     needs: check-update

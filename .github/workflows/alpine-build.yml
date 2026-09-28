@@ -41,7 +41,7 @@ jobs:
         id: check
         uses: ./.build/.github/workflows/utils/check-update
         with:
-          cache_key: alpine-${{ steps.digest.outputs.digest }}
+          cache_key: alpine-v2-${{ steps.digest.outputs.digest }}-${{ github.sha }}
 
   build:
     needs: check-update

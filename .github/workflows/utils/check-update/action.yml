@@ -5,6 +5,10 @@ inputs:
   cache_key:
     description: 'Cache key identifying the current upstream state (e.g. alpine-<digest>, newapi-<tag>, yarr-<short-commit>).'
     required: true
+  skip_cache:
+    description: 'Skip cache restore for workflows that always rebuild on manual dispatch.'
+    required: false
+    default: 'false'
 
 outputs:
   should_build:
@@ -18,7 +22,7 @@ runs:
   using: 'composite'
   steps:
     - name: Cache lookup
-      if: github.event_name != 'push'
+      if: github.event_name != 'push' && inputs.skip_cache != 'true'
       id: cache
       uses: actions/cache/restore@v4
       with:
