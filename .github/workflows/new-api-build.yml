@@ -81,6 +81,11 @@ jobs:
           source scripts/common.sh
           apply_patch balance-script new-api-src
 
+      - name: Apply classic frontend build workaround
+        run: |
+          source scripts/common.sh
+          apply_patch classic-build new-api-src
+
       - name: Apply use-default-model patch
         run: |
           source scripts/common.sh
