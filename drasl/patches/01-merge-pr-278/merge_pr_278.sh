@@ -63,11 +63,16 @@ if ! grep -q 'type signalingConfig struct' config.go; then
     perl -i -0pe 's/(type Config struct \{)/type signalingConfig struct {\n\tEnable bool\n\tTURNListenAddress string\n\tTURNPublicIP string\n\tTURNAuthSecret string\n}\n\n$1/' config.go
     perl -i -0pe 's/(type Config struct \{\n)/$1\tP2P signalingConfig\n/' config.go
 fi
-# Current upstream already defines these aliases. Remove any copies brought
-# by the old PR merge and leave exactly one declaration of each.
-perl -i -ne 'print unless /^type V6(User|Player|Client|UserOIDCIdentity) = /' db.go
-perl -i -0pe 's/(type V5UserOIDCIdentity = V6UserOIDCIdentity\n)/$1type V6User = User\ntype V6Player = Player\ntype V6Client = Client\ntype V6UserOIDCIdentity = UserOIDCIdentity\n/' db.go
+# Current upstream already defines these aliases. Remove every copy brought
+# by either side of the merge, then append one canonical set.
+perl -i -ne 'print unless /^\s*type V6(User|Player|Client|UserOIDCIdentity) = /' db.go
+cat >> db.go <<'EOF'
 
+type V6User = User
+type V6Player = Player
+type V6Client = Client
+type V6UserOIDCIdentity = UserOIDCIdentity
+EOF
 
 git add -A
 git commit --no-edit
