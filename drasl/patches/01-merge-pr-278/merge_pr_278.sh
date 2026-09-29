@@ -39,9 +39,10 @@ fi
 if ! grep -q 'FriendsETagStore: NewFriendsETagStore' main.go; then
     perl -i -0pe 's/(HeartbeatLruList:\s+heartbeatLruList,\n)/$1\t\tPresenceStore: NewPresenceStore(),\n\t\tFriendsETagStore: NewFriendsETagStore(),\n\t\tFriendshipLocks: newFriendshipLocks(),\n\t\tSignalingHub: NewSignalingHub(),\n/' main.go
 fi
-if ! grep -q 'Pmid string.*gorm' model.go; then
-    perl -i -0pe 's/(type Client struct \{\n)/$1\tPmid string `gorm:"-"`\n/' model.go
-fi
+# Always normalize the non-persisted client token field. A simple global grep
+# is insufficient because Pmid also appears in JWT claims.
+perl -i -ne 'print unless /Pmid string `gorm/' model.go
+perl -i -0pe 's/(type Client struct \{\n)/$1\tPmid string `gorm:"-"`\n/' model.go
 if ! grep -q 'FriendsEnabled' model.go; then
     perl -i -0pe 's/(Clients\s+\[\]Client `gorm:"constraint:OnDelete:CASCADE"`\n)/$1\tFriendsEnabled bool\n\tAcceptInvitesEnabled bool\n/' model.go
 fi
