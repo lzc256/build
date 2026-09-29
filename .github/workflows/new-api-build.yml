@@ -85,6 +85,8 @@ jobs:
         run: |
           source scripts/common.sh
           apply_patch classic-build new-api-src
+          perl -i -pe 's|^RUN cd classic.*$|COPY --from=builder /build/web/default/dist ./classic/dist|' new-api-src/Dockerfile
+          grep -q '^COPY --from=builder /build/web/default/dist ./classic/dist$' new-api-src/Dockerfile
 
       - name: Apply use-default-model patch
         run: |
