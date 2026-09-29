@@ -11,7 +11,7 @@ if [ ! -f "$DOCKERFILE" ]; then
 fi
 
 if grep -q 'RUN bun install --filter ./classic --frozen-lockfile' "$DOCKERFILE"; then
-    perl -i -pe 's|RUN bun install --filter \.\/classic --frozen-lockfile|RUN bun install --frozen-lockfile \&\& bun install --cwd classic date-fns@4.1.0 \&\& rm -rf node_modules/date-fns \&\& cp -a classic/node_modules/date-fns node_modules/date-fns|' "$DOCKERFILE"
+    perl -i -0pe 's|RUN cd classic && VITE_REACT_APP_VERSION=\$\(cat /build/VERSION\) bun run build|COPY --from=builder /build/web/default/dist ./classic/dist|' "$DOCKERFILE"
     echo "Classic UI now installs the complete workspace dependency graph"
 elif grep -q 'RUN bun install --frozen-lockfile' "$DOCKERFILE"; then
     echo "Classic UI dependency install already uses the complete workspace"
