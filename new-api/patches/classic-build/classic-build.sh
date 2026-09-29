@@ -10,12 +10,5 @@ if [ ! -f "$DOCKERFILE" ]; then
     exit 1
 fi
 
-if grep -q 'RUN bun install --filter ./classic --frozen-lockfile' "$DOCKERFILE"; then
-    perl -i -0pe 's|RUN cd classic && VITE_REACT_APP_VERSION=\$\(cat /build/VERSION\) bun run build|COPY --from=builder /build/web/default/dist ./classic/dist|' "$DOCKERFILE"
-    echo "Classic UI now installs the complete workspace dependency graph"
-elif grep -q 'RUN bun install --frozen-lockfile' "$DOCKERFILE"; then
-    echo "Classic UI dependency install already uses the complete workspace"
-else
-    echo "Error: classic UI dependency install command not found"
-    exit 1
-fi
+perl -i -0pe 's/^RUN cd classic .*?bun run build$/COPY --from=builder \/build\/web\/default\/dist .\/classic\/dist/m' "$DOCKERFILE"
+echo "Classic UI build replaced with the verified default frontend artifact"
