@@ -10,5 +10,5 @@ if [ ! -f "$DOCKERFILE" ]; then
     exit 1
 fi
 
-perl -i -0pe 's/^RUN cd classic .*?bun run build$/COPY --from=builder \/build\/web\/default\/dist .\/classic\/dist/m' "$DOCKERFILE"
+perl -i -pe 's|^RUN cd classic.*$|COPY --from=builder /build/web/default/dist ./classic/dist|' "$DOCKERFILE"
 echo "Classic UI build replaced with the verified default frontend artifact"
