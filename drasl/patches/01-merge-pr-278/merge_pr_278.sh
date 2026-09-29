@@ -39,7 +39,7 @@ fi
 if ! grep -q 'FriendsETagStore: NewFriendsETagStore' main.go; then
     perl -i -0pe 's/(HeartbeatLruList:\s+heartbeatLruList,\n)/$1\t\tPresenceStore: NewPresenceStore(),\n\t\tFriendsETagStore: NewFriendsETagStore(),\n\t\tFriendshipLocks: newFriendshipLocks(),\n\t\tSignalingHub: NewSignalingHub(),\n/' main.go
 fi
-if ! grep -q 'Pmid string' model.go; then
+if ! grep -q 'Pmid string.*gorm' model.go; then
     perl -i -0pe 's/(type Client struct \{\n)/$1\tPmid string `gorm:"-"`\n/' model.go
 fi
 if ! grep -q 'FriendsEnabled' model.go; then
