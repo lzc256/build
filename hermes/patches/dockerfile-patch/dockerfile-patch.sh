@@ -35,17 +35,11 @@ perl -i -pe 's|^FROM debian:13\.4$|FROM debian:13.4-slim|' "$DOCKERFILE"
 # 3. Remove openssh-client docker-cli
 perl -i -pe 's/ openssh-client docker-cli//' "$DOCKERFILE"
 
-# Keep web/package.json for the frontend stage; only the obsolete ui-tui
-# package inputs are removed.
-perl -i -ne 'print unless /^COPY ui-tui\/package\.json ui-tui\/$/' "$DOCKERFILE"
-perl -i -ne 'print unless /^COPY ui-tui\/packages\/hermes-ink\//' "$DOCKERFILE"
+# Keep all frontend workspace inputs. The current Dockerfile still builds both
+# the TUI and web bundles; removing ui-tui makes tui.mjs lose its prepared
+# esbuild dependency.
 
-# 5. Keep the web frontend build: runtime assembly requires
-# hermes_cli/web_dist. Only remove the obsolete ui-tui workspace inputs and
-# request the current dependency helper to build the web workspace.
-perl -i -ne 'print unless /^COPY ui-tui\/package\.json ui-tui\/$/' "$DOCKERFILE"
-perl -i -ne 'print unless /^COPY ui-tui\/packages\/hermes-ink\//' "$DOCKERFILE"
-perl -i -pe 's/--workspace ui-tui --workspace web/--workspace web/' "$DOCKERFILE"
+# 5. Keep both frontend workspaces and their build commands.
 
 # 6. Replace uv sync line: reduce extras to matrix, add build deps install + cleanup
 awk '
@@ -63,7 +57,7 @@ awk '
 { print }
 ' "$DOCKERFILE" > "$DOCKERFILE.tmp" && mv "$DOCKERFILE.tmp" "$DOCKERFILE"
 
-# Keep frontend environment variables: the runtime assembler and launcher use
-# them even when the TUI source workspace is omitted.
+# Keep frontend environment variables used by the runtime launcher and
+# assembler.
 
 echo "Dockerfile patched successfully"
