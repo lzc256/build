@@ -42,6 +42,7 @@ jobs:
         uses: ./.build/.github/workflows/utils/check-update
         with:
           cache_key: alpine-v2-${{ steps.digest.outputs.digest }}-${{ github.sha }}
+          skip_cache: ${{ github.event_name == 'workflow_dispatch' }}
 
   build:
     needs: check-update

@@ -12,16 +12,12 @@ jobs:
   cleanup:
     runs-on: ubuntu-latest
     steps:
-      - name: Delete untagged images
-        uses: actions/delete-package-versions@v5
+      - name: Delete old unreferenced images
+        uses: snok/container-retention-policy@v3.1.0
         with:
-          package-name: build
-          package-type: container
-          delete-only-untagged-versions: true
-          min-versions-to-keep: 3
+          account: user
           token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Summary
-        run: |
-          echo "## Image Cleanup Summary"
-          echo "Deleted untagged images (tagged versions are preserved)"
+          image-names: build
+          tag-selection: untagged
+          cut-off: 1d
+          dry-run: false
