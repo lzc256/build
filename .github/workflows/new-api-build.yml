@@ -88,6 +88,11 @@ jobs:
           perl -i -pe 's|^RUN cd classic.*$|COPY --from=builder /build/web/default/dist ./classic/dist|' new-api-src/Dockerfile
           grep -q '^COPY --from=builder /build/web/default/dist ./classic/dist$' new-api-src/Dockerfile
 
+      - name: Apply self-use default price patch
+        run: |
+          source scripts/common.sh
+          apply_patch self-use-default-price new-api-src
+
       - name: Apply use-default-model patch
         run: |
           source scripts/common.sh

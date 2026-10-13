@@ -1,0 +1,14 @@
+Subject: [PATCH] Default unset model ratio to USD 1/M tokens
+
+diff --git a/setting/ratio_setting/model_ratio.go b/setting/ratio_setting/model_ratio.go
+--- a/setting/ratio_setting/model_ratio.go
++++ b/setting/ratio_setting/model_ratio.go
+@@ -400,7 +400,7 @@ func GetModelRatio(name string) (float64, bool, string) {
+ 			}
+ 			//return 0, true, name
+ 		}
+-		return 37.5, operation_setting.SelfUseModeEnabled, name
++		return 0.5, operation_setting.SelfUseModeEnabled, name
+ 	}
+ 	return ratio, true, name
+ }
