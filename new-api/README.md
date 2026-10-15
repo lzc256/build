@@ -15,6 +15,9 @@ The date describes the source commit, not when the image was built. A runtime
 - `balance-script`: Python channel balance scripts, state persistence and result messages.
 - `self-use-default-price`: use model ratio 0.5 for unconfigured models in self-use mode.
 - `billing-header-filter`: remove Claude Code billing-header markers from forwarded requests.
+- `oauth-step-up`: offer linked OAuth for sensitive browser actions even with a password,
+  Passkey or 2FA enrolled; prefer it in the dialog. Login second-factor policy,
+  provider/account binding checks and single-use operation proofs stay in place.
 - `build-version`: embed the checked-out source commit date and hash.
 
 Protocol conversion and model configuration use the upstream implementation.

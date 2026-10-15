@@ -96,6 +96,11 @@ jobs:
       #     source scripts/common.sh
       #     apply_patch zero-completion-compact-error new-api-src
 
+      - name: Allow linked OAuth for security verification
+        run: |
+          source scripts/common.sh
+          apply_patch oauth-step-up new-api-src
+
       - name: Stamp upstream build version
         id: version
         run: |

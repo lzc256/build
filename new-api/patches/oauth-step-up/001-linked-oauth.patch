@@ -1,0 +1,167 @@
+diff --git a/controller/oauth_step_up_test.go b/controller/oauth_step_up_test.go
+new file mode 100644
+index 000000000..74d275620
+--- /dev/null
++++ b/controller/oauth_step_up_test.go
+@@ -0,0 +1,75 @@
++package controller
++
++import (
++	"testing"
++
++	"github.com/QuantumNous/new-api/common"
++	"github.com/QuantumNous/new-api/model"
++	"github.com/QuantumNous/new-api/oauth"
++	"github.com/QuantumNous/new-api/service"
++	"github.com/stretchr/testify/require"
++)
++
++func TestLinkedOAuthStepUpAlongsideExistingCredentials(t *testing.T) {
++	for _, credential := range []string{"password", "password disabled", "passkey", "2fa"} {
++		t.Run(credential, func(t *testing.T) {
++			user, identity := setupSecurityEnrollmentTest(t)
++			require.NoError(t, model.DB.Model(user).Updates(map[string]any{"github_id": "linked-user", "role": common.RoleRootUser}).Error)
++			require.NoError(t, model.PublishUserAuthCache(user.Id))
++			if credential == "passkey" {
++				newSecurityLoginPasskey(t, user.Id)
++			}
++			if credential == "2fa" {
++				require.NoError(t, model.DB.Create(&model.TwoFA{UserId: user.Id, Secret: "JBSWY3DPEHPK3PXP", IsEnabled: true}).Error)
++			}
++			if credential == "password disabled" {
++				previous := common.PasswordLoginEnabled
++				common.PasswordLoginEnabled = false
++				t.Cleanup(func() { common.PasswordLoginEnabled = previous })
++			}
++			provider := &enrollmentOAuthProvider{externalID: "linked-user"}
++			oauth.Register("step-up-oauth", provider)
++			t.Cleanup(func() { oauth.Unregister("step-up-oauth") })
++			for _, operation := range []service.VerificationOperation{
++				{Scope: service.VerificationScopePasskeyRegister},
++				{Scope: service.VerificationScopeChannelKeyRead, Context: []byte(`{"channel_id":1}`)},
++				{Scope: service.VerificationScopeAdminUserManage, Context: []byte(`{"user_id":2,"action":"disable"}`)},
++			} {
++				requirements, err := service.RequireVerificationMethod(identity, operation.Scope, service.VerificationMethodOAuth)
++				require.NoError(t, err)
++				require.NotEmpty(t, requirements.OAuthProviders)
++				if credential != "password disabled" && (credential != "password" || operation.Scope != service.VerificationScopeChannelKeyRead) {
++					_, err = service.RequireVerificationMethod(identity, operation.Scope, credential)
++					require.NoError(t, err)
++				}
++				flow, err := service.StartOAuthVerification(identity, operation, "step-up-oauth")
++				require.NoError(t, err)
++				_, err = service.FinishOAuthVerification(identity, "step-up-oauth", "wrong-user", flow)
++				require.ErrorIs(t, err, service.ErrOAuthAccountMismatch)
++				proof, err := service.FinishOAuthVerification(identity, "step-up-oauth", "linked-user", flow)
++				require.NoError(t, err)
++				_, err = service.ConsumeOperationProof(proof.ProofToken, identity, operation)
++				require.NoError(t, err)
++				_, err = service.ConsumeOperationProof(proof.ProofToken, identity, operation)
++				require.ErrorIs(t, err, service.ErrProofConsumed)
++			}
++			// Binding/provider availability is checked again before issuing a proof.
++			flow, err := service.StartOAuthVerification(identity, service.VerificationOperation{Scope: service.VerificationScopePasskeyRegister}, "step-up-oauth")
++			require.NoError(t, err)
++			provider.disabled = true
++			_, err = service.FinishOAuthVerification(identity, "step-up-oauth", "linked-user", flow)
++			require.Error(t, err)
++			// Login still requires its original second factor, not an OAuth substitute.
++			_, err = service.GetVerificationRequirements(identity, service.VerificationScopeLogin)
++			require.ErrorIs(t, err, service.ErrProofScope)
++		})
++	}
++}
++
++func TestLinkedOAuthStepUpOmitsUnavailableAlternative(t *testing.T) {
++	_, identity := setupSecurityEnrollmentTest(t)
++	requirements, err := service.GetVerificationRequirements(identity, service.VerificationScopePasskeyRegister)
++	require.NoError(t, err)
++	require.Len(t, requirements.Methods, 1)
++	require.Equal(t, service.VerificationMethodPassword, requirements.Methods[0].Method)
++}
+diff --git a/service/security_verification.go b/service/security_verification.go
+index 2270b4d5d..49487f427 100644
+--- a/service/security_verification.go
++++ b/service/security_verification.go
+@@ -308,8 +308,8 @@ type VerificationRequirements struct {
+ 	PasswordEncryptionEnabled bool                        `json:"password_encryption_enabled"`
+ }
+ 
+-// securityVerificationPolicy is the only operation-to-method policy. Device
+-// support and disabled providers never turn an enrolled factor into an absent one.
++// securityVerificationPolicy selects the enrolled-factor policy. Browser
++// operations can additionally verify an existing OAuth binding below.
+ func securityVerificationPolicy(scope string, state model.UserVerificationState) ([]VerificationMethodOption, error) {
+ 	var methods []string
+ 	if state.HasTwoFA {
+@@ -388,6 +388,11 @@ func GetVerificationRequirements(identity AuthIdentity, scope string) (*Verifica
+ 	if err != nil {
+ 		return nil, err
+ 	}
++	// Offer bound OAuth accounts alongside enrolled factors for sensitive actions.
++	// Login challenges keep their existing second-factor policy.
++	if !slices.ContainsFunc(methods, func(option VerificationMethodOption) bool { return option.Method == VerificationMethodOAuth }) {
++		methods = append(methods, VerificationMethodOption{Method: VerificationMethodOAuth, Available: true})
++	}
+ 	requirements := &VerificationRequirements{Scope: scope, Methods: methods, OAuthProviders: []VerificationOAuthProvider{}, PasswordEncryptionEnabled: common.PasswordLoginEncryptionEnabled}
+ 	for i := range methods {
+ 		if methods[i].Method == VerificationMethodPassword && !common.PasswordLoginEnabled {
+@@ -425,6 +430,13 @@ func GetVerificationRequirements(identity AuthIdentity, scope string) (*Verifica
+ 			}
+ 		}
+ 	}
++	// Do not add an unusable OAuth tab for accounts without a linked provider
++	// or for scoped access tokens. Preserve the original sole-method error.
++	if len(methods) > 1 {
++		requirements.Methods = slices.DeleteFunc(methods, func(option VerificationMethodOption) bool {
++			return option.Method == VerificationMethodOAuth && !option.Available
++		})
++	}
+ 	return requirements, nil
+ }
+ 
+diff --git a/web/src/features/auth/secure-verification/__tests__/verification-flow.test.tsx b/web/src/features/auth/secure-verification/__tests__/verification-flow.test.tsx
+index c2af726df..75e4455de 100644
+--- a/web/src/features/auth/secure-verification/__tests__/verification-flow.test.tsx
++++ b/web/src/features/auth/secure-verification/__tests__/verification-flow.test.tsx
+@@ -569,3 +569,26 @@ it('verifies with the clicked provider when several linked accounts are availabl
+     screen.getByRole('button', { name: 'Continue with Linux DO' })
+   ).toBeDisabled()
+ })
++
++
++it('prefers linked OAuth over Passkey and password for an operation and keeps the alternatives', async () => {
++  vi.stubGlobal('PublicKeyCredential', class {})
++  vi.spyOn(api, 'get').mockResolvedValue({
++    data: { success: true, data: {
++      ...linkedAccountRequirements,
++      methods: [
++        { method: 'passkey', available: true },
++        { method: 'password', available: true },
++        { method: 'oauth', available: true },
++      ],
++    } },
++  })
++  const user = userEvent.setup()
++  render(<Harness operation={{ scope: '2fa.setup' }} onResult={vi.fn()} />)
++  await user.click(screen.getByText('Protected action'))
++  expect(await screen.findByRole('tab', { name: 'Linked account' })).toHaveAttribute('aria-selected', 'true')
++  expect(screen.getByRole('button', { name: 'Continue with Linux DO' })).toBeVisible()
++  expect(screen.getByRole('tab', { name: 'Passkey' })).toBeEnabled()
++  await user.click(screen.getByRole('tab', { name: 'Password' }))
++  expect(screen.getByLabelText('Password', { selector: 'input' })).toBeVisible()
++})
+diff --git a/web/src/features/auth/secure-verification/hooks/use-secure-verification.ts b/web/src/features/auth/secure-verification/hooks/use-secure-verification.ts
+index 12e0a4a44..b3a92b233 100644
+--- a/web/src/features/auth/secure-verification/hooks/use-secure-verification.ts
++++ b/web/src/features/auth/secure-verification/hooks/use-secure-verification.ts
+@@ -62,6 +62,9 @@ function verificationReducer(
+         (option) => option.available
+       )
+       const preferred =
++        (state.request.scope !== 'auth.login'
++          ? methods.find((option) => option.method === 'oauth')
++          : undefined) ??
+         methods.find((option) => option.method === 'passkey') ?? methods[0]
+       let input: VerificationInput | null = null
+       switch (preferred?.method) {
