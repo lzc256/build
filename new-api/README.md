@@ -10,6 +10,16 @@ the frontend and backend, including the `/api/status` version displayed by the U
 The date describes the source commit, not when the image was built. A runtime
 `VERSION` environment variable overrides the embedded backend version.
 
+# Active custom patches
+
+- `balance-script`: Python channel balance scripts, state persistence and result messages.
+- `self-use-default-price`: use model ratio 0.5 for unconfigured models in self-use mode.
+- `billing-header-filter`: remove Claude Code billing-header markers from forwarded requests.
+- `build-version`: embed the checked-out source commit date and hash.
+
+Protocol conversion and model configuration use the upstream implementation.
+The legacy `classic-build` script remains on disk but is not used by this workflow.
+
 # Balance Script Documentation
 
 This document describes the custom balance script feature for new-api channels.
