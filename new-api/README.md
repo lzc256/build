@@ -18,6 +18,9 @@ The date describes the source commit, not when the image was built. A runtime
 - `oauth-step-up`: offer linked OAuth for sensitive browser actions even with a password,
   Passkey or 2FA enrolled; prefer it in the dialog. Login second-factor policy,
   provider/account binding checks and single-use operation proofs stay in place.
+  For built-in OIDC and custom providers with the `openid` scope, step-up requests
+  include `prompt=login` and `max_age=0` to request fresh authentication from the
+  identity provider (including Pocket ID). Ordinary login is unchanged.
 - `build-version`: embed the checked-out source commit date and hash.
 
 Protocol conversion and model configuration use the upstream implementation.

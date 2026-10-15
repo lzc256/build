@@ -121,10 +121,10 @@ index 2270b4d5d..49487f427 100644
  }
  
 diff --git a/web/src/features/auth/secure-verification/__tests__/verification-flow.test.tsx b/web/src/features/auth/secure-verification/__tests__/verification-flow.test.tsx
-index c2af726df..75e4455de 100644
+index c2af726df..063059855 100644
 --- a/web/src/features/auth/secure-verification/__tests__/verification-flow.test.tsx
 +++ b/web/src/features/auth/secure-verification/__tests__/verification-flow.test.tsx
-@@ -569,3 +569,26 @@ it('verifies with the clicked provider when several linked accounts are availabl
+@@ -569,3 +569,67 @@ it('verifies with the clicked provider when several linked accounts are availabl
      screen.getByRole('button', { name: 'Continue with Linux DO' })
    ).toBeDisabled()
  })
@@ -151,6 +151,82 @@ index c2af726df..75e4455de 100644
 +  await user.click(screen.getByRole('tab', { name: 'Password' }))
 +  expect(screen.getByLabelText('Password', { selector: 'input' })).toBeVisible()
 +})
++
++
++it.each(['oidc', 'pocketid'])(
++  'requests fresh identity-provider authentication for %s step-up',
++  async (provider) => {
++    const popup = stubOAuthPopup()
++    vi.spyOn(api, 'get').mockImplementation((url) => Promise.resolve({ data: {
++      success: true,
++      data: url === '/api/verify/methods' ? {
++        ...linkedAccountRequirements,
++        oauth_providers: [{ slug: provider, name: 'Pocket ID' }],
++      } : {
++        oidc_authorization_endpoint: 'https://id.example.com/authorize?prompt=none',
++        oidc_client_id: 'newapi',
++        custom_oauth_providers: [{
++          slug: 'pocketid', name: 'Pocket ID', client_id: 'newapi',
++          authorization_endpoint: 'https://id.example.com/authorize?prompt=consent',
++          scopes: 'openid profile email',
++        }],
++      },
++    } }))
++    vi.spyOn(api, 'post').mockResolvedValue({ data: {
++      success: true, data: { flow_token: 'fresh-oauth-state' },
++    } })
++    const result = vi.fn()
++    const user = userEvent.setup()
++    render(<Harness operation={{ scope: '2fa.setup' }} onResult={result} />)
++    await user.click(screen.getByText('Protected action'))
++    await user.click(await screen.findByRole('button', { name: 'Continue with Pocket ID' }))
++    await waitFor(() => expect(popup.location.replace).toHaveBeenCalledOnce())
++    const target = new URL(popup.location.replace.mock.calls[0][0])
++    expect(target.searchParams.get('max_age')).toBe('0')
++    expect(target.searchParams.get('prompt')?.split(' ')).toContain('login')
++    expect(target.searchParams.get('prompt')?.split(' ')).not.toContain('none')
++    if (provider === 'pocketid') expect(target.searchParams.get('prompt')).toContain('consent')
++    expect(target.searchParams.get('state')).toBe('fresh-oauth-state')
++    expect(target.searchParams.get('client_id')).toBe('newapi')
++    await user.click(screen.getByRole('button', { name: 'Cancel' }))
++    await waitFor(() => expect(result).toHaveBeenCalledExactlyOnceWith(null))
++  }
++)
+diff --git a/web/src/features/auth/secure-verification/api.ts b/web/src/features/auth/secure-verification/api.ts
+index 108c07c4c..7d525a16f 100644
+--- a/web/src/features/auth/secure-verification/api.ts
++++ b/web/src/features/auth/secure-verification/api.ts
+@@ -322,11 +322,27 @@ async function verifyOAuth(
+           })
+         ),
+       ])
++      const authorizationUrl = new URL(
++        authorization.authorizationUrl ??
++          buildOAuthAuthorizationUrl(provider, authorization.state, status)
++      )
++      const custom = status.custom_oauth_providers?.find(
++        (candidate) => candidate.slug === provider
++      )
++      const isOIDC = provider === 'oidc' ||
++        custom?.scopes?.split(/\s+/).includes('openid')
++      if (isOIDC) {
++        // Ask the identity provider to authenticate again for this operation.
++        // Ordinary sign-in URLs do not use this verification-only path.
++        const prompts = authorizationUrl.searchParams.get('prompt')?.split(/\s+/) ?? []
++        authorizationUrl.searchParams.set('prompt',
++          [...new Set([...prompts.filter((prompt) => prompt && prompt !== 'none'), 'login'])].join(' '))
++        authorizationUrl.searchParams.set('max_age', '0')
++      }
+       return {
+         state: authorization.state,
+-        url:
+-          authorization.authorizationUrl ??
+-          buildOAuthAuthorizationUrl(provider, authorization.state, status),
++        url: isOIDC ? authorizationUrl.toString() :
++          authorization.authorizationUrl ?? authorizationUrl.toString(),
+       }
+     },
+   })
 diff --git a/web/src/features/auth/secure-verification/hooks/use-secure-verification.ts b/web/src/features/auth/secure-verification/hooks/use-secure-verification.ts
 index 12e0a4a44..b3a92b233 100644
 --- a/web/src/features/auth/secure-verification/hooks/use-secure-verification.ts
