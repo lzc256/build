@@ -118,6 +118,13 @@ jobs:
       #     source scripts/common.sh
       #     apply_patch zero-completion-compact-error new-api-src
 
+      - name: Stamp upstream build version
+        id: version
+        run: |
+          source scripts/common.sh
+          apply_patch build-version new-api-src
+          echo "version=$(cat new-api-src/VERSION)" >> "$GITHUB_OUTPUT"
+
       - name: Verify patches applied
         run: |
           echo "=== Patch verification ==="
@@ -162,5 +169,6 @@ jobs:
           echo "|------|-------|"
           echo "| Upstream Ref | \`${{ needs.check-update.outputs.ref }}\` |"
           echo "| Upstream Commit | \`${{ needs.check-update.outputs.commit }}\` |"
+          echo "| Build Version (Asia/Shanghai) | \`${{ steps.version.outputs.version }}\` |"
           echo "| Image (latest) | \`${{ env.REGISTRY }}/${{ github.repository }}:newapi\` |"
           echo "| Image (commit) | \`${{ env.REGISTRY }}/${{ github.repository }}:newapi-${{ needs.check-update.outputs.short_commit }}\` |"

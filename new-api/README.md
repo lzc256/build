@@ -1,3 +1,16 @@
+# Build version
+
+The workflow currently pins upstream to `1ae757475f9e8dad4ffedf89b3e707756fe8ecf9`
+for patch compatibility; scheduled checks do not follow `main`. A manual workflow
+run can select a different upstream ref, but its patches must remain compatible.
+
+The `build-version` patch writes the checked-out upstream commit's committer date
+in `Asia/Shanghai` and its seven-character hash to `VERSION`, for example
+`2026-07-04 23:42:03 (1ae7574)`. The upstream Dockerfile embeds this value in both
+the frontend and backend, including the `/api/status` version displayed by the UI.
+The date describes the source commit, not when the image was built. A runtime
+`VERSION` environment variable overrides the embedded backend version.
+
 # Balance Script Documentation
 
 This document describes the custom balance script feature for new-api channels.
