@@ -1,10 +1,10 @@
 #!/bin/bash
-# Add Responses -> ChatCompletions i18n keys to web/default locale files.
+# Add Responses -> ChatCompletions i18n keys to web locale files.
 # Uses string anchors (not line numbers) for cross-version compatibility.
 set -e
 
 TARGET_DIR="$1"
-LOCALE_DIR="$TARGET_DIR/web/default/src/i18n/locales"
+LOCALE_DIR="$TARGET_DIR/web/src/i18n/locales"
 
 translation_for_locale() {
     case "$1" in

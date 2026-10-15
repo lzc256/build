@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       ref:
-        description: 'Upstream branch, tag, or commit (default: patch-compatible pinned commit)'
+        description: 'Upstream branch, tag, or commit (default: main)'
         required: false
         default: ''
         type: string
@@ -19,7 +19,7 @@ on:
 env:
   REGISTRY: ghcr.io
   UPSTREAM_REPO: QuantumNous/new-api
-  UPSTREAM_REF: 1ae757475f9e8dad4ffedf89b3e707756fe8ecf9
+  UPSTREAM_REF: main
 
 jobs:
   check-update:
@@ -81,13 +81,6 @@ jobs:
           source scripts/common.sh
           apply_patch balance-script new-api-src
 
-      - name: Apply classic frontend build workaround
-        run: |
-          source scripts/common.sh
-          apply_patch classic-build new-api-src
-          perl -i -pe 's|^RUN cd classic.*$|COPY --from=builder /build/web/default/dist ./classic/dist|' new-api-src/Dockerfile
-          grep -q '^COPY --from=builder /build/web/default/dist ./classic/dist$' new-api-src/Dockerfile
-
       - name: Apply self-use default price patch
         run: |
           source scripts/common.sh
@@ -129,10 +122,10 @@ jobs:
         run: |
           echo "=== Patch verification ==="
           git -C new-api-src diff --stat
-          test -f new-api-src/controller/channel_balance_script.go && echo "balance-script: channel_balance_script.go OK" || echo "balance-script: channel_balance_script.go MISSING"
-          grep -q "handleUseDefault" new-api-src/web/default/src/features/models/components/dialogs/missing-models-dialog.tsx && echo "use-default-model: handleUseDefault OK" || echo "use-default-model: handleUseDefault MISSING"
-          test -f new-api-src/relay/common/builtin_override.go && echo "billing-header-filter: builtin_override.go OK" || echo "billing-header-filter: builtin_override.go MISSING"
-          test -f new-api-src/relay/responses_via_chat_completions.go && echo "responses-chat-compat: responses_via_chat_completions.go OK" || echo "responses-chat-compat: responses_via_chat_completions.go MISSING"
+          test -f new-api-src/controller/channel_balance_script.go && echo "balance-script: channel_balance_script.go OK" || { echo "balance-script: channel_balance_script.go MISSING"; exit 1; }
+          grep -q "handleUseDefault" new-api-src/web/src/features/models/components/dialogs/missing-models-dialog.tsx && echo "use-default-model: handleUseDefault OK" || { echo "use-default-model: handleUseDefault MISSING"; exit 1; }
+          test -f new-api-src/relay/common/builtin_override.go && echo "billing-header-filter: builtin_override.go OK" || { echo "billing-header-filter: builtin_override.go MISSING"; exit 1; }
+          test -f new-api-src/relay/responses_via_chat_completions.go && echo "responses-chat-compat: responses_via_chat_completions.go OK" || { echo "responses-chat-compat: responses_via_chat_completions.go MISSING"; exit 1; }
 
       - name: Login to GHCR
         uses: docker/login-action@v4
@@ -164,6 +157,7 @@ jobs:
 
       - name: Summary
         run: |
+          {
           echo "## New-API Build Summary"
           echo "| Item | Value |"
           echo "|------|-------|"
@@ -172,3 +166,4 @@ jobs:
           echo "| Build Version (Asia/Shanghai) | \`${{ steps.version.outputs.version }}\` |"
           echo "| Image (latest) | \`${{ env.REGISTRY }}/${{ github.repository }}:newapi\` |"
           echo "| Image (commit) | \`${{ env.REGISTRY }}/${{ github.repository }}:newapi-${{ needs.check-update.outputs.short_commit }}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"

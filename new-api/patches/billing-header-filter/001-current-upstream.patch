@@ -1,21 +1,10 @@
-From 5556f37039e715a8281204824909431ff2243eef Mon Sep 17 00:00:00 2001
-From: lzc256 <i@lzc256.com>
-Date: Sat, 4 Jul 2026 08:10:01 +0800
-Subject: [PATCH 2/2] feat(relay): add hardcoded billing header filter for
- Claude Code
-
----
- relay/claude_handler.go          |  6 ++++
- relay/common/builtin_override.go | 54 ++++++++++++++++++++++++++++++++
- relay/compatible_handler.go      |  6 ++++
- 3 files changed, 66 insertions(+)
- create mode 100644 relay/common/builtin_override.go
+Subject: [PATCH] Port billing-header-filter to current upstream layout
 
 diff --git a/relay/claude_handler.go b/relay/claude_handler.go
-index 52736320..5e05fcc7 100644
+index e1e31afb7..87354def0 100644
 --- a/relay/claude_handler.go
 +++ b/relay/claude_handler.go
-@@ -174,6 +174,12 @@ func ClaudeHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
+@@ -109,6 +109,12 @@ func ClaudeHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
  			return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
  		}
  
@@ -30,7 +19,7 @@ index 52736320..5e05fcc7 100644
  			jsonData, err = relaycommon.ApplyParamOverrideWithRelayInfo(jsonData, info)
 diff --git a/relay/common/builtin_override.go b/relay/common/builtin_override.go
 new file mode 100644
-index 00000000..a129ae71
+index 000000000..a129ae713
 --- /dev/null
 +++ b/relay/common/builtin_override.go
 @@ -0,0 +1,54 @@
@@ -89,10 +78,10 @@ index 00000000..a129ae71
 +	return result, nil
 +}
 diff --git a/relay/compatible_handler.go b/relay/compatible_handler.go
-index a68cfe73..58f0b78d 100644
+index 87a797bb4..9893d267d 100644
 --- a/relay/compatible_handler.go
 +++ b/relay/compatible_handler.go
-@@ -165,6 +165,12 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
+@@ -130,6 +130,12 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
  			return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
  		}
  
@@ -105,6 +94,3 @@ index a68cfe73..58f0b78d 100644
  		// apply param override
  		if len(info.ParamOverride) > 0 {
  			jsonData, err = relaycommon.ApplyParamOverrideWithRelayInfo(jsonData, info)
--- 
-2.54.0
-

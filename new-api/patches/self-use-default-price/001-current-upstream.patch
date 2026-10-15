@@ -1,12 +1,13 @@
-Subject: [PATCH] Default unset model ratio to USD 1/M tokens
+Subject: [PATCH] Port self-use-default-price to current upstream layout
 
 diff --git a/setting/ratio_setting/model_ratio.go b/setting/ratio_setting/model_ratio.go
+index 79762814d..fa2de4ddb 100644
 --- a/setting/ratio_setting/model_ratio.go
 +++ b/setting/ratio_setting/model_ratio.go
-@@ -400,7 +400,7 @@ func GetModelRatio(name string) (float64, bool, string) {
- 			}
- 			//return 0, true, name
- 		}
+@@ -387,7 +387,7 @@ func GetModelRatio(name string) (float64, bool, string) {
+ 
+ 	ratio, ok := modelRatioMap.Get(name)
+ 	if !ok {
 -		return 37.5, operation_setting.SelfUseModeEnabled, name
 +		return 0.5, operation_setting.SelfUseModeEnabled, name
  	}
