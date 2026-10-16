@@ -1,4 +1,4 @@
-Subject: [PATCH] Port balance-script to current upstream layout
+Subject: [PATCH] Port balance-script with dedicated editor tab and multiline messages
 
 diff --git a/Dockerfile b/Dockerfile
 index ddcee582c..2fbda8da7 100644
@@ -522,34 +522,141 @@ index 54892c8ff..f41f8f42f 100644
  	AzureResponsesVersion                 string                `json:"azure_responses_version,omitempty"`
  	VertexKeyType                         VertexKeyType         `json:"vertex_key_type,omitempty"`   // "json" or "api_key"
  	VertexProjectID                       string                `json:"vertex_project_id,omitempty"` // 仅当 vertex_key_type=api_key 时使用；JSON 模式下从 service account 解析
+diff --git a/web/src/features/channels/components/__tests__/channel-configuration.test.tsx b/web/src/features/channels/components/__tests__/channel-configuration.test.tsx
+index 8480cc1d8..6c0cd2fe3 100644
+--- a/web/src/features/channels/components/__tests__/channel-configuration.test.tsx
++++ b/web/src/features/channels/components/__tests__/channel-configuration.test.tsx
+@@ -1299,7 +1299,7 @@ test('editing opens the shared configuration and omits an unchanged key on updat
+   expect(await screen.findByDisplayValue('Existing channel')).toBeVisible()
+   expect(screen.queryByLabelText('Type *')).not.toBeInTheDocument()
+   expect(screen.getByRole('button', { name: 'Change provider' })).toBeVisible()
+-  expect(screen.getAllByRole('tab')).toHaveLength(4)
++  expect(screen.getAllByRole('tab')).toHaveLength(5)
+   expect(
+     screen.getByRole('tab', { name: /Connection & Models/ })
+   ).toHaveAccessibleName(/Ready/)
+@@ -1317,6 +1317,33 @@ test('editing opens the shared configuration and omits an unchanged key on updat
+   expect(put.mock.calls[0]?.[1]).not.toHaveProperty('key')
+ })
+ 
++test('balance script has a separate tab and opens its environment guide', async () => {
++  const user = userEvent.setup()
++  render(<ConfigurationHarness currentRow={editingChannel} />)
++  expect(await screen.findByDisplayValue('Existing channel')).toBeVisible()
++  expect(
++    screen.queryByLabelText('Custom Balance Script (Python)')
++  ).not.toBeVisible()
++  await user.click(screen.getByRole('tab', { name: /Balance Script/ }))
++  const script = screen.getByLabelText('Custom Balance Script (Python)')
++  expect(script).toBeVisible()
++  expect(
++    screen.queryByText('CHANNEL_BASE_URL: channel API base URL')
++  ).not.toBeInTheDocument()
++  await user.click(screen.getByRole('button', { name: 'Balance script guide' }))
++  const guide = screen.getByRole('dialog', { name: 'Balance Script Guide' })
++  expect(
++    within(guide).getByText(/CHANNEL_BASE_URL: channel API base URL/)
++  ).toBeVisible()
++  expect(within(guide).getByText(/CHANNEL_STATE/)).toBeVisible()
++  expect(within(guide).getByText(/BALANCE_SCRIPT_SOURCE/)).toBeVisible()
++  await user.click(within(guide).getByRole('button', { name: 'Close' }))
++  fireEvent.change(script, { target: { value: 'from newapi import balance' } })
++  await user.click(screen.getByRole('tab', { name: /Connection & Models/ }))
++  await user.click(screen.getByRole('tab', { name: /Balance Script/ }))
++  expect(script).toHaveValue('from newapi import balance')
++})
++
+ test('editing legacy channels retains the full provider list and saves the original type', async () => {
+   editingChannel = { ...editingChannel, type: 55 }
+   pluginOptions = [
 diff --git a/web/src/features/channels/components/channels-columns.tsx b/web/src/features/channels/components/channels-columns.tsx
-index 4bd4b40e3..32ecaa04b 100644
+index 4bd4b40e3..ad5e73526 100644
 --- a/web/src/features/channels/components/channels-columns.tsx
 +++ b/web/src/features/channels/components/channels-columns.tsx
-@@ -469,7 +469,7 @@ export function BalanceCell({ channel }: { channel: Channel }) {
+@@ -469,13 +469,19 @@ export function BalanceCell({ channel }: { channel: Channel }) {
        const response = await updateChannelBalance(channel.id)
        if (response.success && response.balance !== undefined) {
          toast.success(
 -          t('Balance updated: {{balance}}', {
-+          response.message || t('Balance updated: {{balance}}', {
-             balance: formatCurrencyFromUSD(response.balance, {
-               digitsLarge: 2,
-               digitsSmall: 4,
+-            balance: formatCurrencyFromUSD(response.balance, {
+-              digitsLarge: 2,
+-              digitsSmall: 4,
+-              abbreviate: false,
+-            }),
+-          })
++          response.message ? (
++            <span className='break-words whitespace-pre-wrap'>
++              {response.message}
++            </span>
++          ) : (
++            t('Balance updated: {{balance}}', {
++              balance: formatCurrencyFromUSD(response.balance, {
++                digitsLarge: 2,
++                digitsSmall: 4,
++                abbreviate: false,
++              }),
++            })
++          )
+         )
+         void queryClient.invalidateQueries({
+           queryKey: channelsQueryKeys.lists(),
 diff --git a/web/src/features/channels/components/dialogs/balance-query-dialog.tsx b/web/src/features/channels/components/dialogs/balance-query-dialog.tsx
-index 1d3c89120..8bff790ff 100644
+index 1d3c89120..ce0dedccf 100644
 --- a/web/src/features/channels/components/dialogs/balance-query-dialog.tsx
 +++ b/web/src/features/channels/components/dialogs/balance-query-dialog.tsx
-@@ -102,7 +102,7 @@ export function BalanceQueryDialog(props: BalanceQueryDialogProps) {
+@@ -102,7 +102,15 @@ export function BalanceQueryDialog(props: BalanceQueryDialogProps) {
  
          setBalance(newBalance)
          setBalanceUpdatedTime(now)
 -        toast.success(t('Balance updated successfully'))
-+        toast.success(response.message || t('Balance updated successfully'))
++        toast.success(
++          response.message ? (
++            <span className='break-words whitespace-pre-wrap'>
++              {response.message}
++            </span>
++          ) : (
++            t('Balance updated successfully')
++          )
++        )
  
          // Update currentRow immediately with new balance and timestamp
          setCurrentRow({
+diff --git a/web/src/features/channels/components/drawers/channel-configuration.tsx b/web/src/features/channels/components/drawers/channel-configuration.tsx
+index 12afba01b..808fd631f 100644
+--- a/web/src/features/channels/components/drawers/channel-configuration.tsx
++++ b/web/src/features/channels/components/drawers/channel-configuration.tsx
+@@ -48,6 +48,7 @@ type ChannelConfigurationProps = {
+   routing: ReactNode
+   request: ReactNode
+   other: ReactNode
++  balance: ReactNode
+ }
+ 
+ export function ChannelConfigurationStatusIndicator(props: {
+@@ -103,6 +104,7 @@ export function ChannelConfiguration(props: ChannelConfigurationProps) {
+   }, [props.section])
+   const sections = [
+     { id: 'connection', label: t('Connection & Models') },
++    { id: 'balance', label: t('Balance Script') },
+     { id: 'routing', label: t('Routing & Mapping') },
+     { id: 'request', label: t('Request & Response') },
+     { id: 'other', label: t('Other Settings') },
+@@ -166,6 +168,13 @@ export function ChannelConfiguration(props: ChannelConfigurationProps) {
+           </div>
+         </div>
+       </TabsContent>
++      <TabsContent
++        value='balance'
++        keepMounted
++        className='-m-1 min-h-0 overflow-y-auto overscroll-contain p-1'
++      >
++        {props.balance}
++      </TabsContent>
+       <TabsContent
+         value='routing'
+         keepMounted
 diff --git a/web/src/features/channels/components/drawers/channel-mutate-drawer.tsx b/web/src/features/channels/components/drawers/channel-mutate-drawer.tsx
-index 6e85244df..fe2e758f7 100644
+index 6e85244df..9a2c29422 100644
 --- a/web/src/features/channels/components/drawers/channel-mutate-drawer.tsx
 +++ b/web/src/features/channels/components/drawers/channel-mutate-drawer.tsx
 @@ -242,6 +242,7 @@ import { ChannelProviderPicker } from './channel-provider-picker'
@@ -560,20 +667,22 @@ index 6e85244df..fe2e758f7 100644
    ChannelBasicSection,
    ChannelEditorLoadingState,
    ChannelModelsSection,
-@@ -4282,6 +4283,7 @@ export function ChannelMutateDrawer({
-               />
-             )}
- 
-+            <BalanceScriptField control={form.control} name="balance_script" />
-             <ChannelAuthSection>
-               {!isEditing && (
-                 <FormField
+@@ -4666,6 +4667,9 @@ export function ChannelMutateDrawer({
+           </>
+         }
+         models={modelsSection}
++        balance={
++          <BalanceScriptField control={form.control} name='balance_script' />
++        }
+         quickOptions={
+           viewportWide ? null : (
+             <ChannelQuickOptions
 diff --git a/web/src/features/channels/components/drawers/sections/balance-script-section.tsx b/web/src/features/channels/components/drawers/sections/balance-script-section.tsx
 new file mode 100644
-index 000000000..92293e015
+index 000000000..d7688cd49
 --- /dev/null
 +++ b/web/src/features/channels/components/drawers/sections/balance-script-section.tsx
-@@ -0,0 +1,107 @@
+@@ -0,0 +1,168 @@
 +/*
 +Copyright (C) 2023-2026 QuantumNous
 +
@@ -592,19 +701,20 @@ index 000000000..92293e015
 +
 +For commercial licensing, please contact support@quantumnous.com
 +*/
++import { CircleHelp } from 'lucide-react'
++import type { Control, FieldPath, FieldValues } from 'react-hook-form'
 +import { useTranslation } from 'react-i18next'
++
++import { Dialog } from '@/components/dialog'
 +import { Button } from '@/components/ui/button'
-+import { Textarea } from '@/components/ui/textarea'
 +import {
 +  FormControl,
-+  FormDescription,
++  FormField,
 +  FormItem,
 +  FormLabel,
 +  FormMessage,
 +} from '@/components/ui/form'
-+import type { FieldPath, FieldValues } from 'react-hook-form'
-+import type { Control } from 'react-hook-form'
-+import { FormField } from '@/components/ui/form'
++import { Textarea } from '@/components/ui/textarea'
 +
 +const BALANCE_SCRIPT_TEMPLATE = `import urllib.request, json
 +from newapi import environ, state, balance
@@ -638,15 +748,75 @@ index 000000000..92293e015
 +      control={control}
 +      name={name}
 +      render={({ field }) => (
-+        <FormItem className='space-y-3 border-t pt-4'>
++        <FormItem className='space-y-3'>
 +          <div className='flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between'>
-+            <div className='space-y-1'>
++            <div className='flex items-center gap-2'>
 +              <FormLabel>{t('Custom Balance Script (Python)')}</FormLabel>
-+              <FormDescription>
-+                {t(
-+                  'Python script to fetch channel balance. Stdlib only. Use newapi.environ for inputs, newapi.state.get()/save() for state, newapi.balance.set() for result.'
++              <Dialog
++                title={t('Balance Script Guide')}
++                description={t(
++                  'Use a restricted Python script to query an upstream balance and return an optional status message.'
 +                )}
-+              </FormDescription>
++                trigger={
++                  <Button
++                    type='button'
++                    variant='ghost'
++                    size='icon-sm'
++                    aria-label={t('Balance script guide')}
++                    title={t('Balance script guide')}
++                  >
++                    <CircleHelp className='size-4' />
++                  </Button>
++                }
++              >
++                <div className='space-y-4 text-sm'>
++                  <section className='space-y-2'>
++                    <h3 className='font-medium'>
++                      {t('Environment variables')}
++                    </h3>
++                    <pre className='bg-muted/50 rounded-md border p-3 text-xs whitespace-pre-wrap'>
++                      {`newapi.environ:
++CHANNEL_BASE_URL: channel API base URL
++CHANNEL_KEY: API key; multiple keys are joined with commas
++CHANNEL_TYPE: channel type ID (string)
++CHANNEL_ID: channel ID (string)
++CHANNEL_IS_MULTI_KEY: "1" for multiple keys, otherwise "0"
++
++Process inputs (not in newapi.environ):
++CHANNEL_STATE: saved JSON; read using state.get()/getRaw()
++BALANCE_SCRIPT_SOURCE: script source; supplied by the runner`}
++                    </pre>
++                  </section>
++                  <section className='space-y-2'>
++                    <h3 className='font-medium'>{t('Script API')}</h3>
++                    <pre className='bg-muted/50 overflow-x-auto rounded-md border p-3 text-xs whitespace-pre-wrap'>
++                      {`from newapi import environ, state, balance, debug
++
++saved = state.get()  # {} on the first run
++balance.set(12.34)
++state.save(saved)
++debug.log("Balance: $12.34")
++debug.log("Weekly: $5.00")`}
++                    </pre>
++                  </section>
++                  <section className='space-y-2'>
++                    <h3 className='font-medium'>
++                      {t('Return values and limits')}
++                    </h3>
++                    <p className='text-muted-foreground'>
++                      Use Fill Template for a urllib.request HTTP example;
++                      adjust its endpoint and JSON balance field for your
++                      provider. balance.set() sets the numeric result;
++                      state.get()/save() persists JSON between runs. debug.log()
++                      returns a message; multiple calls are shown on separate
++                      lines. print() is disabled. Scripts have a 30-second
++                      timeout and restricted imports; saved state is limited to
++                      64 KiB. Leave the editor empty to use the default balance
++                      API.
++                    </p>
++                  </section>
++                </div>
++              </Dialog>
 +            </div>
 +            <div className='flex flex-wrap gap-2'>
 +              <Button
@@ -690,6 +860,42 @@ index ce62a583d..37df465dd 100644
  export * from './channel-editor-loading-state'
  export * from './channel-models-section'
 +export * from './balance-script-section'
+diff --git a/web/src/features/channels/lib/channel-configuration.ts b/web/src/features/channels/lib/channel-configuration.ts
+index 40f661027..2321e8758 100644
+--- a/web/src/features/channels/lib/channel-configuration.ts
++++ b/web/src/features/channels/lib/channel-configuration.ts
+@@ -34,6 +34,7 @@ export type ChannelProviderTarget =
+ 
+ export type ChannelConfigurationSection =
+   | 'connection'
++  | 'balance'
+   | 'routing'
+   | 'request'
+   | 'other'
+@@ -97,6 +98,7 @@ const CONFIGURATION_BLOCKS = {
+     ],
+   },
+   internalNotes: { section: 'other', fields: ['tag', 'remark'] },
++  balanceScript: { section: 'balance', fields: ['balance_script'] },
+ } as const satisfies Record<
+   string,
+   {
+@@ -187,6 +189,7 @@ export function getChannelConfigurationState(
+         values.upstream_model_update_ignored_models?.trim()
+       ),
+     internalNotes: Boolean(values.tag?.trim() || values.remark?.trim()),
++    balanceScript: Boolean(values.balance_script?.trim()),
+   }
+   const blocks = {} as Record<
+     ChannelConfigurationBlock,
+@@ -197,6 +200,7 @@ export function getChannelConfigurationState(
+     ChannelConfigurationStatus
+   > = {
+     connection: 'idle',
++    balance: 'idle',
+     routing: 'idle',
+     request: 'idle',
+     other: 'idle',
 diff --git a/web/src/features/channels/lib/channel-form.ts b/web/src/features/channels/lib/channel-form.ts
 index 12d4caec1..c06cbea5f 100644
 --- a/web/src/features/channels/lib/channel-form.ts
