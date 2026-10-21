@@ -22,9 +22,57 @@ The date describes the source commit, not when the image was built. A runtime
   include `prompt=login` and `max_age=0` to request fresh authentication from the
   identity provider (including Pocket ID). Ordinary login is unchanged.
 - `build-version`: embed the checked-out source commit date and hash.
+- `secondary-domain`: treat every host other than `ServerAddress` as a restricted
+  entry point. A secondary domain answers `/api/status` as if the primary address,
+  OIDC, Passkey and third-party sign-in had never been configured, rejects those
+  endpoints with `403 PRIMARY_ORIGIN_REQUIRED`, and keeps payment redirects and
+  Midjourney image URLs on the address the browser is using. See "Secondary
+  domain" below.
 
 Protocol conversion and model configuration use the upstream implementation.
 The legacy `classic-build` script remains on disk but is not used by this workflow.
+
+# Secondary domain
+
+`ServerAddress` is the primary address: the one address that is fully featured.
+Any other host the instance answers on is a secondary entry point. Visitors of a
+secondary domain must not learn that the primary one exists, so there:
+
+- `/api/status` returns an empty `server_address`, disabled `oidc_*`/`passkey_*`
+  and no third-party provider ids. The SPA builds its links from
+  `window.location.origin` when these values are empty, so it needs no change and
+  shows only password sign-in.
+- `/api/oauth/state`, `/api/oauth/{provider}`, the WeChat and Telegram OAuth
+  routes and the Passkey login routes answer `403 PRIMARY_ORIGIN_REQUIRED`.
+  Hiding a button is not enough: the routes themselves must refuse the request.
+- `GET /api/verify/methods` drops linked-provider step-up verification, so
+  sensitive actions fall back to the password.
+- Payment return URLs, Stripe success/cancel URLs and Midjourney image URLs use
+  the address of the request, so a buyer on the secondary domain stays there.
+
+Deployment notes:
+
+- `SERVER_ADDRESS` must name the primary domain (e.g. `https://panel.example.com`).
+  Leave it empty only for a single-address deployment; an empty value keeps every
+  request primary. The patch drops the upstream `http://localhost:3000`
+  compile-time default so a fresh install cannot be mistaken for a secondary one.
+- Both origins must be listed for session cookies:
+  `SESSION_COOKIE_SECURE=true` and
+  `SESSION_COOKIE_TRUSTED_URL=https://panel.example.com,https://shop.example.net`.
+  Cookies carry no `Domain` attribute, so each domain keeps its own session.
+- Epay (易支付) needs no fixed callback in its dashboard: `notify_url` and
+  `return_url` are sent per order. `notify_url` stays on the primary address (or
+  `CustomCallbackAddress`) because it is a server-to-server call the browser never
+  sees; `return_url` follows the buyer's domain.
+- The identity provider still needs `https://panel.example.com/oauth/oidc`
+  registered. The secondary domain never starts an OIDC flow, so it needs none.
+- Remaining, intentional leaks to review by content: `TaskPublicAddress`
+  (pin it, or task artifact URLs fall back to `ServerAddress`), the
+  administrator-authored `Notice`, `About`, `HomePageContent`, `DocsLink` and the
+  console `ApiInfo` list. Do not put primary-domain links there.
+- Administrators signed in on the secondary domain still see the full settings
+  page, including `ServerAddress` and the OIDC configuration, because
+  `/api/option/` is an authenticated admin endpoint.
 
 # Balance Script Documentation
 

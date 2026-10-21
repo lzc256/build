@@ -1,0 +1,1146 @@
+diff --git a/common/site_origin.go b/common/site_origin.go
+new file mode 100644
+index 000000000..ea028f9b8
+--- /dev/null
++++ b/common/site_origin.go
+@@ -0,0 +1,37 @@
++package common
++
++import (
++	"net/http"
++	"strings"
++)
++
++// RequestPublicOrigin returns the exact origin (scheme://host[:port]) the
++// browser used for a request, honouring the forwarding headers of a reverse
++// proxy. Only the first value of a comma separated header is used, so a client
++// cannot append a second origin to the forwarded chain.
++func RequestPublicOrigin(request *http.Request) (string, bool) {
++	if request == nil {
++		return "", false
++	}
++	scheme := firstForwardedValue(request.Header.Get("X-Forwarded-Proto"))
++	if scheme == "" {
++		scheme = firstForwardedValue(request.Header.Get("X-Forwarded-Protocol"))
++	}
++	scheme = strings.ToLower(scheme)
++	if scheme != "http" && scheme != "https" {
++		scheme = "http"
++		if request.TLS != nil {
++			scheme = "https"
++		}
++	}
++	host := firstForwardedValue(request.Header.Get("X-Forwarded-Host"))
++	if host == "" {
++		host = request.Host
++	}
++	origin, err := NormalizeOrigin(scheme + "://" + host)
++	return origin, err == nil
++}
++
++func firstForwardedValue(value string) string {
++	return strings.TrimSpace(strings.Split(value, ",")[0])
++}
+diff --git a/common/site_origin_test.go b/common/site_origin_test.go
+new file mode 100644
+index 000000000..2b3aff803
+--- /dev/null
++++ b/common/site_origin_test.go
+@@ -0,0 +1,96 @@
++package common
++
++import (
++	"crypto/tls"
++	"net/http/httptest"
++	"testing"
++
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++)
++
++func TestRequestPublicOrigin(t *testing.T) {
++	tests := []struct {
++		name     string
++		host     string
++		tls      bool
++		headers  map[string]string
++		expected string
++		valid    bool
++	}{
++		{
++			name:     "plain http request",
++			host:     "panel.example.com",
++			expected: "http://panel.example.com",
++			valid:    true,
++		},
++		{
++			name:     "tls request",
++			host:     "panel.example.com",
++			tls:      true,
++			expected: "https://panel.example.com",
++			valid:    true,
++		},
++		{
++			name:     "forwarded proto overrides tls termination",
++			host:     "panel.example.com",
++			headers:  map[string]string{"X-Forwarded-Proto": "https"},
++			expected: "https://panel.example.com",
++			valid:    true,
++		},
++		{
++			name:     "forwarded host wins over backend host",
++			host:     "127.0.0.1:3000",
++			headers:  map[string]string{"X-Forwarded-Proto": "https", "X-Forwarded-Host": "shop.example.net"},
++			expected: "https://shop.example.net",
++			valid:    true,
++		},
++		{
++			name:     "only the first forwarded value counts",
++			host:     "127.0.0.1:3000",
++			headers:  map[string]string{"X-Forwarded-Proto": "https, http", "X-Forwarded-Host": "shop.example.net, evil.test"},
++			expected: "https://shop.example.net",
++			valid:    true,
++		},
++		{
++			name:     "default port is dropped",
++			host:     "panel.example.com:443",
++			tls:      true,
++			expected: "https://panel.example.com",
++			valid:    true,
++		},
++		{
++			name:     "non default port is kept",
++			host:     "panel.example.com:8443",
++			tls:      true,
++			expected: "https://panel.example.com:8443",
++			valid:    true,
++		},
++		{
++			name:     "empty host is rejected",
++			host:     "",
++			headers:  map[string]string{"X-Forwarded-Host": " "},
++			expected: "",
++			valid:    false,
++		},
++	}
++
++	for _, test := range tests {
++		t.Run(test.name, func(t *testing.T) {
++			request := httptest.NewRequest("GET", "http://"+test.host+"/api/status", nil)
++			request.Host = test.host
++			if test.tls {
++				request.TLS = &tls.ConnectionState{}
++			}
++			for key, value := range test.headers {
++				request.Header.Set(key, value)
++			}
++			origin, ok := RequestPublicOrigin(request)
++			require.Equal(t, test.valid, ok)
++			assert.Equal(t, test.expected, origin)
++		})
++	}
++
++	_, ok := RequestPublicOrigin(nil)
++	assert.False(t, ok)
++}
+diff --git a/controller/midjourney.go b/controller/midjourney.go
+index de465bc7b..f41197b1a 100644
+--- a/controller/midjourney.go
++++ b/controller/midjourney.go
+@@ -14,7 +14,6 @@ import (
+ 	"github.com/QuantumNous/new-api/model"
+ 	"github.com/QuantumNous/new-api/service"
+ 	"github.com/QuantumNous/new-api/setting"
+-	"github.com/QuantumNous/new-api/setting/system_setting"
+ 
+ 	"github.com/gin-gonic/gin"
+ )
+@@ -294,7 +293,7 @@ func GetAllMidjourney(c *gin.Context) {
+ 
+ 	if setting.MjForwardUrlEnabled {
+ 		for i, midjourney := range items {
+-			midjourney.ImageUrl = system_setting.ServerAddress + "/mj/image/" + midjourney.MjId
++			midjourney.ImageUrl = requestBaseURL(c) + "/mj/image/" + midjourney.MjId
+ 			items[i] = midjourney
+ 		}
+ 	}
+@@ -319,7 +318,7 @@ func GetUserMidjourney(c *gin.Context) {
+ 
+ 	if setting.MjForwardUrlEnabled {
+ 		for i, midjourney := range items {
+-			midjourney.ImageUrl = system_setting.ServerAddress + "/mj/image/" + midjourney.MjId
++			midjourney.ImageUrl = requestBaseURL(c) + "/mj/image/" + midjourney.MjId
+ 			items[i] = midjourney
+ 		}
+ 	}
+diff --git a/controller/misc.go b/controller/misc.go
+index fe7f7eba0..9dac942dd 100644
+--- a/controller/misc.go
++++ b/controller/misc.go
+@@ -166,6 +166,11 @@ func GetStatus(c *gin.Context) {
+ 		data["custom_oauth_providers"] = providersInfo
+ 	}
+ 
++	// A secondary domain answers like a site without third-party sign-in: it
++	// never advertises the primary address or the providers configured for it.
++	if !system_setting.IsPrimaryRequest(c.Request) {
++		hidePrimarySiteDetails(data)
++	}
+ 	c.JSON(http.StatusOK, gin.H{
+ 		"success": true,
+ 		"message": "",
+diff --git a/controller/passkey_test.go b/controller/passkey_test.go
+index 8fc445680..7050e9a73 100644
+--- a/controller/passkey_test.go
++++ b/controller/passkey_test.go
+@@ -67,7 +67,7 @@ func TestGetStatusDoesNotExposePasskeyOrigins(t *testing.T) {
+ 			settings.Origins = origins
+ 			response := httptest.NewRecorder()
+ 			context, _ := gin.CreateTestContext(response)
+-			context.Request = httptest.NewRequest(http.MethodGet, "/api/status", nil)
++			context.Request = httptest.NewRequest(http.MethodGet, "https://www.example.com/api/status", nil)
+ 
+ 			GetStatus(context)
+ 
+diff --git a/controller/payment_webhook_availability_test.go b/controller/payment_webhook_availability_test.go
+index ab596d5b4..1910c7cc0 100644
+--- a/controller/payment_webhook_availability_test.go
++++ b/controller/payment_webhook_availability_test.go
+@@ -241,9 +241,10 @@ func TestEpayCallbacksVerifyBeforeSettlement(t *testing.T) {
+ 		},
+ 		{
+ 			name: "subscription return", path: "/api/subscription/epay/return", handler: SubscriptionEpayReturn,
+-			status:           http.StatusFound,
+-			rejectedLocation: "https://dashboard.example.com/wallet?pay=fail",
+-			pendingLocation:  "https://dashboard.example.com/wallet?pay=pending",
++			status: http.StatusFound,
++			// The buyer is redirected back to the address the request came from.
++			rejectedLocation: "http://example.com/wallet?pay=fail",
++			pendingLocation:  "http://example.com/wallet?pay=pending",
+ 		},
+ 	}
+ 	router := gin.New()
+diff --git a/controller/return_path.go b/controller/return_path.go
+index 55c348e26..9a5005eeb 100644
+--- a/controller/return_path.go
++++ b/controller/return_path.go
+@@ -3,10 +3,24 @@ package controller
+ import (
+ 	"strings"
+ 
++	"github.com/QuantumNous/new-api/common"
+ 	"github.com/QuantumNous/new-api/setting/system_setting"
++
++	"github.com/gin-gonic/gin"
+ )
+ 
+-func paymentReturnPath(suffix string) string {
+-	base := strings.TrimRight(system_setting.ServerAddress, "/")
+-	return base + suffix
++// requestBaseURL returns the scheme://host[:port] the browser is currently
++// using, so redirects and links handed to that browser stay on the address it
++// opened. A single-address deployment is unaffected: the primary origin keeps
++// ServerAddress verbatim, which preserves a configured path prefix.
++func requestBaseURL(c *gin.Context) string {
++	configured := strings.TrimRight(strings.TrimSpace(system_setting.ServerAddress), "/")
++	origin, ok := common.RequestPublicOrigin(c.Request)
++	if !ok {
++		return configured
++	}
++	if primary, ok := system_setting.PrimaryOrigin(); ok && strings.EqualFold(origin, primary) {
++		return configured
++	}
++	return origin
+ }
+diff --git a/controller/return_path_test.go b/controller/return_path_test.go
+index f4f499b32..0bcd516ec 100644
+--- a/controller/return_path_test.go
++++ b/controller/return_path_test.go
+@@ -1,25 +1,61 @@
+ package controller
+ 
+ import (
++	"net/http/httptest"
+ 	"testing"
+ 
+ 	"github.com/QuantumNous/new-api/setting/system_setting"
++	"github.com/gin-gonic/gin"
+ 	"github.com/stretchr/testify/assert"
+ )
+ 
+-func TestPaymentReturnPathUsesDefaultDashboardRoutes(t *testing.T) {
++func newBaseURLRequest(t *testing.T, host string, headers map[string]string) *gin.Context {
++	t.Helper()
++	gin.SetMode(gin.TestMode)
++	c, _ := gin.CreateTestContext(httptest.NewRecorder())
++	c.Request = httptest.NewRequest("GET", "http://"+host+"/api/user/epay/notify", nil)
++	c.Request.Host = host
++	for key, value := range headers {
++		c.Request.Header.Set(key, value)
++	}
++	return c
++}
++
++func TestPaymentReturnPathUsesPrimaryServerAddress(t *testing.T) {
+ 	previousAddress := system_setting.ServerAddress
+ 	system_setting.ServerAddress = "https://dashboard.example.com/"
+ 	t.Cleanup(func() { system_setting.ServerAddress = previousAddress })
+ 
+-	assert.Equal(
+-		t,
+-		"https://dashboard.example.com/wallet?pay=success",
+-		paymentReturnPath("/wallet?pay=success"),
+-	)
+-	assert.Equal(
+-		t,
+-		"https://dashboard.example.com/usage-logs",
+-		paymentReturnPath("/usage-logs"),
+-	)
++	c := newBaseURLRequest(t, "dashboard.example.com", map[string]string{"X-Forwarded-Proto": "https"})
++	assert.Equal(t, "https://dashboard.example.com", requestBaseURL(c))
++	assert.Equal(t, "https://dashboard.example.com/wallet?pay=success", requestBaseURL(c)+"/wallet?pay=success")
++	assert.Equal(t, "https://dashboard.example.com/usage-logs", requestBaseURL(c)+"/usage-logs")
++}
++
++func TestPaymentReturnPathKeepsBuyerOnSecondaryDomain(t *testing.T) {
++	previousAddress := system_setting.ServerAddress
++	system_setting.ServerAddress = "https://dashboard.example.com"
++	t.Cleanup(func() { system_setting.ServerAddress = previousAddress })
++
++	c := newBaseURLRequest(t, "shop.example.net", map[string]string{"X-Forwarded-Proto": "https"})
++	assert.Equal(t, "https://shop.example.net", requestBaseURL(c))
++	assert.Equal(t, "https://shop.example.net/wallet?pay=success", requestBaseURL(c)+"/wallet?pay=success")
++}
++
++func TestPaymentReturnPathWithoutServerAddressUsesRequest(t *testing.T) {
++	previousAddress := system_setting.ServerAddress
++	system_setting.ServerAddress = ""
++	t.Cleanup(func() { system_setting.ServerAddress = previousAddress })
++
++	c := newBaseURLRequest(t, "localhost:3000", nil)
++	assert.Equal(t, "http://localhost:3000", requestBaseURL(c))
++}
++
++func TestRequestBaseURLKeepsConfiguredPathPrefixOnPrimary(t *testing.T) {
++	previousAddress := system_setting.ServerAddress
++	system_setting.ServerAddress = "https://gateway.example.com/newapi"
++	t.Cleanup(func() { system_setting.ServerAddress = previousAddress })
++
++	c := newBaseURLRequest(t, "gateway.example.com", map[string]string{"X-Forwarded-Proto": "https"})
++	assert.Equal(t, "https://gateway.example.com/newapi", requestBaseURL(c))
+ }
+diff --git a/controller/secure_verification.go b/controller/secure_verification.go
+index 0626f9570..1a5176e7e 100644
+--- a/controller/secure_verification.go
++++ b/controller/secure_verification.go
+@@ -29,6 +29,12 @@ func GetVerificationMethods(c *gin.Context) {
+ 		writeSecurityOperationError(c, err)
+ 		return
+ 	}
++	// A secondary domain is password-only, so linked-provider step-up is not
++	// offered there. The OAuth routes reject it as well; hiding it here keeps
++	// the dialog from offering a method that cannot succeed.
++	if !system_setting.IsPrimaryRequest(c.Request) {
++		requirements = stripOAuthVerification(requirements)
++	}
+ 	common.ApiSuccess(c, requirements)
+ }
+ 
+diff --git a/controller/security_enrollment_test.go b/controller/security_enrollment_test.go
+index bb5a8e064..58fd93b20 100644
+--- a/controller/security_enrollment_test.go
++++ b/controller/security_enrollment_test.go
+@@ -118,7 +118,8 @@ func setupSecurityEnrollmentTest(t *testing.T) (*model.User, service.AuthIdentit
+ func securityEnrollmentRequest(method, path, body, proof string, identity service.AuthIdentity, handler gin.HandlerFunc) *httptest.ResponseRecorder {
+ 	response := httptest.NewRecorder()
+ 	c, _ := gin.CreateTestContext(response)
+-	c.Request = httptest.NewRequest(method, path, strings.NewReader(body))
++	// Exercise the primary address: secondary domains hide provider features.
++	c.Request = httptest.NewRequest(method, "https://example.com"+path, strings.NewReader(body))
+ 	c.Request.Header.Set("Content-Type", "application/json")
+ 	c.Request.Header.Set("X-Security-Proof", proof)
+ 	c.Set("id", identity.UserID)
+diff --git a/controller/site_scope.go b/controller/site_scope.go
+new file mode 100644
+index 000000000..e34977555
+--- /dev/null
++++ b/controller/site_scope.go
+@@ -0,0 +1,58 @@
++package controller
++
++import (
++	"slices"
++
++	"github.com/QuantumNous/new-api/service"
++
++	"github.com/gin-gonic/gin"
++)
++
++// hidePrimarySiteDetails blanks every /api/status field that would reveal the
++// primary address, the identity provider or the configured sign-in providers.
++// A secondary domain is a password-only entry point, so it answers exactly like
++// a site where those features were never configured. The SPA builds every link
++// from window.location.origin when these values are empty, so no frontend
++// change is required.
++func hidePrimarySiteDetails(data gin.H) {
++	data["server_address"] = ""
++	data["github_oauth"], data["github_client_id"] = false, ""
++	data["discord_oauth"], data["discord_client_id"] = false, ""
++	data["linuxdo_oauth"], data["linuxdo_client_id"] = false, ""
++	data["linuxdo_minimum_trust_level"] = 0
++	data["telegram_oauth"], data["telegram_oauth_configured"], data["telegram_bot_name"] = false, false, ""
++	data["wechat_login"], data["wechat_qrcode"] = false, ""
++	data["oidc_enabled"], data["oidc_client_id"] = false, ""
++	data["oidc_authorization_endpoint"], data["oidc_display_name"] = "", ""
++	data["passkey_login"], data["passkey_display_name"] = false, ""
++	data["passkey_rp_id"], data["passkey_rp_ids"] = "", []string{}
++	data["passkey_allow_insecure"] = false
++	// Administrator-authored API addresses may point at the primary domain, and
++	// the binding list names the providers that were just hidden.
++	delete(data, "api_info")
++	delete(data, "custom_oauth_providers")
++}
++
++// stripOAuthVerification drops linked-provider step-up verification on a
++// secondary domain. The alternative factors are kept, and a requirements object
++// with nothing else to offer is returned untouched so the caller still gets the
++// original sole-method error instead of an empty dialog.
++func stripOAuthVerification(requirements *service.VerificationRequirements) *service.VerificationRequirements {
++	if requirements == nil {
++		return nil
++	}
++	others := 0
++	for _, option := range requirements.Methods {
++		if option.Method != service.VerificationMethodOAuth {
++			others++
++		}
++	}
++	if others == 0 {
++		return requirements
++	}
++	requirements.OAuthProviders = []service.VerificationOAuthProvider{}
++	requirements.Methods = slices.DeleteFunc(requirements.Methods, func(option service.VerificationMethodOption) bool {
++		return option.Method == service.VerificationMethodOAuth
++	})
++	return requirements
++}
+diff --git a/controller/site_scope_test.go b/controller/site_scope_test.go
+new file mode 100644
+index 000000000..3d29b018d
+--- /dev/null
++++ b/controller/site_scope_test.go
+@@ -0,0 +1,214 @@
++package controller
++
++import (
++	"net/http"
++	"net/http/httptest"
++	"testing"
++
++	"github.com/QuantumNous/new-api/common"
++	"github.com/QuantumNous/new-api/service"
++	"github.com/QuantumNous/new-api/setting/system_setting"
++	"github.com/gin-gonic/gin"
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++)
++
++func TestHidePrimarySiteDetailsBlanksAddressAndProviders(t *testing.T) {
++	data := gin.H{
++		"server_address":              "https://panel.example.com",
++		"github_client_id":            "gh-client",
++		"discord_client_id":           "dc-client",
++		"linuxdo_client_id":           "ld-client",
++		"telegram_bot_name":           "bot",
++		"wechat_qrcode":               "https://panel.example.com/qr.png",
++		"oidc_client_id":              "newapi",
++		"oidc_authorization_endpoint": "https://id.example.com/authorize",
++		"oidc_display_name":           "Company SSO",
++		"passkey_display_name":        "Shop",
++		"passkey_rp_id":               "panel.example.com",
++		"linuxdo_minimum_trust_level": 2,
++		"passkey_rp_ids":              []string{"panel.example.com"},
++		"api_info":                    []any{map[string]string{"url": "https://panel.example.com"}},
++		"custom_oauth_providers":      []any{map[string]string{"slug": "gitlab"}},
++	}
++
++	hidePrimarySiteDetails(data)
++
++	for _, key := range []string{
++		"server_address",
++		"github_client_id",
++		"discord_client_id",
++		"linuxdo_client_id",
++		"telegram_bot_name",
++		"wechat_qrcode",
++		"oidc_client_id",
++		"oidc_authorization_endpoint",
++		"oidc_display_name",
++		"passkey_display_name",
++		"passkey_rp_id",
++	} {
++		assert.Equal(t, "", data[key], "%s must be blanked on a secondary domain", key)
++	}
++	assert.Equal(t, 0, data["linuxdo_minimum_trust_level"])
++	assert.Equal(t, []string{}, data["passkey_rp_ids"])
++	for _, key := range []string{"api_info", "custom_oauth_providers"} {
++		_, ok := data[key]
++		assert.False(t, ok, "%s must not be advertised on a secondary domain", key)
++	}
++}
++
++func TestHidePrimarySiteDetailsDisablesProviders(t *testing.T) {
++	data := gin.H{
++		"github_oauth":              true,
++		"discord_oauth":             true,
++		"linuxdo_oauth":             true,
++		"telegram_oauth":            true,
++		"telegram_oauth_configured": true,
++		"wechat_login":              true,
++		"oidc_enabled":              true,
++		"passkey_login":             true,
++		"passkey_allow_insecure":    true,
++	}
++
++	hidePrimarySiteDetails(data)
++
++	for _, key := range []string{
++		"github_oauth",
++		"discord_oauth",
++		"linuxdo_oauth",
++		"telegram_oauth",
++		"telegram_oauth_configured",
++		"wechat_login",
++		"oidc_enabled",
++		"passkey_login",
++		"passkey_allow_insecure",
++	} {
++		assert.Equal(t, false, data[key], "%s must be disabled on a secondary domain", key)
++	}
++}
++
++func TestHidePrimarySiteDetailsLeavesPasswordLoginAlone(t *testing.T) {
++	data := gin.H{
++		"system_name":            "Shop",
++		"password_login_enabled": true,
++		"logo":                   "/logo.png",
++	}
++
++	hidePrimarySiteDetails(data)
++
++	assert.Equal(t, "Shop", data["system_name"])
++	assert.Equal(t, true, data["password_login_enabled"])
++	assert.Equal(t, "/logo.png", data["logo"])
++}
++
++func TestStripOAuthVerification(t *testing.T) {
++	requirements := &service.VerificationRequirements{
++		Scope: service.VerificationScopeAccountBind,
++		Methods: []service.VerificationMethodOption{
++			{Method: service.VerificationMethodPassword, Available: true},
++			{Method: service.VerificationMethodOAuth, Available: true},
++		},
++		OAuthProviders: []service.VerificationOAuthProvider{{Slug: "oidc", Name: "OIDC"}},
++	}
++
++	stripped := stripOAuthVerification(requirements)
++
++	assert.Equal(t, []service.VerificationMethodOption{
++		{Method: service.VerificationMethodPassword, Available: true},
++	}, stripped.Methods)
++	assert.Empty(t, stripped.OAuthProviders)
++}
++
++func TestStripOAuthVerificationKeepsSoleMethodForItsOriginalError(t *testing.T) {
++	requirements := &service.VerificationRequirements{
++		Methods: []service.VerificationMethodOption{
++			{Method: service.VerificationMethodOAuth, Available: false, Reason: "No linked OAuth provider is available."},
++		},
++	}
++
++	assert.Same(t, requirements, stripOAuthVerification(requirements))
++	assert.Len(t, requirements.Methods, 1)
++	assert.Nil(t, stripOAuthVerification(nil))
++}
++
++func statusPayloadFor(t *testing.T, rawURL string) (map[string]any, string) {
++	t.Helper()
++	response := httptest.NewRecorder()
++	context, _ := gin.CreateTestContext(response)
++	context.Request = httptest.NewRequest(http.MethodGet, rawURL, nil)
++
++	GetStatus(context)
++
++	var payload struct {
++		Success bool           `json:"success"`
++		Data    map[string]any `json:"data"`
++	}
++	require.NoError(t, common.Unmarshal(response.Body.Bytes(), &payload))
++	require.True(t, payload.Success)
++	return payload.Data, response.Body.String()
++}
++
++func TestGetStatusKeepsPrimaryAddressAndProviders(t *testing.T) {
++	restore := configureSecondaryDomainFixture(t)
++	defer restore()
++
++	data, body := statusPayloadFor(t, "https://panel.example.com/api/status")
++	assert.Equal(t, "https://panel.example.com", data["server_address"])
++	assert.Equal(t, true, data["oidc_enabled"])
++	assert.Equal(t, "https://id.example.com/authorize", data["oidc_authorization_endpoint"])
++	assert.Equal(t, true, data["passkey_login"])
++	assert.Contains(t, body, "panel.example.com")
++}
++
++func TestGetStatusOnSecondaryDomainHidesPrimarySite(t *testing.T) {
++	restore := configureSecondaryDomainFixture(t)
++	defer restore()
++
++	data, body := statusPayloadFor(t, "https://shop.example.net/api/status")
++
++	assert.Equal(t, "", data["server_address"])
++	assert.Equal(t, false, data["oidc_enabled"])
++	assert.Equal(t, "", data["oidc_client_id"])
++	assert.Equal(t, "", data["oidc_authorization_endpoint"])
++	assert.Equal(t, "", data["oidc_display_name"])
++	assert.Equal(t, false, data["passkey_login"])
++	assert.Equal(t, "", data["passkey_rp_id"])
++	assert.Equal(t, []any{}, data["passkey_rp_ids"])
++	assert.NotContains(t, data, "custom_oauth_providers")
++	// Password login stays available and nothing names the primary address.
++	assert.Equal(t, true, data["password_login_enabled"])
++	assert.NotContains(t, body, "panel.example.com")
++	assert.NotContains(t, body, "id.example.com")
++}
++
++// configureSecondaryDomainFixture turns on every provider and points
++// ServerAddress at a primary domain, so a test can compare both entry points.
++func configureSecondaryDomainFixture(t *testing.T) func() {
++	t.Helper()
++	oidcSettings := system_setting.GetOIDCSettings()
++	previousOIDC := *oidcSettings
++	passkeySettings := system_setting.GetPasskeySettings()
++	previousPasskey := *passkeySettings
++	previousServerAddress := system_setting.ServerAddress
++	previousOptionMap := common.OptionMap
++
++	common.OptionMap = map[string]string{}
++	system_setting.ServerAddress = "https://panel.example.com"
++	*oidcSettings = system_setting.OIDCSettings{
++		Enabled:               true,
++		DisplayName:           "Company SSO",
++		ClientId:              "newapi",
++		ClientSecret:          "secret",
++		AuthorizationEndpoint: "https://id.example.com/authorize",
++		TokenEndpoint:         "https://id.example.com/token",
++		UserInfoEndpoint:      "https://id.example.com/userinfo",
++	}
++	*passkeySettings = system_setting.PasskeySettings{Enabled: true, RPID: "panel.example.com"}
++
++	return func() {
++		*oidcSettings = previousOIDC
++		*passkeySettings = previousPasskey
++		system_setting.ServerAddress = previousServerAddress
++		common.OptionMap = previousOptionMap
++	}
++}
+diff --git a/controller/subscription_payment_epay.go b/controller/subscription_payment_epay.go
+index 3654ee6cc..69b42dd1a 100644
+--- a/controller/subscription_payment_epay.go
++++ b/controller/subscription_payment_epay.go
+@@ -176,7 +176,7 @@ func SubscriptionEpayReturn(c *gin.Context) {
+ 	if c.Request.Method == "POST" {
+ 		// POST 请求：从 POST body 解析参数
+ 		if err := c.Request.ParseForm(); err != nil {
+-			c.Redirect(http.StatusFound, paymentReturnPath("/wallet?pay=fail"))
++			c.Redirect(http.StatusFound, requestBaseURL(c)+"/wallet?pay=fail")
+ 			return
+ 		}
+ 		params = lo.Reduce(lo.Keys(c.Request.PostForm), func(r map[string]string, t string, i int) map[string]string {
+@@ -192,29 +192,29 @@ func SubscriptionEpayReturn(c *gin.Context) {
+ 	}
+ 
+ 	if len(params) == 0 {
+-		c.Redirect(http.StatusFound, paymentReturnPath("/wallet?pay=fail"))
++		c.Redirect(http.StatusFound, requestBaseURL(c)+"/wallet?pay=fail")
+ 		return
+ 	}
+ 
+ 	client := GetEpayClient()
+ 	if client == nil {
+-		c.Redirect(http.StatusFound, paymentReturnPath("/wallet?pay=fail"))
++		c.Redirect(http.StatusFound, requestBaseURL(c)+"/wallet?pay=fail")
+ 		return
+ 	}
+ 	verifyInfo, err := client.Verify(params)
+ 	if err != nil || !verifyInfo.VerifyStatus {
+-		c.Redirect(http.StatusFound, paymentReturnPath("/wallet?pay=fail"))
++		c.Redirect(http.StatusFound, requestBaseURL(c)+"/wallet?pay=fail")
+ 		return
+ 	}
+ 	if verifyInfo.TradeStatus == epay.StatusTradeSuccess {
+ 		LockOrder(verifyInfo.ServiceTradeNo)
+ 		defer UnlockOrder(verifyInfo.ServiceTradeNo)
+ 		if err := model.CompleteSubscriptionOrder(verifyInfo.ServiceTradeNo, common.GetJsonString(verifyInfo), model.PaymentProviderEpay, verifyInfo.Type); err != nil {
+-			c.Redirect(http.StatusFound, paymentReturnPath("/wallet?pay=fail"))
++			c.Redirect(http.StatusFound, requestBaseURL(c)+"/wallet?pay=fail")
+ 			return
+ 		}
+-		c.Redirect(http.StatusFound, paymentReturnPath("/wallet?pay=success"))
++		c.Redirect(http.StatusFound, requestBaseURL(c)+"/wallet?pay=success")
+ 		return
+ 	}
+-	c.Redirect(http.StatusFound, paymentReturnPath("/wallet?pay=pending"))
++	c.Redirect(http.StatusFound, requestBaseURL(c)+"/wallet?pay=pending")
+ }
+diff --git a/controller/subscription_payment_stripe.go b/controller/subscription_payment_stripe.go
+index e287a392b..97eff799c 100644
+--- a/controller/subscription_payment_stripe.go
++++ b/controller/subscription_payment_stripe.go
+@@ -79,7 +79,7 @@ func SubscriptionRequestStripePay(c *gin.Context) {
+ 	reference := fmt.Sprintf("sub-stripe-ref-%d-%d-%s", user.Id, time.Now().UnixMilli(), randstr.String(4))
+ 	referenceId := "sub_ref_" + common.Sha1([]byte(reference))
+ 
+-	payLink, err := genStripeSubscriptionLink(referenceId, user.StripeCustomer, user.Email, plan.StripePriceId)
++	payLink, err := genStripeSubscriptionLink(referenceId, user.StripeCustomer, user.Email, plan.StripePriceId, requestBaseURL(c))
+ 	if err != nil {
+ 		logger.LogError(c.Request.Context(), common.LogText("Stripe failed to create subscription payment link trade_no=%s plan_id=%d error=%q", referenceId, plan.Id, err.Error()))
+ 		paymentError(c, common.NewMessage("Failed to start payment"))
+@@ -109,13 +109,13 @@ func SubscriptionRequestStripePay(c *gin.Context) {
+ 	})
+ }
+ 
+-func genStripeSubscriptionLink(referenceId string, customerId string, email string, priceId string) (string, error) {
++func genStripeSubscriptionLink(referenceId string, customerId string, email string, priceId string, siteBase string) (string, error) {
+ 	stripe.Key = setting.StripeApiSecret
+ 
+ 	params := &stripe.CheckoutSessionParams{
+ 		ClientReferenceID: stripe.String(referenceId),
+-		SuccessURL:        stripe.String(paymentReturnPath("/wallet")),
+-		CancelURL:         stripe.String(paymentReturnPath("/wallet")),
++		SuccessURL:        stripe.String(siteBase + "/wallet"),
++		CancelURL:         stripe.String(siteBase + "/wallet"),
+ 		LineItems: []*stripe.CheckoutSessionLineItemParams{
+ 			{
+ 				Price:    stripe.String(priceId),
+diff --git a/controller/topup.go b/controller/topup.go
+index 3ee8125cc..502c7d1b8 100644
+--- a/controller/topup.go
++++ b/controller/topup.go
+@@ -313,7 +313,7 @@ func RequestEpay(c *gin.Context) {
+ 	}
+ 
+ 	callBackAddress := service.GetCallbackAddress()
+-	returnUrl, _ := url.Parse(paymentReturnPath("/usage-logs"))
++	returnUrl, _ := url.Parse(requestBaseURL(c) + "/usage-logs")
+ 	notifyUrl, _ := url.Parse(callBackAddress + "/api/user/epay/notify")
+ 	tradeNo := fmt.Sprintf("%s%d", common.GetRandomString(6), time.Now().Unix())
+ 	tradeNo = fmt.Sprintf("USR%dNO%s", id, tradeNo)
+diff --git a/controller/topup_stripe.go b/controller/topup_stripe.go
+index 35b1bcf09..e670d0490 100644
+--- a/controller/topup_stripe.go
++++ b/controller/topup_stripe.go
+@@ -109,7 +109,7 @@ func (*StripeAdaptor) RequestPay(c *gin.Context, req *StripePayRequest) {
+ 	reference := fmt.Sprintf("new-api-ref-%d-%d-%s", user.Id, time.Now().UnixMilli(), randstr.String(4))
+ 	referenceId := "ref_" + common.Sha1([]byte(reference))
+ 
+-	payLink, err := genStripeLink(referenceId, user.StripeCustomer, user.Email, req.Amount, req.SuccessURL, req.CancelURL)
++	payLink, err := genStripeLink(referenceId, user.StripeCustomer, user.Email, req.Amount, req.SuccessURL, req.CancelURL, requestBaseURL(c))
+ 	if err != nil {
+ 		logger.LogError(c.Request.Context(), common.LogText("Stripe failed to create Checkout Session user_id=%d trade_no=%s amount=%d error=%q", id, referenceId, req.Amount, err.Error()))
+ 		paymentError(c, common.NewMessage("Failed to start payment"))
+@@ -353,9 +353,10 @@ func sessionExpired(ctx context.Context, event stripe.Event) {
+ //   - amount: quantity of units to purchase
+ //   - successURL: custom URL to redirect after successful payment (empty for default)
+ //   - cancelURL: custom URL to redirect when payment is canceled (empty for default)
++//   - siteBase: scheme://host[:port] the buyer is using, used for the defaults
+ //
+ // Returns the checkout session URL or an error if the session creation fails.
+-func genStripeLink(referenceId string, customerId string, email string, amount int64, successURL string, cancelURL string) (string, error) {
++func genStripeLink(referenceId string, customerId string, email string, amount int64, successURL string, cancelURL string, siteBase string) (string, error) {
+ 	if !strings.HasPrefix(setting.StripeApiSecret, "sk_") && !strings.HasPrefix(setting.StripeApiSecret, "rk_") {
+ 		return "", errors.New("invalid Stripe API key")
+ 	}
+@@ -364,10 +365,10 @@ func genStripeLink(referenceId string, customerId string, email string, amount i
+ 
+ 	// Use custom URLs if provided, otherwise use defaults
+ 	if successURL == "" {
+-		successURL = paymentReturnPath("/usage-logs")
++		successURL = siteBase + "/usage-logs"
+ 	}
+ 	if cancelURL == "" {
+-		cancelURL = paymentReturnPath("/wallet")
++		cancelURL = siteBase + "/wallet"
+ 	}
+ 
+ 	params := &stripe.CheckoutSessionParams{
+diff --git a/controller/topup_waffo.go b/controller/topup_waffo.go
+index 85a2bac87..ab91a7660 100644
+--- a/controller/topup_waffo.go
++++ b/controller/topup_waffo.go
+@@ -251,7 +251,7 @@ func RequestWaffoPay(c *gin.Context) {
+ 	if setting.WaffoNotifyUrl != "" {
+ 		notifyUrl = setting.WaffoNotifyUrl
+ 	}
+-	returnUrl := paymentReturnPath("/wallet?show_history=true")
++	returnUrl := requestBaseURL(c) + "/wallet?show_history=true"
+ 	if setting.WaffoReturnUrl != "" {
+ 		returnUrl = setting.WaffoReturnUrl
+ 	}
+diff --git a/middleware/primary_origin.go b/middleware/primary_origin.go
+new file mode 100644
+index 000000000..681bd4b76
+--- /dev/null
++++ b/middleware/primary_origin.go
+@@ -0,0 +1,28 @@
++package middleware
++
++import (
++	"net/http"
++
++	"github.com/QuantumNous/new-api/setting/system_setting"
++
++	"github.com/gin-gonic/gin"
++)
++
++// PrimaryOriginOnly rejects authentication endpoints reached through a
++// secondary domain. Hiding a provider from /api/status only removes the button:
++// without this guard, anyone who knows the route could still start an OIDC
++// login from a secondary address and be handed the primary address by the
++// identity provider.
++func PrimaryOriginOnly() gin.HandlerFunc {
++	return func(c *gin.Context) {
++		if system_setting.IsPrimaryRequest(c.Request) {
++			c.Next()
++			return
++		}
++		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
++			"success": false,
++			"code":    "PRIMARY_ORIGIN_REQUIRED",
++			"message": "This sign-in method is not available on this address.",
++		})
++	}
++}
+diff --git a/oauth/discord.go b/oauth/discord.go
+index 805068c76..248abde87 100644
+--- a/oauth/discord.go
++++ b/oauth/discord.go
+@@ -3,7 +3,6 @@ package oauth
+ import (
+ 	"context"
+ 	"encoding/json"
+-	"fmt"
+ 	"net/http"
+ 	"net/url"
+ 	"strings"
+@@ -52,7 +51,7 @@ func (p *DiscordProvider) ExchangeToken(ctx context.Context, code string, c *gin
+ 	}
+ 
+ 	settings := system_setting.GetDiscordSettings()
+-	redirectUri := fmt.Sprintf("%s/oauth/discord", system_setting.ServerAddress)
++	redirectUri := redirectBase() + "/oauth/discord"
+ 	values := url.Values{}
+ 	values.Set("client_id", settings.ClientId)
+ 	values.Set("client_secret", settings.ClientSecret)
+diff --git a/oauth/generic.go b/oauth/generic.go
+index 9132bae62..bc0442524 100644
+--- a/oauth/generic.go
++++ b/oauth/generic.go
+@@ -17,7 +17,6 @@ import (
+ 	"github.com/QuantumNous/new-api/common"
+ 	"github.com/QuantumNous/new-api/logger"
+ 	"github.com/QuantumNous/new-api/model"
+-	"github.com/QuantumNous/new-api/setting/system_setting"
+ 	"github.com/gin-gonic/gin"
+ 	"github.com/samber/lo"
+ 	"github.com/tidwall/gjson"
+@@ -91,7 +90,7 @@ func (p *GenericOAuthProvider) ExchangeToken(ctx context.Context, code string, c
+ 		return nil, NewOAuthError(common.NewMessage(msgInvalidCode))
+ 	}
+ 
+-	redirectUri := fmt.Sprintf("%s/oauth/%s", system_setting.ServerAddress, p.config.Slug)
++	redirectUri := redirectBase() + "/oauth/" + p.config.Slug
+ 	values := url.Values{}
+ 	values.Set("grant_type", "authorization_code")
+ 	values.Set("code", code)
+diff --git a/oauth/oidc.go b/oauth/oidc.go
+index 0ecc92cf2..735eb27cf 100644
+--- a/oauth/oidc.go
++++ b/oauth/oidc.go
+@@ -3,7 +3,6 @@ package oauth
+ import (
+ 	"context"
+ 	"encoding/json"
+-	"fmt"
+ 	"net/http"
+ 	"net/url"
+ 	"strings"
+@@ -54,7 +53,7 @@ func (p *OIDCProvider) ExchangeToken(ctx context.Context, code string, c *gin.Co
+ 	}
+ 
+ 	settings := system_setting.GetOIDCSettings()
+-	redirectUri := fmt.Sprintf("%s/oauth/oidc", system_setting.ServerAddress)
++	redirectUri := redirectBase() + "/oauth/oidc"
+ 	values := url.Values{}
+ 	values.Set("client_id", settings.ClientId)
+ 	values.Set("client_secret", settings.ClientSecret)
+diff --git a/oauth/redirect_base.go b/oauth/redirect_base.go
+new file mode 100644
+index 000000000..aa7c38239
+--- /dev/null
++++ b/oauth/redirect_base.go
+@@ -0,0 +1,20 @@
++package oauth
++
++import (
++	"strings"
++
++	"github.com/QuantumNous/new-api/setting/system_setting"
++)
++
++// redirectBase returns the scheme://host[:port] the identity provider sends the
++// browser back to. The SPA always requests <browser origin>/oauth/<provider>,
++// and the token exchange must repeat that value verbatim (RFC 6749 §4.1.3), so
++// a trailing slash or a configured path prefix must never leak into it.
++// OAuth sign-in only runs on the primary address, which is what ServerAddress
++// names.
++func redirectBase() string {
++	if origin, ok := system_setting.PrimaryOrigin(); ok {
++		return origin
++	}
++	return strings.TrimRight(strings.TrimSpace(system_setting.ServerAddress), "/")
++}
+diff --git a/oauth/redirect_base_test.go b/oauth/redirect_base_test.go
+new file mode 100644
+index 000000000..b503501e3
+--- /dev/null
++++ b/oauth/redirect_base_test.go
+@@ -0,0 +1,28 @@
++package oauth
++
++import (
++	"testing"
++
++	"github.com/QuantumNous/new-api/setting/system_setting"
++	"github.com/stretchr/testify/assert"
++)
++
++func TestRedirectBaseMatchesBrowserOrigin(t *testing.T) {
++	previousAddress := system_setting.ServerAddress
++	t.Cleanup(func() { system_setting.ServerAddress = previousAddress })
++
++	for _, address := range []string{
++		"https://panel.example.com",
++		"https://panel.example.com/",
++		"https://panel.example.com/newapi",
++		"https://PANEL.example.com:443",
++	} {
++		system_setting.ServerAddress = address
++		assert.Equal(t, "https://panel.example.com", redirectBase(), "address %q", address)
++	}
++
++	// Without a configured address there is no origin to derive; the raw value
++	// is kept so the identity provider reports the misconfiguration itself.
++	system_setting.ServerAddress = ""
++	assert.Equal(t, "", redirectBase())
++}
+diff --git a/oauth/telegram.go b/oauth/telegram.go
+index a84cccdec..4f6e0aa11 100644
+--- a/oauth/telegram.go
++++ b/oauth/telegram.go
+@@ -54,7 +54,7 @@ func NewTelegramOAuthFlow() (*TelegramOAuthFlow, error) {
+ 	if err := TelegramConfigurationError(); err != nil {
+ 		return nil, err
+ 	}
+-	redirectURI := strings.TrimRight(system_setting.ServerAddress, "/") + "/oauth/telegram"
++	redirectURI := redirectBase() + "/oauth/telegram"
+ 	parsed, err := url.Parse(redirectURI)
+ 	if err != nil || parsed.Host == "" || (parsed.Scheme != "https" && parsed.Scheme != "http") {
+ 		return nil, ErrTelegramOAuthNotConfigured
+@@ -113,7 +113,7 @@ func (p *TelegramProvider) ExchangeToken(ctx context.Context, code string, c *gi
+ 	settings := system_setting.GetTelegramSettings()
+ 	if !ok || flow == nil || flow.CodeVerifier == "" || code == "" ||
+ 		flow.ClientID != strings.TrimSpace(settings.ClientID) ||
+-		flow.RedirectURI != strings.TrimRight(system_setting.ServerAddress, "/")+"/oauth/telegram" {
++		flow.RedirectURI != redirectBase()+"/oauth/telegram" {
+ 		return nil, ErrTelegramOAuthFailed
+ 	}
+ 	values := url.Values{
+diff --git a/router/api-router.go b/router/api-router.go
+index 1009affbf..0abe3ae39 100644
+--- a/router/api-router.go
++++ b/router/api-router.go
+@@ -47,18 +47,18 @@ func SetApiRouter(router *gin.Engine) {
+ 		apiRouter.GET("/reset_password", middleware.CriticalRateLimit(), middleware.TurnstileCheck(), controller.SendPasswordResetEmail)
+ 		apiRouter.POST("/user/reset", middleware.CriticalRateLimit(), anonymousRequestBodyLimit, controller.ResetPassword)
+ 		// OAuth routes - specific routes must come before :provider wildcard
+-		apiRouter.POST("/oauth/state", middleware.CriticalRateLimit(), middleware.DisableCache(), middleware.TryUserAuth(), anonymousRequestBodyLimit, controller.GenerateOAuthCode)
++		apiRouter.POST("/oauth/state", middleware.PrimaryOriginOnly(), middleware.CriticalRateLimit(), middleware.DisableCache(), middleware.TryUserAuth(), anonymousRequestBodyLimit, controller.GenerateOAuthCode)
+ 		apiRouter.POST("/oauth/email/bind/start", middleware.UserAuth(), middleware.CriticalRateLimit(), middleware.UserCriticalRateLimit("account-security"), middleware.EmailVerificationRateLimit(), middleware.DisableCache(), controller.EmailBindStart)
+ 		apiRouter.POST("/oauth/email/bind/resend", middleware.UserAuth(), middleware.CriticalRateLimit(), middleware.UserCriticalRateLimit("account-security"), middleware.EmailVerificationRateLimit(), middleware.DisableCache(), controller.EmailBindResend)
+ 		apiRouter.POST("/oauth/email/bind", middleware.UserAuth(), middleware.CriticalRateLimit(), middleware.UserCriticalRateLimit("account-security"), middleware.DisableCache(), controller.EmailBind)
+ 		// WeChat uses its existing authorization-code service.
+-		apiRouter.GET("/oauth/wechat", middleware.CriticalRateLimit(), middleware.DisableCache(), controller.WeChatAuth)
+-		apiRouter.POST("/oauth/wechat/bind", middleware.UserAuth(), middleware.CriticalRateLimit(), controller.WeChatBind)
+-		apiRouter.GET("/oauth/telegram/login", middleware.CriticalRateLimit(), middleware.DisableCache(), controller.TelegramLegacyAuth)
+-		apiRouter.POST("/oauth/telegram/bind/start", middleware.UserAuth(), middleware.CriticalRateLimit(), middleware.DisableCache(), controller.TelegramLegacyAuth)
+-		apiRouter.GET("/oauth/telegram/bind/:flow_token", middleware.CriticalRateLimit(), middleware.DisableCache(), controller.TelegramLegacyAuth)
++		apiRouter.GET("/oauth/wechat", middleware.PrimaryOriginOnly(), middleware.CriticalRateLimit(), middleware.DisableCache(), controller.WeChatAuth)
++		apiRouter.POST("/oauth/wechat/bind", middleware.PrimaryOriginOnly(), middleware.UserAuth(), middleware.CriticalRateLimit(), controller.WeChatBind)
++		apiRouter.GET("/oauth/telegram/login", middleware.PrimaryOriginOnly(), middleware.CriticalRateLimit(), middleware.DisableCache(), controller.TelegramLegacyAuth)
++		apiRouter.POST("/oauth/telegram/bind/start", middleware.PrimaryOriginOnly(), middleware.UserAuth(), middleware.CriticalRateLimit(), middleware.DisableCache(), controller.TelegramLegacyAuth)
++		apiRouter.GET("/oauth/telegram/bind/:flow_token", middleware.PrimaryOriginOnly(), middleware.CriticalRateLimit(), middleware.DisableCache(), controller.TelegramLegacyAuth)
+ 		// Standard OAuth providers (GitHub, Discord, OIDC, LinuxDO, Telegram) - unified route
+-		apiRouter.GET("/oauth/:provider", middleware.CriticalRateLimit(), middleware.DisableCache(), middleware.TryUserAuth(), controller.HandleOAuth)
++		apiRouter.GET("/oauth/:provider", middleware.PrimaryOriginOnly(), middleware.CriticalRateLimit(), middleware.DisableCache(), middleware.TryUserAuth(), controller.HandleOAuth)
+ 		apiRouter.GET("/ratio_config", middleware.CriticalRateLimit(), controller.GetRatioConfig)
+ 
+ 		apiRouter.POST("/stripe/webhook", anonymousRequestBodyLimit, controller.StripeWebhook)
+@@ -81,10 +81,10 @@ func SetApiRouter(router *gin.Engine) {
+ 			userRoute.POST("/login", middleware.CriticalRateLimit(), middleware.DisableCache(), anonymousRequestBodyLimit, middleware.TurnstileCheck(), controller.Login)
+ 			userRoute.POST("/login/2fa", middleware.CriticalRateLimit(), middleware.DisableCache(), anonymousRequestBodyLimit, controller.Verify2FALogin)
+ 			userRoute.POST("/login/verify", middleware.CriticalRateLimit(), middleware.DisableCache(), anonymousRequestBodyLimit, controller.VerifyLogin)
+-			userRoute.POST("/login/passkey/begin", middleware.CriticalRateLimit(), middleware.DisableCache(), anonymousRequestBodyLimit, controller.LoginPasskeyBegin)
+-			userRoute.POST("/login/passkey/finish", middleware.CriticalRateLimit(), middleware.DisableCache(), anonymousRequestBodyLimit, controller.LoginPasskeyFinish)
+-			userRoute.POST("/passkey/login/begin", middleware.CriticalRateLimit(), middleware.DisableCache(), anonymousRequestBodyLimit, controller.PasskeyLoginBegin)
+-			userRoute.POST("/passkey/login/finish", middleware.CriticalRateLimit(), middleware.DisableCache(), anonymousRequestBodyLimit, controller.PasskeyLoginFinish)
++			userRoute.POST("/login/passkey/begin", middleware.PrimaryOriginOnly(), middleware.CriticalRateLimit(), middleware.DisableCache(), anonymousRequestBodyLimit, controller.LoginPasskeyBegin)
++			userRoute.POST("/login/passkey/finish", middleware.PrimaryOriginOnly(), middleware.CriticalRateLimit(), middleware.DisableCache(), anonymousRequestBodyLimit, controller.LoginPasskeyFinish)
++			userRoute.POST("/passkey/login/begin", middleware.PrimaryOriginOnly(), middleware.CriticalRateLimit(), middleware.DisableCache(), anonymousRequestBodyLimit, controller.PasskeyLoginBegin)
++			userRoute.POST("/passkey/login/finish", middleware.PrimaryOriginOnly(), middleware.CriticalRateLimit(), middleware.DisableCache(), anonymousRequestBodyLimit, controller.PasskeyLoginFinish)
+ 			//userRoute.POST("/tokenlog", middleware.CriticalRateLimit(), controller.TokenLog)
+ 			userRoute.POST("/epay/notify", anonymousRequestBodyLimit, controller.EpayNotify)
+ 			userRoute.GET("/epay/notify", controller.EpayNotify)
+diff --git a/setting/system_setting/primary_origin.go b/setting/system_setting/primary_origin.go
+new file mode 100644
+index 000000000..f3393cd7c
+--- /dev/null
++++ b/setting/system_setting/primary_origin.go
+@@ -0,0 +1,42 @@
++package system_setting
++
++import (
++	"net/http"
++	"net/url"
++	"strings"
++
++	"github.com/QuantumNous/new-api/common"
++)
++
++// PrimaryOrigin returns the normalized origin of ServerAddress, the canonical
++// address of this site. ServerAddress may carry a path prefix (an upstream
++// proxy mount point); the path is dropped because a browser origin never has
++// one.
++func PrimaryOrigin() (string, bool) {
++	parsed, err := url.Parse(strings.TrimSpace(ServerAddress))
++	if err != nil || parsed.Host == "" {
++		return "", false
++	}
++	origin, err := common.NormalizeOrigin(parsed.Scheme + "://" + parsed.Host)
++	return origin, err == nil
++}
++
++// IsPrimaryRequest reports whether a browser request arrived on ServerAddress.
++// Every other host is a secondary entry point: it must not advertise the
++// primary address, the identity provider or any third-party sign-in provider,
++// so a visitor of a secondary domain never learns that the primary one exists.
++//
++// Without a usable ServerAddress the historical single-address behaviour is
++// kept and every request counts as primary, which also keeps first-run setup
++// working.
++func IsPrimaryRequest(request *http.Request) bool {
++	primary, ok := PrimaryOrigin()
++	if !ok {
++		return true
++	}
++	origin, ok := common.RequestPublicOrigin(request)
++	if !ok {
++		return false
++	}
++	return strings.EqualFold(origin, primary)
++}
+diff --git a/setting/system_setting/primary_origin_test.go b/setting/system_setting/primary_origin_test.go
+new file mode 100644
+index 000000000..21c0a8584
+--- /dev/null
++++ b/setting/system_setting/primary_origin_test.go
+@@ -0,0 +1,64 @@
++package system_setting
++
++import (
++	"net/http/httptest"
++	"testing"
++
++	"github.com/stretchr/testify/assert"
++)
++
++func withServerAddress(t *testing.T, value string) {
++	t.Helper()
++	previous := ServerAddress
++	ServerAddress = value
++	t.Cleanup(func() { ServerAddress = previous })
++}
++
++func TestPrimaryOrigin(t *testing.T) {
++	withServerAddress(t, "https://panel.example.com/")
++	origin, ok := PrimaryOrigin()
++	assert.True(t, ok)
++	assert.Equal(t, "https://panel.example.com", origin)
++
++	withServerAddress(t, "https://gateway.example.com/newapi")
++	origin, ok = PrimaryOrigin()
++	assert.True(t, ok)
++	assert.Equal(t, "https://gateway.example.com", origin)
++
++	withServerAddress(t, "")
++	_, ok = PrimaryOrigin()
++	assert.False(t, ok)
++
++	withServerAddress(t, "panel.example.com")
++	_, ok = PrimaryOrigin()
++	assert.False(t, ok)
++}
++
++func TestIsPrimaryRequest(t *testing.T) {
++	withServerAddress(t, "https://panel.example.com")
++
++	primary := httptest.NewRequest("GET", "https://panel.example.com/api/status", nil)
++	assert.True(t, IsPrimaryRequest(primary))
++
++	secondary := httptest.NewRequest("GET", "https://shop.example.net/api/status", nil)
++	assert.False(t, IsPrimaryRequest(secondary))
++
++	// A secondary domain hidden behind a proxy still identifies itself through
++	// the forwarded host, so it must stay secondary.
++	forwarded := httptest.NewRequest("GET", "http://127.0.0.1:3000/api/status", nil)
++	forwarded.Header.Set("X-Forwarded-Proto", "https")
++	forwarded.Header.Set("X-Forwarded-Host", "shop.example.net")
++	assert.False(t, IsPrimaryRequest(forwarded))
++
++	forwardedPrimary := httptest.NewRequest("GET", "http://127.0.0.1:3000/api/status", nil)
++	forwardedPrimary.Header.Set("X-Forwarded-Proto", "https")
++	forwardedPrimary.Header.Set("X-Forwarded-Host", "panel.example.com")
++	assert.True(t, IsPrimaryRequest(forwardedPrimary))
++}
++
++func TestIsPrimaryRequestWithoutServerAddressKeepsSingleAddressBehaviour(t *testing.T) {
++	withServerAddress(t, "")
++
++	request := httptest.NewRequest("GET", "https://anything.example.org/api/status", nil)
++	assert.True(t, IsPrimaryRequest(request))
++}
+diff --git a/setting/system_setting/system_setting_old.go b/setting/system_setting/system_setting_old.go
+index 737bd3820..4999a5584 100644
+--- a/setting/system_setting/system_setting_old.go
++++ b/setting/system_setting/system_setting_old.go
+@@ -1,6 +1,9 @@
+ package system_setting
+ 
+-var ServerAddress = "http://localhost:3000"
++// ServerAddress is the primary, fully featured address of this site. It stays
++// empty until an administrator saves one, which keeps a fresh install on the
++// historical single-address behaviour instead of pointing at localhost.
++var ServerAddress = ""
+ var TaskPublicAddress = ""
+ var WorkerUrl = ""
+ var WorkerValidKey = ""
