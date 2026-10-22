@@ -46,7 +46,7 @@ awk '
 /RUN uv sync --frozen --no-install-project --extra all/ {
     print "RUN apt-get update && apt-get install -y --no-install-recommends gcc g++ make cmake \\"
     print "    && uv sync --frozen --no-install-project --extra matrix --extra mcp \\"
-    print "    && uv pip install requests dashscope gradio-client \\"
+    print "    && uv pip install requests \\"
     # WeChat gateway deps — versions pinned to upstream pyproject.toml extras
     # (qrcode from [messaging], defusedxml from [wecom]).
     # aiohttp is already provided by --extra matrix at 3.14.1, not pinned here.
