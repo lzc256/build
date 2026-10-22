@@ -45,7 +45,7 @@ perl -i -pe 's/ openssh-client docker-cli//' "$DOCKERFILE"
 awk '
 /RUN uv sync --frozen --no-install-project --extra all/ {
     print "RUN apt-get update && apt-get install -y --no-install-recommends gcc g++ make cmake \\"
-    print "    && uv sync --frozen --no-install-project --extra matrix \\"
+    print "    && uv sync --frozen --no-install-project --extra matrix --extra mcp \\"
     print "    && uv pip install requests dashscope gradio-client \\"
     # WeChat gateway deps — versions pinned to upstream pyproject.toml extras
     # (qrcode from [messaging], defusedxml from [wecom]).
