@@ -87,6 +87,19 @@ there is no interpreter binary, no pip package and no wrapper process.
 **Important**: Scripts MUST call `newapi.balance.set()` to return the balance.
 `print()`, `require()` and file/process/socket access do not exist.
 
+### Dependency handling
+
+The patch deliberately does not touch `go.mod`/`go.sum`. Pinning dependency
+versions there means every upstream bump of the same lines conflicts, which
+breaks the build for commits the patch would otherwise survive. Instead the
+image resolves the runtime dependency itself:
+
+```dockerfile
+RUN go get github.com/dop251/goja@v0.0.0-20261024144015-2a9269b6b6de
+```
+
+Local builds therefore need the same step once after applying the patch.
+
 ## API Reference
 
 ### `newapi.environ` (object, read-only)

@@ -75,6 +75,12 @@ jobs:
           repository: ${{ env.UPSTREAM_REPO }}
           path: new-api-src
           ref: ${{ needs.check-update.outputs.commit }}
+          # Full history lets `git apply --3way` merge each patch onto a moved
+          # upstream instead of demanding an exact context match. With the
+          # default shallow clone git reports "repository lacks the necessary
+          # blob" and silently falls back to direct application, so any drift
+          # in a touched file fails the build.
+          fetch-depth: 0
 
       - name: Apply balance-script patch
         run: |
