@@ -100,6 +100,27 @@ RUN go get github.com/dop251/goja@v0.0.0-20261024144015-2a9269b6b6de
 
 Local builds therefore need the same step once after applying the patch.
 
+### Resource limits and trust model
+
+goja has no memory or step budget and cannot be interrupted inside a host
+call, so the envelope is built from the pieces that do exist:
+
+| Guard | Value | Why |
+|---|---|---|
+| wall clock | 30s | `Runtime.Interrupt`, polled between VM instructions |
+| per fetch | 10s, 16 calls, 1MB body | bounds the one call that cannot be interrupted |
+| heap growth | 128MB, sampled every 50ms | catches growth over time, not a single huge allocation |
+| JS call depth | 256 | goja `SetMaxCallStackSize` |
+| string results | 1MB | `repeat()`/`padStart()`/`padEnd()` are wrapped |
+| data nesting | 128 levels / 20000 nodes | `JSON.parse`, `JSON.stringify`, `state.save` |
+| binary buffers | removed | `ArrayBuffer` and the typed arrays allocate the requested size up front |
+
+Scripts still run **in the server process**: a Go-level stack overflow from
+runaway recursion is unrecoverable and would take the whole instance with it.
+Treat `ChannelWrite` as a trusted-admin permission — do not hand it to people
+who may write hostile scripts. If that ever changes, the answer is process
+isolation (subprocess plus rlimit/cgroup), not a different engine.
+
 ## API Reference
 
 ### `newapi.environ` (object, read-only)

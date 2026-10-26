@@ -79,10 +79,10 @@ index f85ffef92..2cc9f2656 100644
  
 diff --git a/controller/channel_balance_script.go b/controller/channel_balance_script.go
 new file mode 100644
-index 000000000..4dbabfe42
+index 000000000..564e8d544
 --- /dev/null
 +++ b/controller/channel_balance_script.go
-@@ -0,0 +1,442 @@
+@@ -0,0 +1,603 @@
 +package controller
 +
 +import (
@@ -94,6 +94,7 @@ index 000000000..4dbabfe42
 +	"math"
 +	"net/http"
 +	"net/url"
++	"runtime/metrics"
 +	"strconv"
 +	"strings"
 +	"time"
@@ -104,18 +105,23 @@ index 000000000..4dbabfe42
 +)
 +
 +const (
-+	balanceScriptTimeout      = 30 * time.Second   // wall clock cap for a whole script run
-+	balanceScriptFetchTimeout = 10 * time.Second   // per-request cap inside fetch()
-+	balanceScriptMaxMessage   = 72 * 1024          // 72KB cap on collected debug output (extra room for state JSON)
-+	balanceScriptMaxStateLen  = 65536              // 64KB max state size
-+	balanceScriptMaxSourceLen = 65536              // 64KB max script size
-+	balanceScriptMaxBalance   = 1e12               // bounds balance.set() so a bad value cannot break JSON encoding
-+	balanceScriptMaxBodyLen   = 1024 * 1024        // 1MB cap on a single fetch() response body
-+	balanceScriptMaxFetches   = 16                 // max fetch() calls per run
-+	balanceScriptMaxCallStack = 256                // max JS call depth
-+	balanceScriptMaxRedirects = 3                  // max HTTP redirects followed by fetch()
-+	balanceScriptStateUnwrap  = 8                  // max JSON string unwrapping steps for legacy state
-+	balanceScriptScriptName   = "<balance_script>" //
++	balanceScriptTimeout       = 30 * time.Second      // wall clock cap for a whole script run
++	balanceScriptFetchTimeout  = 10 * time.Second      // per-request cap inside fetch()
++	balanceScriptMaxMessage    = 72 * 1024             // 72KB cap on collected debug output (extra room for state JSON)
++	balanceScriptMaxStateLen   = 65536                 // 64KB max state size
++	balanceScriptMaxSourceLen  = 65536                 // 64KB max script size
++	balanceScriptMaxBalance    = 1e12                  // bounds balance.set() so a bad value cannot break JSON encoding
++	balanceScriptMaxBodyLen    = 1024 * 1024           // 1MB cap on a single fetch() response body
++	balanceScriptMaxFetches    = 16                    // max fetch() calls per run
++	balanceScriptMaxCallStack  = 256                   // max JS call depth
++	balanceScriptMaxRedirects  = 3                     // max HTTP redirects followed by fetch()
++	balanceScriptStateUnwrap   = 8                     // max JSON string unwrapping steps for legacy state
++	balanceScriptMaxStringLen  = 1 << 20               // max result length of repeat()/padStart()/padEnd()
++	balanceScriptMaxDataDepth  = 128                   // max nesting for data handed to JSON/state helpers
++	balanceScriptMaxDataNodes  = 20000                 // max nodes walked when checking that nesting
++	balanceScriptMaxHeapGrowth = 128 << 20             // heap growth a single run may cause before it is stopped
++	balanceScriptHeapSample    = 50 * time.Millisecond // heap watchdog sampling interval
++	balanceScriptScriptName    = "<balance_script>"    //
 +)
 +
 +// updateChannelBalanceScript executes a user-defined JavaScript script to fetch channel balance.
@@ -208,6 +214,8 @@ index 000000000..4dbabfe42
 +	messageLen int
 +	truncated  bool
 +
++	initErr error
++
 +	fetches int
 +}
 +
@@ -225,6 +233,14 @@ index 000000000..4dbabfe42
 +		channel: channel,
 +	}
 +	rt.vm.SetMaxCallStackSize(balanceScriptMaxCallStack)
++
++	// goja exposes ArrayBuffer and the typed arrays, whose constructors allocate
++	// the requested length immediately (allocByteSlice -> make([]byte, size)).
++	// One line would otherwise be enough to take the process down, and a balance
++	// script has no use for binary buffers.
++	for _, name := range balanceScriptDisabledGlobals {
++		_ = rt.vm.GlobalObject().Delete(name)
++	}
 +
 +	environ := rt.vm.NewObject()
 +	for name, value := range map[string]string{
@@ -258,6 +274,11 @@ index 000000000..4dbabfe42
 +
 +	_ = rt.vm.Set("newapi", newapi)
 +
++	// The prelude has to run after newapi exists: it wraps state.save().
++	if _, err := rt.vm.RunString(balanceScriptHardeningPrelude()); err != nil {
++		rt.initErr = fmt.Errorf("failed to prepare the balance script runtime: %w", err)
++	}
++
 +	return rt
 +}
 +
@@ -270,6 +291,13 @@ index 000000000..4dbabfe42
 +			err = fmt.Errorf("balance script panic: %v", recovered)
 +		}
 +	}()
++
++	if rt.initErr != nil {
++		return nil, rt.initErr
++	}
++
++	stopWatch := rt.watchHeap()
++	defer stopWatch()
 +
 +	result, err = rt.vm.RunProgram(program)
 +	if err == nil {
@@ -370,6 +398,139 @@ index 000000000..4dbabfe42
 +	}
 +	rt.setRawState(string(encoded))
 +	return goja.Undefined()
++}
++
++// balanceScriptDisabledGlobals are the constructors that can allocate an
++// arbitrary amount of memory in a single call.
++var balanceScriptDisabledGlobals = []string{
++	"ArrayBuffer", "SharedArrayBuffer", "DataView",
++	"Int8Array", "Uint8Array", "Uint8ClampedArray",
++	"Int16Array", "Uint16Array", "Int32Array", "Uint32Array",
++	"Float32Array", "Float64Array", "BigInt64Array", "BigUint64Array",
++}
++
++// balanceScriptHardeningPrelude closes the remaining single-call amplification
++// paths and the runaway-recursion paths. goja offers no memory or step budget,
++// so everything that can blow up in one operation is bounded here; growth over
++// time is caught by watchHeap.
++func balanceScriptHardeningPrelude() string {
++	return fmt.Sprintf(`
++(function (global) {
++	var MAX_STRING = %d, MAX_DEPTH = %d, MAX_NODES = %d;
++	var RangeErrorCtor = RangeError;
++
++	function fail(message) { throw new RangeErrorCtor(message); }
++
++	var repeat = String.prototype.repeat;
++	String.prototype.repeat = function (count) {
++		var times = Math.floor(Number(count));
++		if (times > 0 && this.length * times > MAX_STRING) fail("repeat() result is too large");
++		return repeat.apply(this, arguments);
++	};
++
++	var padStart = String.prototype.padStart;
++	String.prototype.padStart = function (length) {
++		if (Number(length) > MAX_STRING) fail("padStart() result is too large");
++		return padStart.apply(this, arguments);
++	};
++
++	var padEnd = String.prototype.padEnd;
++	String.prototype.padEnd = function (length) {
++		if (Number(length) > MAX_STRING) fail("padEnd() result is too large");
++		return padEnd.apply(this, arguments);
++	};
++
++	// Walks iteratively so the check itself cannot overflow the stack.
++	function tooDeep(value) {
++		var values = [value], depths = [0], seen = 0;
++		while (values.length) {
++			var current = values.pop(), depth = depths.pop();
++			if (current === null || typeof current !== "object") continue;
++			if (++seen > MAX_NODES) return true;
++			if (depth >= MAX_DEPTH) return true;
++			for (var key in current) {
++				var child = current[key];
++				if (child !== null && typeof child === "object") {
++					values.push(child);
++					depths.push(depth + 1);
++				}
++			}
++		}
++		return false;
++	}
++
++	var stringify = JSON.stringify;
++	JSON.stringify = function (value) {
++		if (arguments.length > 0 && tooDeep(value)) fail("JSON.stringify() input is nested too deeply");
++		return stringify.apply(JSON, arguments);
++	};
++
++	var parse = JSON.parse;
++	JSON.parse = function (text) {
++		if (typeof text === "string") {
++			var depth = 0;
++			for (var i = 0; i < text.length; i++) {
++				var character = text.charAt(i);
++				if (character === "[" || character === "{") {
++					if (++depth > MAX_DEPTH) fail("JSON.parse() input is nested too deeply");
++				} else if (character === "]" || character === "}") {
++					if (depth > 0) depth--;
++				}
++			}
++		}
++		return parse.apply(JSON, arguments);
++	};
++
++	var save = global.newapi.state.save;
++	global.newapi.state.save = function (value) {
++		if (tooDeep(value)) fail("state.save() value is nested too deeply");
++		return save.apply(global.newapi.state, arguments);
++	};
++})(this);
++`, balanceScriptMaxStringLen, balanceScriptMaxDataDepth, balanceScriptMaxDataNodes)
++}
++
++// watchHeap interrupts the run when it grows the live heap past the budget.
++// Go cannot attribute allocations to a goroutine, so the comparison is against
++// a baseline with a generous budget: it catches runaway growth, and a busy
++// server is unlikely to add this much live heap inside one script run. Two
++// consecutive samples have to agree, so a burst from another request does not
++// fail the script.
++func (rt *balanceScriptRuntime) watchHeap() func() {
++	sample := []metrics.Sample{{Name: "/memory/classes/heap/objects:bytes"}}
++	metrics.Read(sample)
++	// An unknown metric name reads back as KindBad, and Value.Uint64() on it
++	// panics. A panic in this goroutine would take the process down, so give up
++	// on the watchdog instead.
++	if sample[0].Value.Kind() != metrics.KindUint64 {
++		return func() {}
++	}
++	baseline := sample[0].Value.Uint64()
++
++	stop := make(chan struct{})
++	go func() {
++		ticker := time.NewTicker(balanceScriptHeapSample)
++		defer ticker.Stop()
++		overBudget := 0
++		for {
++			select {
++			case <-stop:
++				return
++			case <-ticker.C:
++				metrics.Read(sample)
++				if sample[0].Value.Uint64() <= baseline+balanceScriptMaxHeapGrowth {
++					overBudget = 0
++					continue
++				}
++				if overBudget++; overBudget >= 2 {
++					rt.vm.Interrupt("balance script exceeded its memory budget")
++					return
++				}
++			}
++		}
++	}()
++
++	return func() { close(stop) }
 +}
 +
 +func (rt *balanceScriptRuntime) setRawState(encoded string) {
