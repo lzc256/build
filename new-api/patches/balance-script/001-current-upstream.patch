@@ -1,17 +1,18 @@
 diff --git a/Dockerfile b/Dockerfile
-index 3a2bc74db..9fb8ab5f2 100644
+index 3a2bc74db..9bb609992 100644
 --- a/Dockerfile
 +++ b/Dockerfile
-@@ -23,6 +23,9 @@ ADD go.mod go.sum ./
- ADD relaykit/go.mod ./relaykit/go.mod
- ADD tokenkit/go.mod ./tokenkit/go.mod
- RUN go mod download
-+# Balance scripts run on goja; the requirement is resolved here instead of
-+# being pinned in the patch, so upstream go.mod changes cannot break it.
-+RUN go get github.com/dop251/goja@v0.0.0-20261024144015-2a9269b6b6de
+@@ -26,6 +26,10 @@ RUN go mod download
  
  COPY . .
  COPY --from=builder /build/web/dist ./web/dist
++
++# Balance scripts run on goja; the requirement is resolved here instead of
++# being pinned in the patch, so upstream go.mod changes cannot break it.
++RUN go get github.com/dop251/goja@v0.0.0-20261024144015-2a9269b6b6de
+ RUN go build -pgo="$(go list -m -f '{{.Dir}}' github.com/Calcium-Ion/moejs)/default.pgo" -ldflags "-s -w -X 'github.com/QuantumNous/new-api/common.Version=$(cat VERSION)'" -o new-api
+ 
+ FROM debian:bookworm-slim@sha256:f06537653ac770703bc45b4b113475bd402f451e85223f0f2837acbf89ab020a
 diff --git a/controller/channel-billing.go b/controller/channel-billing.go
 index bf508b956..e1e55e478 100644
 --- a/controller/channel-billing.go
