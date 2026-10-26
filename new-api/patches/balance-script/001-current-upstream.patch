@@ -1,3 +1,5 @@
+Subject: [PATCH] Port balance-script with dedicated editor tab and multiline messages
+
 diff --git a/Dockerfile b/Dockerfile
 index 3a2bc74db..9bb609992 100644
 --- a/Dockerfile
@@ -77,10 +79,10 @@ index f85ffef92..2cc9f2656 100644
  
 diff --git a/controller/channel_balance_script.go b/controller/channel_balance_script.go
 new file mode 100644
-index 000000000..7ec45d9be
+index 000000000..97893c137
 --- /dev/null
 +++ b/controller/channel_balance_script.go
-@@ -0,0 +1,475 @@
+@@ -0,0 +1,484 @@
 +package controller
 +
 +import (
@@ -89,6 +91,7 @@ index 000000000..7ec45d9be
 +	"errors"
 +	"fmt"
 +	"io"
++	"math"
 +	"net"
 +	"net/http"
 +	"net/url"
@@ -106,6 +109,7 @@ index 000000000..7ec45d9be
 +	balanceScriptMaxMessage   = 72 * 1024          // 72KB cap on collected debug output (extra room for state JSON)
 +	balanceScriptMaxStateLen  = 65536              // 64KB max state size
 +	balanceScriptMaxSourceLen = 65536              // 64KB max script size
++	balanceScriptMaxBalance   = 1e12               // bounds balance.set() so a bad value cannot break JSON encoding
 +	balanceScriptMaxBodyLen   = 1024 * 1024        // 1MB cap on a single fetch() response body
 +	balanceScriptMaxFetches   = 16                 // max fetch() calls per run
 +	balanceScriptMaxCallStack = 256                // max JS call depth
@@ -294,7 +298,14 @@ index 000000000..7ec45d9be
 +	if goja.IsUndefined(value) || goja.IsNull(value) || goja.IsNaN(value) {
 +		panic(rt.vm.NewTypeError("newapi.balance.set() requires a number"))
 +	}
-+	rt.balance = value.ToFloat()
++	amount := value.ToFloat()
++	// The previous runtime passed the balance through JSON, which cannot carry
++	// Infinity, so an out-of-range value failed there. Keep that guarantee: a
++	// stored non-finite balance makes every later JSON response fail to encode.
++	if math.IsInf(amount, 0) || amount > balanceScriptMaxBalance || amount < -balanceScriptMaxBalance {
++		panic(rt.vm.NewRangeError("newapi.balance.set() requires a finite balance"))
++	}
++	rt.balance = amount
 +	rt.hasBalance = true
 +	return goja.Undefined()
 +}
