@@ -79,7 +79,7 @@ index f85ffef92..2cc9f2656 100644
  
 diff --git a/controller/channel_balance_script.go b/controller/channel_balance_script.go
 new file mode 100644
-index 000000000..97893c137
+index 000000000..5fd7fbff3
 --- /dev/null
 +++ b/controller/channel_balance_script.go
 @@ -0,0 +1,484 @@
@@ -303,7 +303,7 @@ index 000000000..97893c137
 +	// Infinity, so an out-of-range value failed there. Keep that guarantee: a
 +	// stored non-finite balance makes every later JSON response fail to encode.
 +	if math.IsInf(amount, 0) || amount > balanceScriptMaxBalance || amount < -balanceScriptMaxBalance {
-+		panic(rt.vm.NewRangeError("newapi.balance.set() requires a finite balance"))
++		panic(rt.vm.NewTypeError("newapi.balance.set() requires a finite balance"))
 +	}
 +	rt.balance = amount
 +	rt.hasBalance = true
