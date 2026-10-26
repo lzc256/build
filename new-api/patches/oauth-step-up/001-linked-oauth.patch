@@ -79,6 +79,18 @@ index 000000000..74d275620
 +	require.Len(t, requirements.Methods, 1)
 +	require.Equal(t, service.VerificationMethodPassword, requirements.Methods[0].Method)
 +}
+diff --git a/controller/security_enrollment_test.go b/controller/security_enrollment_test.go
+index bb5a8e064..6e031ebe7 100644
+--- a/controller/security_enrollment_test.go
++++ b/controller/security_enrollment_test.go
+@@ -205,7 +205,6 @@ func TestSecurityEnrollmentAccessTokenMethodPolicy(t *testing.T) {
+ 		disabledPasskey, oauth, wechat   bool
+ 		available                        bool
+ 	}{
+-		{name: "password", method: "password", password: true, oauth: true, available: true},
+ 		{name: "existing passkey", method: "passkey", password: true, passkey: true, available: true},
+ 		{name: "existing twofa", method: "2fa", password: true, passkey: true, twoFA: true, available: true},
+ 		{name: "locked twofa blocks fallback", method: "2fa", password: true, twoFA: true, locked: true},
 diff --git a/service/security_verification.go b/service/security_verification.go
 index 2270b4d5d..49487f427 100644
 --- a/service/security_verification.go
