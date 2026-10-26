@@ -1,7 +1,7 @@
 Subject: [PATCH] Port balance-script with dedicated editor tab and multiline messages
 
 diff --git a/controller/channel-billing.go b/controller/channel-billing.go
-index 3285dc0d6..8d5c4093a 100644
+index bf508b956..e1e55e478 100644
 --- a/controller/channel-billing.go
 +++ b/controller/channel-billing.go
 @@ -58,6 +58,7 @@ const maxAdvancedCustomBalanceResponseBytes = 256 << 10
@@ -12,7 +12,7 @@ index 3285dc0d6..8d5c4093a 100644
  }
  
  type OpenAIUsageResponse struct {
-@@ -615,6 +616,10 @@ func fetchAdvancedCustomBalance(channel *model.Channel) (channelBalanceResult, e
+@@ -622,6 +623,10 @@ func fetchAdvancedCustomBalance(channel *model.Channel) (channelBalanceResult, e
  }
  
  func updateChannelBalance(channel *model.Channel) (channelBalanceResult, error) {
@@ -23,7 +23,7 @@ index 3285dc0d6..8d5c4093a 100644
  	if channel.Type == constant.ChannelTypeAdvancedCustom {
  		return fetchAdvancedCustomBalance(channel)
  	}
-@@ -706,7 +711,7 @@ func UpdateChannelBalance(c *gin.Context) {
+@@ -713,7 +718,7 @@ func UpdateChannelBalance(c *gin.Context) {
  		c.JSON(http.StatusOK, gin.H{"success": false, "message": "Task Plugin channels do not support balance queries"})
  		return
  	}
@@ -32,7 +32,7 @@ index 3285dc0d6..8d5c4093a 100644
  		common.ApiErrorT(c, "Multi-key channels do not support balance queries")
  		return
  	}
-@@ -717,7 +722,7 @@ func UpdateChannelBalance(c *gin.Context) {
+@@ -724,7 +729,7 @@ func UpdateChannelBalance(c *gin.Context) {
  	}
  	response := gin.H{
  		"success": true,
@@ -41,7 +41,7 @@ index 3285dc0d6..8d5c4093a 100644
  	}
  	if result.RawResponse == "" {
  		response["balance"] = result.Balance
-@@ -736,7 +741,7 @@ func updateAllChannelsBalance() error {
+@@ -743,7 +748,7 @@ func updateAllChannelsBalance() error {
  		if channel.Status != common.ChannelStatusEnabled {
  			continue
  		}
@@ -544,18 +544,9 @@ index 000000000..7ec45d9be
 +	return fmt.Sprint(value)
 +}
 diff --git a/go.mod b/go.mod
-index ae26a6bbf..f93874ab7 100644
+index e88e8dae8..b2e517e69 100644
 --- a/go.mod
 +++ b/go.mod
-@@ -1,7 +1,7 @@
- module github.com/QuantumNous/new-api
- 
- // +heroku goVersion go1.18
--go 1.26
-+go 1.26.0
- 
- require (
- 	github.com/Calcium-Ion/go-epay v0.0.5
 @@ -54,9 +54,9 @@ require (
  	golang.org/x/image v0.41.0
  	golang.org/x/net v0.55.0
@@ -591,102 +582,33 @@ index ae26a6bbf..f93874ab7 100644
  
  replace github.com/QuantumNous/new-api/relaykit => ./relaykit
 diff --git a/go.sum b/go.sum
-index 884c2d903..1ba61ca07 100644
+index 50c06177d..ef539dfb4 100644
 --- a/go.sum
 +++ b/go.sum
-@@ -645,6 +645,8 @@ github.com/ClickHouse/clickhouse-go/v2 v2.46.0/go.mod h1:giJfUVlMkcfUEPVfRpt51zZ
- github.com/DmitriyVTitov/size v1.5.0 h1:/PzqxYrOyOUX1BXj6J9OuVRVGe+66VL4D9FlUaW515g=
- github.com/DmitriyVTitov/size v1.5.0/go.mod h1:le6rNI4CoLQV1b9gzp1+3d7hMAD/uu2QcJ+aYbNgiU0=
- github.com/JohnCGriffin/overflow v0.0.0-20211019200055-46fa312c352c/go.mod h1:X0CRv0ky0k6m906ixxpzmDRLvX58TFUKS2eePweuyxk=
+@@ -3181,3 +3181,21 @@ sigs.k8s.io/structured-merge-diff/v4 v4.2.3/go.mod h1:qjx8mGObPmV2aSZepjQjbmb2ih
+ sigs.k8s.io/yaml v1.1.0/go.mod h1:UJmg0vDUVViEyp3mgSv9WPwZCDxu4rQW1olrI1uml+o=
+ sigs.k8s.io/yaml v1.2.0/go.mod h1:yfXDCHCao9+ENCvLSE62v9VSji2MKu5jeNfTrofGhJc=
+ sigs.k8s.io/yaml v1.3.0/go.mod h1:GeOyir5tyXNByN85N/dRIT9es5UQNerPYEKK56eTBm8=
 +github.com/Masterminds/semver/v3 v3.5.0 h1:kQceYJfbupGfZOKZQg0kou0DgAKhzDg2NZPAwZ/2OOE=
 +github.com/Masterminds/semver/v3 v3.5.0/go.mod h1:4V+yj/TJE1HU9XfppCwVMZq3I84lprf4nC11bSS5beM=
- github.com/Microsoft/go-winio v0.4.11/go.mod h1:VhR8bwka0BXejwEJY73c50VrPtXAaKcyvVC4A4RozmA=
- github.com/Microsoft/go-winio v0.4.14/go.mod h1:qXqCSQ3Xa7+6tgxaGTIe4Kpcdsi+P8jBhyzoq1bpyYA=
- github.com/Microsoft/go-winio v0.4.15-0.20190919025122-fc70bd9a86b5/go.mod h1:tTuCMEN+UleMWgg9dVx4Hu52b1bJo+59jBh3ajtinzw=
-@@ -1012,8 +1014,8 @@ github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f h1:lO4WD4F/r
- github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f/go.mod h1:cuUVRXasLTGF7a8hSLbxyZXjz+1KgoB3wDUb6vlszIc=
- github.com/dgryski/go-sip13 v0.0.0-20181026042036-e10d5fee7954/go.mod h1:vAd38F8PWV+bWy6jNmig1y/TA+kYO4g3RSRF0IAv0no=
- github.com/distribution/distribution/v3 v3.0.0-20220526142353-ffbd94cbe269/go.mod h1:28YO/VJk9/64+sTGNuYaBjWxrXTPrj0C0XmgTIOjxX4=
--github.com/dlclark/regexp2/v2 v2.5.1 h1:E5Ug7Dh264W1ymdySmiHNcDG7fmsR307APCE5R07a20=
--github.com/dlclark/regexp2/v2 v2.5.1/go.mod h1:avUrQvPaLz2DrFNHJF0taWAFFX2C1GMSSoeiqFjcBmU=
 +github.com/dlclark/regexp2/v2 v2.8.1 h1:I1jbaCbXeOxdVN8z3fb55Mvtgb94/6+Dh0zjmXjKV/0=
 +github.com/dlclark/regexp2/v2 v2.8.1/go.mod h1:avUrQvPaLz2DrFNHJF0taWAFFX2C1GMSSoeiqFjcBmU=
- github.com/dmarkham/enumer v1.5.8/go.mod h1:d10o8R3t/gROm2p3BXqTkMt2+HMuxEmWCXzorAruYak=
- github.com/dnaeon/go-vcr v1.0.1/go.mod h1:aBB1+wY4s93YsC3HHjMBMrwTj2R9FHDzUr9KyGc8n1E=
- github.com/docker/cli v0.0.0-20191017083524-a8ff7f821017/go.mod h1:JLrzqnKDaYBop7H2jaqPtU4hHvMKP+vjCwu2uszcLI8=
-@@ -1043,6 +1045,8 @@ github.com/docker/go-units v0.5.0/go.mod h1:fgPhTUdO+D/Jk86RDLlptpiXQzgHJF7gydDD
- github.com/docker/libtrust v0.0.0-20150114040149-fa567046d9b1/go.mod h1:cyGadeNEkKy96OOhEzfZl+yxihPEzKnqJwvfuSUqbZE=
- github.com/docker/spdystream v0.0.0-20160310174837-449fdfce4d96/go.mod h1:Qh8CwZgvJUkLughtfhJv5dyTYa91l1fOUCrgjqmcifM=
- github.com/docopt/docopt-go v0.0.0-20180111231733-ee0de3bc6815/go.mod h1:WwZ+bS3ebgob9U8Nd0kOddGdZWjyMGR8Wziv+TBNwSE=
 +github.com/dop251/goja v0.0.0-20261024144015-2a9269b6b6de h1:TZ5ozdZ1dej3o0xsj2s+MUgM2UIm6pUSof+PoWLM2/g=
 +github.com/dop251/goja v0.0.0-20261024144015-2a9269b6b6de/go.mod h1:Cp9NYOLrEKg/ypIRkUWYXWLuKAyyFGkDmGeJ95Sw0zI=
- github.com/dustin/go-humanize v0.0.0-20171111073723-bb3d318650d4/go.mod h1:HtrtbFcZ19U5GC7JDqmcUSB87Iq5E25KnS6fMYU6eOk=
- github.com/dustin/go-humanize v1.0.0/go.mod h1:HtrtbFcZ19U5GC7JDqmcUSB87Iq5E25KnS6fMYU6eOk=
- github.com/dustin/go-humanize v1.0.1 h1:GzkhY7T5VNhEkwH0PVJgjz+fX1rhBrR7pRT3mDkpeCY=
-@@ -1202,6 +1206,8 @@ github.com/go-playground/validator/v10 v10.20.0 h1:K9ISHbSaI0lyB2eWMPJo+kOS/FBEx
- github.com/go-playground/validator/v10 v10.20.0/go.mod h1:dbuPbCMFw/DrkbEynArYaCwl3amGuJotoKCe95atGMM=
- github.com/go-redis/redis/v8 v8.11.5 h1:AcZZR7igkdvfVmQTPnu9WE37LRrO/YrBH5zWyjDC0oI=
- github.com/go-redis/redis/v8 v8.11.5/go.mod h1:gREzHqY1hg6oD9ngVRbLStwAWKhA0FEgq8Jd4h5lpwo=
 +github.com/go-sourcemap/sourcemap v2.1.3+incompatible h1:W1iEw64niKVGogNgBN3ePyLFfuisuzeidWPMPWmECqU=
 +github.com/go-sourcemap/sourcemap v2.1.3+incompatible/go.mod h1:F8jJfvm2KbVjc5NqelyYJmf/v5J0dwNLS2mL4sNA1Jg=
- github.com/go-sql-driver/mysql v1.4.0/go.mod h1:zAC/RDZ24gD3HViQzih4MyKcchzm+sOG5ZlKdlhCg5w=
- github.com/go-sql-driver/mysql v1.7.0 h1:ueSltNNllEqE3qcWBTD0iQd3IpL/6U+mJxLkazJ7YPc=
- github.com/go-sql-driver/mysql v1.7.0/go.mod h1:OXbVy3sEdcQ2Doequ6Z5BW6fXNQTmx+9S1MCJN5yJMI=
-@@ -1216,6 +1222,8 @@ github.com/goccy/go-json v0.9.7/go.mod h1:6MelG93GURQebXPDq3khkgXZkazVtN9CRI+MGF
- github.com/goccy/go-json v0.9.11/go.mod h1:6MelG93GURQebXPDq3khkgXZkazVtN9CRI+MGFi0w8I=
- github.com/goccy/go-json v0.10.2 h1:CrxCmQqYDkv1z7lO7Wbh2HN93uovUHgrECaO5ZrCXAU=
- github.com/goccy/go-json v0.10.2/go.mod h1:6MelG93GURQebXPDq3khkgXZkazVtN9CRI+MGFi0w8I=
 +github.com/goccy/go-yaml v1.19.2 h1:PmFC1S6h8ljIz6gMRBopkjP1TVT7xuwrButHID66PoM=
 +github.com/goccy/go-yaml v1.19.2/go.mod h1:XBurs7gK8ATbW4ZPGKgcbrY1Br56PdM69F7LkFRi1kA=
- github.com/godbus/dbus v0.0.0-20151105175453-c7fdd8b5cd55/go.mod h1:/YcGZj5zSblfDWMMoOzV4fas9FZnQYTkDnsGvmh2Grw=
- github.com/godbus/dbus v0.0.0-20180201030542-885f9cc04c9c/go.mod h1:/YcGZj5zSblfDWMMoOzV4fas9FZnQYTkDnsGvmh2Grw=
- github.com/godbus/dbus v0.0.0-20190422162347-ade71ed3457e/go.mod h1:bBOAhwG1umN6/6ZUMtDFBMQR8jRg9O75tm9K00oMsK4=
-@@ -2264,8 +2272,8 @@ golang.org/x/mod v0.6.0/go.mod h1:4mET923SAdbXp2ki8ey+zGs1SLqsuM2Y0uvdZR/fUNI=
- golang.org/x/mod v0.7.0/go.mod h1:iBbtSCu2XBx23ZKBPSOrRkjjQPZFPuis4dIYUhu/chs=
- golang.org/x/mod v0.8.0/go.mod h1:iBbtSCu2XBx23ZKBPSOrRkjjQPZFPuis4dIYUhu/chs=
- golang.org/x/mod v0.9.0/go.mod h1:iBbtSCu2XBx23ZKBPSOrRkjjQPZFPuis4dIYUhu/chs=
--golang.org/x/mod v0.35.0 h1:Ww1D637e6Pg+Zb2KrWfHQUnH2dQRLBQyAtpr/haaJeM=
--golang.org/x/mod v0.35.0/go.mod h1:+GwiRhIInF8wPm+4AoT6L0FA1QWAad3OMdTRx4tFYlU=
 +golang.org/x/mod v0.41.0 h1:qJmnOUb4YB+FsEuM3HcWucdZASCPGhsX6uljO6pog0c=
 +golang.org/x/mod v0.41.0/go.mod h1:Ek9pY8RKWXwsWvd3rQiHYtMqkjSUV+s1Rj7j4H5Ur6o=
- golang.org/x/net v0.0.0-20180724234803-3673e40ba225/go.mod h1:mL1N/T3taQHkDXs73rZJwtUhF3w3ftmwwsq0BUmARs4=
- golang.org/x/net v0.0.0-20180826012351-8a410e7b638d/go.mod h1:mL1N/T3taQHkDXs73rZJwtUhF3w3ftmwwsq0BUmARs4=
- golang.org/x/net v0.0.0-20180906233101-161cd47e91fd/go.mod h1:mL1N/T3taQHkDXs73rZJwtUhF3w3ftmwwsq0BUmARs4=
-@@ -2401,8 +2409,8 @@ golang.org/x/sync v0.0.0-20220819030929-7fc1605a5dde/go.mod h1:RxMgew5VJxzue5/jJ
- golang.org/x/sync v0.0.0-20220929204114-8fcdb60fdcc0/go.mod h1:RxMgew5VJxzue5/jJTE5uejpjVlOe/izrB70Jof72aM=
- golang.org/x/sync v0.1.0/go.mod h1:RxMgew5VJxzue5/jJTE5uejpjVlOe/izrB70Jof72aM=
- golang.org/x/sync v0.3.0/go.mod h1:FU7BRWz2tNW+3quACPkgCx/L+uEAv1htQ0V83Z9Rj+Y=
--golang.org/x/sync v0.20.0 h1:e0PTpb7pjO8GAtTs2dQ6jYa5BWYlMuX047Dco/pItO4=
--golang.org/x/sync v0.20.0/go.mod h1:9xrNwdLfx4jkKbNva9FpL6vEN7evnE43NNNJQ2LF3+0=
 +golang.org/x/sync v0.24.0 h1:iqiDrGoDgyuvAKrhLQthUEzU/R378N78gXbBjxed7oA=
 +golang.org/x/sync v0.24.0/go.mod h1:sUUOizhqBxiL6pEWpqNLUiaJn1ShEbZ6BBqskPbjZm0=
- golang.org/x/sys v0.0.0-20180823144017-11551d06cbcc/go.mod h1:STP8DvDyc/dI5b8T5hshtkjS+E42TnysNCUPdjciGhY=
- golang.org/x/sys v0.0.0-20180830151530-49385e6e1522/go.mod h1:STP8DvDyc/dI5b8T5hshtkjS+E42TnysNCUPdjciGhY=
- golang.org/x/sys v0.0.0-20180905080454-ebe1bf3edb33/go.mod h1:STP8DvDyc/dI5b8T5hshtkjS+E42TnysNCUPdjciGhY=
-@@ -2587,8 +2595,8 @@ golang.org/x/text v0.7.0/go.mod h1:mrYo+phRRbMaCq/xk9113O4dZlRixOauAjOtrjsXDZ8=
- golang.org/x/text v0.8.0/go.mod h1:e1OnstbJyHTd6l/uOt8jFFHp6TRDWZR/bV3emEE/zU8=
- golang.org/x/text v0.9.0/go.mod h1:e1OnstbJyHTd6l/uOt8jFFHp6TRDWZR/bV3emEE/zU8=
- golang.org/x/text v0.13.0/go.mod h1:TvPlkZtksWOMsz7fbANvkp4WM8x/WCo/om8BMLbz+aE=
--golang.org/x/text v0.37.0 h1:Cqjiwd9eSg8e0QAkyCaQTNHFIIzWtidPahFWR83rTrc=
--golang.org/x/text v0.37.0/go.mod h1:a5sjxXGs9hsn/AJVwuElvCAo9v8QYLzvavO5z2PiM38=
 +golang.org/x/text v0.43.0 h1:1QivrlhwAsnMOcqgOdl9my7s9OyZl8O5/UGUTJVXoWc=
 +golang.org/x/text v0.43.0/go.mod h1:hbSIYA/amXcRXTFSZqh8tWHEoqRvvbKPJ2uz/KU+a+s=
- golang.org/x/time v0.0.0-20180412165947-fbb02b2291d2/go.mod h1:tRJNPiyCQ0inRvYxbN9jk5I+vvW/OXSQhTDSoE431IQ=
- golang.org/x/time v0.0.0-20181108054448-85acf8d2951c/go.mod h1:tRJNPiyCQ0inRvYxbN9jk5I+vvW/OXSQhTDSoE431IQ=
- golang.org/x/time v0.0.0-20190308202827-9d24e82272b4/go.mod h1:tRJNPiyCQ0inRvYxbN9jk5I+vvW/OXSQhTDSoE431IQ=
-@@ -2681,8 +2689,8 @@ golang.org/x/tools v0.3.0/go.mod h1:/rWhSS2+zyEVwoJf8YAX6L2f0ntZ7Kn/mGgAWcipA5k=
- golang.org/x/tools v0.4.0/go.mod h1:UE5sM2OK9E/d67R0ANs2xJizIymRP5gJU295PvKXxjQ=
- golang.org/x/tools v0.6.0/go.mod h1:Xwgl3UAJ/d3gWutnCtw505GrjyAbvKui8lOU390QaIU=
- golang.org/x/tools v0.7.0/go.mod h1:4pg6aUX35JBAogB10C9AtvVL+qowtN4pT3CGSQex14s=
--golang.org/x/tools v0.44.0 h1:UP4ajHPIcuMjT1GqzDWRlalUEoY+uzoZKnhOjbIPD2c=
--golang.org/x/tools v0.44.0/go.mod h1:KA0AfVErSdxRZIsOVipbv3rQhVXTnlU6UhKxHd1seDI=
 +golang.org/x/tools v0.51.0 h1:k4Xc/1Om9jwkBJBo4NVLMSARBoWtK10mx+W5BnXCeAI=
 +golang.org/x/tools v0.51.0/go.mod h1:9eEncMayCV6zRMGhR5eZEC2iBx98qWcF1HZ9Z7wJOoA=
- golang.org/x/xerrors v0.0.0-20190717185122-a985d3407aa7/go.mod h1:I/5z698sn9Ka8TeJc9MKroUUfqBBauWjQqLJ2OPfmY0=
- golang.org/x/xerrors v0.0.0-20191011141410-1b5146add898/go.mod h1:I/5z698sn9Ka8TeJc9MKroUUfqBBauWjQqLJ2OPfmY0=
- golang.org/x/xerrors v0.0.0-20191204190536-9bdfabe68543/go.mod h1:I/5z698sn9Ka8TeJc9MKroUUfqBBauWjQqLJ2OPfmY0=
 diff --git a/model/channel.go b/model/channel.go
-index b71f48603..617bb5de2 100644
+index 202f51cb4..e9835594e 100644
 --- a/model/channel.go
 +++ b/model/channel.go
 @@ -36,6 +36,7 @@ type Channel struct {
@@ -697,7 +619,7 @@ index b71f48603..617bb5de2 100644
  	Models             string  `json:"models"`
  	Group              string  `json:"group" gorm:"type:varchar(64);default:'default'"`
  	UsedQuota          int64   `json:"used_quota" gorm:"bigint;default:0"`
-@@ -624,6 +625,12 @@ func (channel *Channel) UpdateBalance(balance float64) {
+@@ -629,6 +630,12 @@ func (channel *Channel) UpdateBalance(balance float64) {
  	}
  }
  
@@ -711,10 +633,10 @@ index b71f48603..617bb5de2 100644
  	var err error
  	err = DB.Delete(channel).Error
 diff --git a/relaykit/dto/channel_settings.go b/relaykit/dto/channel_settings.go
-index 54892c8ff..e6176517e 100644
+index 2f82e5baa..9fe5976dc 100644
 --- a/relaykit/dto/channel_settings.go
 +++ b/relaykit/dto/channel_settings.go
-@@ -103,6 +103,8 @@ const (
+@@ -110,6 +110,8 @@ const (
  )
  
  type ChannelOtherSettings struct {
@@ -724,10 +646,10 @@ index 54892c8ff..e6176517e 100644
  	VertexKeyType                         VertexKeyType         `json:"vertex_key_type,omitempty"`   // "json" or "api_key"
  	VertexProjectID                       string                `json:"vertex_project_id,omitempty"` // 仅当 vertex_key_type=api_key 时使用；JSON 模式下从 service account 解析
 diff --git a/web/src/features/channels/components/__tests__/channel-configuration.test.tsx b/web/src/features/channels/components/__tests__/channel-configuration.test.tsx
-index 8480cc1d8..9d250753d 100644
+index 03d9df788..2068ac36c 100644
 --- a/web/src/features/channels/components/__tests__/channel-configuration.test.tsx
 +++ b/web/src/features/channels/components/__tests__/channel-configuration.test.tsx
-@@ -1299,7 +1299,7 @@ test('editing opens the shared configuration and omits an unchanged key on updat
+@@ -1395,7 +1395,7 @@ test('editing opens the shared configuration and omits an unchanged key on updat
    expect(await screen.findByDisplayValue('Existing channel')).toBeVisible()
    expect(screen.queryByLabelText('Type *')).not.toBeInTheDocument()
    expect(screen.getByRole('button', { name: 'Change provider' })).toBeVisible()
@@ -736,7 +658,7 @@ index 8480cc1d8..9d250753d 100644
    expect(
      screen.getByRole('tab', { name: /Connection & Models/ })
    ).toHaveAccessibleName(/Ready/)
-@@ -1317,6 +1317,32 @@ test('editing opens the shared configuration and omits an unchanged key on updat
+@@ -1413,6 +1413,32 @@ test('editing opens the shared configuration and omits an unchanged key on updat
    expect(put.mock.calls[0]?.[1]).not.toHaveProperty('key')
  })
  
@@ -856,7 +778,7 @@ index 12afba01b..808fd631f 100644
          value='routing'
          keepMounted
 diff --git a/web/src/features/channels/components/drawers/channel-mutate-drawer.tsx b/web/src/features/channels/components/drawers/channel-mutate-drawer.tsx
-index 6e85244df..9a2c29422 100644
+index a1b527ddf..18656b8aa 100644
 --- a/web/src/features/channels/components/drawers/channel-mutate-drawer.tsx
 +++ b/web/src/features/channels/components/drawers/channel-mutate-drawer.tsx
 @@ -242,6 +242,7 @@ import { ChannelProviderPicker } from './channel-provider-picker'
@@ -867,7 +789,7 @@ index 6e85244df..9a2c29422 100644
    ChannelBasicSection,
    ChannelEditorLoadingState,
    ChannelModelsSection,
-@@ -4666,6 +4667,9 @@ export function ChannelMutateDrawer({
+@@ -4715,6 +4716,9 @@ export function ChannelMutateDrawer({
            </>
          }
          models={modelsSection}
@@ -1093,10 +1015,10 @@ index 40f661027..2321e8758 100644
      request: 'idle',
      other: 'idle',
 diff --git a/web/src/features/channels/lib/channel-form.ts b/web/src/features/channels/lib/channel-form.ts
-index 12d4caec1..e89b22938 100644
+index 158f510e0..68c13b493 100644
 --- a/web/src/features/channels/lib/channel-form.ts
 +++ b/web/src/features/channels/lib/channel-form.ts
-@@ -294,6 +294,7 @@ export const channelFormSchema = z
+@@ -295,6 +295,7 @@ export const channelFormSchema = z
      upstream_model_update_check_enabled: z.boolean().optional(),
      upstream_model_update_auto_sync_enabled: z.boolean().optional(),
      upstream_model_update_ignored_models: z.string().optional(),
@@ -1104,7 +1026,7 @@ index 12d4caec1..e89b22938 100644
    })
    .superRefine((data, ctx) => {
      if (
-@@ -487,6 +488,7 @@ export const CHANNEL_FORM_DEFAULT_VALUES: ChannelFormValues = {
+@@ -489,6 +490,7 @@ export const CHANNEL_FORM_DEFAULT_VALUES: ChannelFormValues = {
    upstream_model_update_auto_sync_enabled: false,
    upstream_model_update_ignored_models: '',
    advanced_custom: '',
@@ -1112,7 +1034,7 @@ index 12d4caec1..e89b22938 100644
  }
  
  // ============================================================================
-@@ -562,6 +564,7 @@ export function transformChannelToFormDefaults(
+@@ -565,6 +567,7 @@ export function transformChannelToFormDefaults(
    let upstreamModelUpdateAutoSyncEnabled = false
    let upstreamModelUpdateIgnoredModels = ''
    let advancedCustom = ''
@@ -1120,7 +1042,7 @@ index 12d4caec1..e89b22938 100644
  
    if (channel.settings) {
      try {
-@@ -592,6 +595,7 @@ export function transformChannelToFormDefaults(
+@@ -596,6 +599,7 @@ export function transformChannelToFormDefaults(
        if (parsed.advanced_custom) {
          advancedCustom = stringifyAdvancedCustomConfig(parsed.advanced_custom)
        }
@@ -1128,7 +1050,7 @@ index 12d4caec1..e89b22938 100644
      } catch (error) {
        // eslint-disable-next-line no-console
        console.error('Failed to parse channel settings:', error)
-@@ -645,6 +649,7 @@ export function transformChannelToFormDefaults(
+@@ -650,6 +654,7 @@ export function transformChannelToFormDefaults(
      upstream_model_update_auto_sync_enabled: upstreamModelUpdateAutoSyncEnabled,
      upstream_model_update_ignored_models: upstreamModelUpdateIgnoredModels,
      advanced_custom: advancedCustom,
@@ -1136,7 +1058,7 @@ index 12d4caec1..e89b22938 100644
    }
  }
  
-@@ -842,6 +847,13 @@ function buildSettingsJSON(formData: ChannelFormValues): string {
+@@ -847,6 +852,13 @@ function buildSettingsJSON(formData: ChannelFormValues): string {
      delete settingsObj.advanced_custom
    }
  
@@ -1151,10 +1073,10 @@ index 12d4caec1..e89b22938 100644
  }
  
 diff --git a/web/src/features/channels/types.ts b/web/src/features/channels/types.ts
-index 4dc44c8e0..38931556b 100644
+index 721e216e9..fe983c3ff 100644
 --- a/web/src/features/channels/types.ts
 +++ b/web/src/features/channels/types.ts
-@@ -115,6 +115,7 @@ export interface ChannelOtherSettings {
+@@ -116,6 +116,7 @@ export interface ChannelOtherSettings {
    upstream_model_update_last_check_time?: number
    upstream_model_update_last_detected_models?: string[]
    advanced_custom?: AdvancedCustomConfig
