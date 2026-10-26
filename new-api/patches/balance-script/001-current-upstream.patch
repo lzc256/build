@@ -79,10 +79,10 @@ index f85ffef92..2cc9f2656 100644
  
 diff --git a/controller/channel_balance_script.go b/controller/channel_balance_script.go
 new file mode 100644
-index 000000000..5fd7fbff3
+index 000000000..4dbabfe42
 --- /dev/null
 +++ b/controller/channel_balance_script.go
-@@ -0,0 +1,484 @@
+@@ -0,0 +1,442 @@
 +package controller
 +
 +import (
@@ -92,7 +92,6 @@ index 000000000..5fd7fbff3
 +	"fmt"
 +	"io"
 +	"math"
-+	"net"
 +	"net/http"
 +	"net/url"
 +	"strconv"
@@ -100,6 +99,7 @@ index 000000000..5fd7fbff3
 +	"time"
 +
 +	"github.com/QuantumNous/new-api/model"
++	"github.com/QuantumNous/new-api/service"
 +	"github.com/dop251/goja"
 +)
 +
@@ -471,20 +471,25 @@ index 000000000..5fd7fbff3
 +		request.Header.Set(name, value)
 +	}
 +
-+	client := &http.Client{
-+		Transport: &http.Transport{
-+			Proxy:                 nil,
-+			DialContext:           balanceScriptDialContext,
-+			TLSHandshakeTimeout:   balanceScriptFetchTimeout,
-+			ResponseHeaderTimeout: balanceScriptFetchTimeout,
-+		},
-+		Timeout: balanceScriptFetchTimeout,
-+		CheckRedirect: func(request *http.Request, via []*http.Request) error {
-+			if len(via) >= balanceScriptMaxRedirects {
-+				return fmt.Errorf("stopped after %d redirects", balanceScriptMaxRedirects)
-+			}
-+			return nil
-+		},
++	// Reuse the project-wide SSRF policy instead of a private address list: the
++	// protected client validates the URL against the fetch setting, re-validates
++	// every resolved address at dial time so a DNS answer cannot be swapped in
++	// after the check, and re-checks each redirect.
++	base := service.GetSSRFProtectedHTTPClient()
++	if base == nil {
++		return 0, nil, "", fmt.Errorf("http client is not initialized")
++	}
++	client := *base
++	client.Timeout = balanceScriptFetchTimeout
++	baseRedirect := base.CheckRedirect
++	client.CheckRedirect = func(request *http.Request, via []*http.Request) error {
++		if len(via) >= balanceScriptMaxRedirects {
++			return fmt.Errorf("stopped after %d redirects", balanceScriptMaxRedirects)
++		}
++		if baseRedirect != nil {
++			return baseRedirect(request, via)
++		}
++		return nil
 +	}
 +
 +	response, err := client.Do(request)
@@ -507,53 +512,6 @@ index 000000000..5fd7fbff3
 +	}
 +
 +	return response.StatusCode, headers, string(payload), nil
-+}
-+
-+// balanceScriptDialContext dials only public addresses, so a script cannot reach
-+// loopback, private or link-local services of the host it runs on.
-+func balanceScriptDialContext(ctx context.Context, network, address string) (net.Conn, error) {
-+	host, port, err := net.SplitHostPort(address)
-+	if err != nil {
-+		return nil, err
-+	}
-+
-+	addresses, err := net.DefaultResolver.LookupIPAddr(ctx, host)
-+	if err != nil {
-+		return nil, err
-+	}
-+	if len(addresses) == 0 {
-+		return nil, fmt.Errorf("no address found for %s", host)
-+	}
-+
-+	dialer := &net.Dialer{Timeout: balanceScriptFetchTimeout}
-+	var lastErr error
-+	for _, candidate := range addresses {
-+		if isBlockedBalanceScriptIP(candidate.IP) {
-+			lastErr = fmt.Errorf("address %s is not allowed", candidate.IP)
-+			continue
-+		}
-+		// Dial the resolved address directly so a DNS answer cannot change between
-+		// the check and the connection.
-+		connection, err := dialer.DialContext(ctx, network, net.JoinHostPort(candidate.IP.String(), port))
-+		if err == nil {
-+			return connection, nil
-+		}
-+		lastErr = err
-+	}
-+	if lastErr == nil {
-+		lastErr = fmt.Errorf("unable to connect to %s", host)
-+	}
-+	return nil, lastErr
-+}
-+
-+func isBlockedBalanceScriptIP(ip net.IP) bool {
-+	return ip.IsLoopback() ||
-+		ip.IsPrivate() ||
-+		ip.IsLinkLocalUnicast() ||
-+		ip.IsLinkLocalMulticast() ||
-+		ip.IsInterfaceLocalMulticast() ||
-+		ip.IsMulticast() ||
-+		ip.IsUnspecified()
 +}
 +
 +// toString converts an exported goja value into a string without producing
