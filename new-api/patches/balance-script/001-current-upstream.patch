@@ -1,21 +1,5 @@
 Subject: [PATCH] Port balance-script with dedicated editor tab and multiline messages
 
-diff --git a/Dockerfile b/Dockerfile
-index ddcee582c..2fbda8da7 100644
---- a/Dockerfile
-+++ b/Dockerfile
-@@ -31,9 +31,10 @@ RUN go build -pgo="$(go list -m -f '{{.Dir}}' github.com/Calcium-Ion/moejs)/defa
- FROM debian:bookworm-slim@sha256:f06537653ac770703bc45b4b113475bd402f451e85223f0f2837acbf89ab020a
- 
- RUN apt-get update \
--    && apt-get install -y --no-install-recommends ca-certificates tzdata libasan8 wget \
-+    && apt-get install -y --no-install-recommends ca-certificates tzdata libasan8 wget python3 python3-pip \
-     && rm -rf /var/lib/apt/lists/* \
-     && update-ca-certificates
-+RUN pip3 install --break-system-packages RestrictedPython
- 
- COPY --from=builder2 /build/new-api /
- COPY LICENSE NOTICE THIRD-PARTY-LICENSES.md /licenses/
 diff --git a/controller/channel-billing.go b/controller/channel-billing.go
 index 3285dc0d6..8d5c4093a 100644
 --- a/controller/channel-billing.go
@@ -80,410 +64,627 @@ index f85ffef92..2cc9f2656 100644
  
 diff --git a/controller/channel_balance_script.go b/controller/channel_balance_script.go
 new file mode 100644
-index 000000000..8e5e4a439
+index 000000000..7ec45d9be
 --- /dev/null
 +++ b/controller/channel_balance_script.go
-@@ -0,0 +1,400 @@
+@@ -0,0 +1,475 @@
 +package controller
 +
 +import (
-+	"bytes"
 +	"context"
 +	"encoding/json"
 +	"errors"
 +	"fmt"
 +	"io"
-+	"os/exec"
++	"net"
++	"net/http"
++	"net/url"
 +	"strconv"
 +	"strings"
-+	"syscall"
 +	"time"
 +
 +	"github.com/QuantumNous/new-api/model"
++	"github.com/dop251/goja"
 +)
 +
 +const (
-+	balanceScriptTimeout      = 30 * time.Second
-+	balanceScriptMaxOutputLen = 72 * 1024         // 72KB cap on script stdout/stderr (extra room for state JSON)
-+	balanceScriptMemoryLimit  = 128 * 1024 * 1024 // 128MB virtual address space
-+	balanceScriptCPULimit     = 25                // 25s CPU time (wall clock is 30s)
-+	balanceScriptNprocLimit   = 64                // max processes/threads
-+	balanceScriptMaxStateLen  = 65536             // 64KB max state size
++	balanceScriptTimeout      = 30 * time.Second   // wall clock cap for a whole script run
++	balanceScriptFetchTimeout = 10 * time.Second   // per-request cap inside fetch()
++	balanceScriptMaxMessage   = 72 * 1024          // 72KB cap on collected debug output (extra room for state JSON)
++	balanceScriptMaxStateLen  = 65536              // 64KB max state size
++	balanceScriptMaxSourceLen = 65536              // 64KB max script size
++	balanceScriptMaxBodyLen   = 1024 * 1024        // 1MB cap on a single fetch() response body
++	balanceScriptMaxFetches   = 16                 // max fetch() calls per run
++	balanceScriptMaxCallStack = 256                // max JS call depth
++	balanceScriptMaxRedirects = 3                  // max HTTP redirects followed by fetch()
++	balanceScriptStateUnwrap  = 8                  // max JSON string unwrapping steps for legacy state
++	balanceScriptScriptName   = "<balance_script>" //
 +)
 +
-+// updateChannelBalanceScript executes a user-defined Python script to fetch channel balance.
-+// The script receives channel info via environment variables:
-+//   - CHANNEL_BASE_URL: the channel's base URL
-+//   - CHANNEL_KEY: the channel's API key (for multi-key channels: all keys joined by ",")
-+//   - CHANNEL_TYPE: the channel type integer
-+//   - CHANNEL_ID: the channel ID
-+//   - CHANNEL_IS_MULTI_KEY: "1" if multi-key, "0" otherwise
-+//   - CHANNEL_STATE: previous state (empty on first run)
-+//   - BALANCE_SCRIPT_SOURCE: the user script source code
++// updateChannelBalanceScript executes a user-defined JavaScript script to fetch channel balance.
 +//
-+// The script must print to stdout:
-+//   - JSON object: {"balance": <number>, "state": <any json value>}
-+//   - Or a single number (backward compatible, state unchanged)
++// The script talks to the host through the single global object `newapi`:
 +//
-+// Security layers:
-+//  1. RestrictedPython: compile_restricted + safe_builtins + safer_getattr + import whitelist
-+//  2. seccomp: allow read-only open + network, deny write/execve/fork
-+//  3. prlimit: CPU/memory/process limits
-+//  4. env whitelist: only CHANNEL_* + minimal PATH/HOME/LANG
++//	newapi.environ.CHANNEL_BASE_URL   // channel base URL
++//	newapi.environ.CHANNEL_KEY        // API key (multi-key channels: all keys joined by ",")
++//	newapi.environ.CHANNEL_TYPE       // channel type integer, as string
++//	newapi.environ.CHANNEL_ID         // channel id, as string
++//	newapi.environ.CHANNEL_IS_MULTI_KEY // "1" for multi-key channels, "0" otherwise
++//
++//	newapi.fetch({url, method?, headers?, body?}) // -> {status, headers, body}; http(s) only
++//	newapi.state.get()      // previous state, parsed ( {} on first run )
++//	newapi.state.getRaw()   // previous state, raw string
++//	newapi.state.save(obj)  // persist any JSON-serializable value ( <= 64KB )
++//	newapi.state.saveRaw(s) // persist a raw string
++//	newapi.debug.log(...)   // collect a debug/message line ( <= 72KB total )
++//	newapi.balance.set(n)   // required: the balance to store
++//
++// print(), require(), file system, processes and raw sockets are not available.
++//
++// Limits are enforced at the entry points rather than through a process sandbox:
++// script size, one response body, fetch count, call depth, collected messages and
++// state size are all capped, and the whole run is interrupted after the wall clock
++// timeout. A runaway script can therefore still allocate memory through plain JS
++// value construction; that is accepted.
 +func updateChannelBalanceScript(channel *model.Channel, script string) (float64, string, error) {
 +	// Acquire per-channel lock to serialize state read/write
 +	lock := model.GetChannelPollingLock(channel.Id)
 +	lock.Lock()
 +	defer lock.Unlock()
 +
++	if len(script) > balanceScriptMaxSourceLen {
++		return 0, "", fmt.Errorf("balance script exceeds %d bytes", balanceScriptMaxSourceLen)
++	}
++
++	program, err := goja.Compile(balanceScriptScriptName, script, false)
++	if err != nil {
++		return 0, "", fmt.Errorf("balance script error: %s", err)
++	}
++
 +	ctx, cancel := context.WithTimeout(context.Background(), balanceScriptTimeout)
 +	defer cancel()
 +
-+	// For multi-key channels, join all keys with ","; otherwise use the single key.
-+	keyEnv := channel.Key
++	runtime := newBalanceScriptRuntime(ctx, channel)
++
++	// Interrupt is checked by the VM every few instructions; it is the only way to
++	// stop a runaway script now that no separate process is involved. An interrupted
++	// runtime cannot be reused, which is fine here: every run builds a fresh one.
++	timer := time.AfterFunc(balanceScriptTimeout, func() {
++		runtime.vm.Interrupt("balance script timed out after " + balanceScriptTimeout.String())
++	})
++	defer timer.Stop()
++
++	_, err = runtime.run(program)
++	if err != nil {
++		return 0, "", err
++	}
++
++	if !runtime.hasBalance {
++		return 0, "", fmt.Errorf("balance script error: newapi.balance.set() was never called")
++	}
++
++	// Atomic update: write state first, then balance
++	if runtime.hasState {
++		if err := channel.UpdateBalanceScriptState(runtime.state); err != nil {
++			return 0, "", fmt.Errorf("failed to save balance script state: %w", err)
++		}
++	}
++	channel.UpdateBalance(runtime.balance)
++
++	return runtime.balance, runtime.message(), nil
++}
++
++// balanceScriptRuntime is the host side of a single script run: it owns the
++// goja runtime and collects everything the script reports back.
++type balanceScriptRuntime struct {
++	vm      *goja.Runtime
++	ctx     context.Context
++	channel *model.Channel
++
++	balance    float64
++	hasBalance bool
++
++	state    string
++	hasState bool
++
++	lines      []string
++	messageLen int
++	truncated  bool
++
++	fetches int
++}
++
++func newBalanceScriptRuntime(ctx context.Context, channel *model.Channel) *balanceScriptRuntime {
++	key := channel.Key
 +	isMultiKey := "0"
 +	if channel.ChannelInfo.IsMultiKey {
-+		keyEnv = strings.Join(channel.GetKeys(), ",")
++		key = strings.Join(channel.GetKeys(), ",")
 +		isMultiKey = "1"
 +	}
 +
-+	// Build env whitelist (do NOT inherit os.Environ() to avoid leaking secrets)
-+	cmdEnv := []string{
-+		"PATH=/usr/bin:/bin",
-+		"HOME=/nonexistent",
-+		"LANG=C.UTF-8",
-+		"PYTHONNOUSERSITE=1",
-+		"PYTHONDONTWRITEBYTECODE=1",
-+		"CHANNEL_BASE_URL=" + channel.GetBaseURL(),
-+		"CHANNEL_KEY=" + keyEnv,
-+		"CHANNEL_TYPE=" + strconv.Itoa(channel.Type),
-+		"CHANNEL_ID=" + strconv.Itoa(channel.Id),
-+		"CHANNEL_IS_MULTI_KEY=" + isMultiKey,
-+		"CHANNEL_STATE=" + channel.BalanceScriptState,
-+		"BALANCE_SCRIPT_SOURCE=" + script,
++	rt := &balanceScriptRuntime{
++		vm:      goja.New(),
++		ctx:     ctx,
++		channel: channel,
++	}
++	rt.vm.SetMaxCallStackSize(balanceScriptMaxCallStack)
++
++	environ := rt.vm.NewObject()
++	for name, value := range map[string]string{
++		"CHANNEL_BASE_URL":     channel.GetBaseURL(),
++		"CHANNEL_KEY":          key,
++		"CHANNEL_TYPE":         strconv.Itoa(channel.Type),
++		"CHANNEL_ID":           strconv.Itoa(channel.Id),
++		"CHANNEL_IS_MULTI_KEY": isMultiKey,
++	} {
++		_ = environ.Set(name, value)
 +	}
 +
-+	// prlimit applies RLIMIT_* before exec; child python3 inherits the limits.
-+	cmd := exec.CommandContext(ctx, "prlimit",
-+		fmt.Sprintf("--as=%d", balanceScriptMemoryLimit),
-+		fmt.Sprintf("--cpu=%d", balanceScriptCPULimit),
-+		fmt.Sprintf("--nproc=%d", balanceScriptNprocLimit),
-+		"--", "python3", "-I", "-c", balanceScriptHarness)
-+	cmd.Env = cmdEnv
-+	// Run in its own process group so we can kill any subprocesses on timeout.
-+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
++	state := rt.vm.NewObject()
++	_ = state.Set("get", rt.stateGet)
++	_ = state.Set("getRaw", rt.stateGetRaw)
++	_ = state.Set("save", rt.stateSave)
++	_ = state.Set("saveRaw", rt.stateSaveRaw)
 +
-+	// Cap stdout/stderr so a runaway print doesn't blow up our memory.
-+	var stdout, stderr bytes.Buffer
-+	cmd.Stdout = &limitWriter{w: &stdout, n: balanceScriptMaxOutputLen}
-+	cmd.Stderr = &limitWriter{w: &stderr, n: balanceScriptMaxOutputLen}
++	balance := rt.vm.NewObject()
++	_ = balance.Set("set", rt.balanceSet)
 +
-+	if err := cmd.Start(); err != nil {
-+		return 0, "", fmt.Errorf("balance script start failed: %w", err)
++	debug := rt.vm.NewObject()
++	_ = debug.Set("log", rt.debugLog)
++
++	newapi := rt.vm.NewObject()
++	_ = newapi.Set("environ", environ)
++	_ = newapi.Set("state", state)
++	_ = newapi.Set("balance", balance)
++	_ = newapi.Set("debug", debug)
++	_ = newapi.Set("fetch", rt.fetch)
++
++	_ = rt.vm.Set("newapi", newapi)
++
++	return rt
++}
++
++// run executes the compiled program and converts goja failures into plain errors.
++func (rt *balanceScriptRuntime) run(program *goja.Program) (result goja.Value, err error) {
++	defer func() {
++		// goja converts JS exceptions itself, but a panic escaping a host callback
++		// would otherwise take the whole server down.
++		if recovered := recover(); recovered != nil {
++			err = fmt.Errorf("balance script panic: %v", recovered)
++		}
++	}()
++
++	result, err = rt.vm.RunProgram(program)
++	if err == nil {
++		return result, nil
 +	}
 +
-+	// On context timeout, signal the whole process group (negative pid).
-+	done := make(chan error, 1)
-+	go func() { done <- cmd.Wait() }()
-+
-+	var waitErr error
-+	select {
-+	case <-ctx.Done():
-+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-+		<-done
-+		return 0, "", fmt.Errorf("balance script timed out after %s", balanceScriptTimeout)
-+	case waitErr = <-done:
++	var interrupted *goja.InterruptedError
++	if errors.As(err, &interrupted) {
++		return nil, fmt.Errorf("balance script error: %v", interrupted.Value())
 +	}
 +
-+	if waitErr != nil {
-+		var exitErr *exec.ExitError
-+		if errors.As(waitErr, &exitErr) {
-+			return 0, "", fmt.Errorf("balance script error: %s", strings.TrimSpace(stderr.String()))
-+		}
-+		return 0, "", waitErr
++	var exception *goja.Exception
++	if errors.As(err, &exception) {
++		return nil, fmt.Errorf("balance script error: %s", exception.String())
 +	}
 +
-+	// Parse output: JSON object or plain number
-+	output := strings.TrimSpace(stdout.String())
-+	if strings.HasPrefix(output, "{") {
-+		var result struct {
-+			Balance float64         `json:"balance"`
-+			State   json.RawMessage `json:"state"`
-+			Message string          `json:"message"`
-+		}
-+		if err := json.Unmarshal([]byte(output), &result); err != nil {
-+			return 0, "", fmt.Errorf("balance script invalid JSON: %w, output: %s", err, output)
-+		}
-+		if len(result.State) > balanceScriptMaxStateLen {
-+			return 0, "", fmt.Errorf("balance script state exceeds %d bytes", balanceScriptMaxStateLen)
-+		}
-+		// Atomic update: write state first, then balance
-+		if err := channel.UpdateBalanceScriptState(string(result.State)); err != nil {
-+			return 0, "", fmt.Errorf("failed to save balance script state: %w", err)
-+		}
-+		channel.UpdateBalance(result.Balance)
-+		return result.Balance, result.Message, nil
-+	}
++	return nil, fmt.Errorf("balance script error: %w", err)
++}
 +
-+	// Backward compatible: plain number output, state unchanged
-+	balance, err := strconv.ParseFloat(output, 64)
++func (rt *balanceScriptRuntime) message() string {
++	return strings.Join(rt.lines, "\n")
++}
++
++func (rt *balanceScriptRuntime) balanceSet(call goja.FunctionCall) goja.Value {
++	value := call.Argument(0)
++	if goja.IsUndefined(value) || goja.IsNull(value) || goja.IsNaN(value) {
++		panic(rt.vm.NewTypeError("newapi.balance.set() requires a number"))
++	}
++	rt.balance = value.ToFloat()
++	rt.hasBalance = true
++	return goja.Undefined()
++}
++
++func (rt *balanceScriptRuntime) debugLog(call goja.FunctionCall) goja.Value {
++	parts := make([]string, 0, len(call.Arguments))
++	for _, argument := range call.Arguments {
++		parts = append(parts, argument.String())
++	}
++	line := strings.Join(parts, " ")
++
++	if rt.truncated || rt.messageLen+len(line)+1 > balanceScriptMaxMessage {
++		rt.truncated = true
++		return goja.Undefined()
++	}
++	rt.lines = append(rt.lines, line)
++	rt.messageLen += len(line) + 1
++	return goja.Undefined()
++}
++
++func (rt *balanceScriptRuntime) stateGetRaw(call goja.FunctionCall) goja.Value {
++	return rt.vm.ToValue(rt.channel.BalanceScriptState)
++}
++
++func (rt *balanceScriptRuntime) stateGet(call goja.FunctionCall) goja.Value {
++	// Tolerate corrupt or double-encoded state by unwrapping JSON strings until a
++	// dict/list is obtained, falling back to an empty object.
++	raw := rt.channel.BalanceScriptState
++	var decoded any
++	for step := 0; step < balanceScriptStateUnwrap; step++ {
++		if raw == "" {
++			return rt.vm.NewObject()
++		}
++		if err := json.Unmarshal([]byte(raw), &decoded); err != nil {
++			return rt.vm.NewObject()
++		}
++		switch value := decoded.(type) {
++		case map[string]any, []any:
++			return rt.vm.ToValue(value)
++		case string:
++			raw = value
++		default:
++			return rt.vm.NewObject()
++		}
++	}
++	return rt.vm.NewObject()
++}
++
++func (rt *balanceScriptRuntime) stateSave(call goja.FunctionCall) goja.Value {
++	encoded, err := json.Marshal(call.Argument(0).Export())
 +	if err != nil {
-+		return 0, "", fmt.Errorf("balance script output invalid (expected number or JSON): %s", output)
++		panic(rt.vm.NewTypeError("newapi.state.save() value is not JSON serializable: %s", err))
 +	}
-+	channel.UpdateBalance(balance)
-+	return balance, "", nil
++	rt.setRawState(string(encoded))
++	return goja.Undefined()
 +}
 +
-+// limitWriter writes to w until n bytes have been written, then silently discards the rest.
-+type limitWriter struct {
-+	w io.Writer
-+	n int64
++func (rt *balanceScriptRuntime) stateSaveRaw(call goja.FunctionCall) goja.Value {
++	encoded, err := json.Marshal(call.Argument(0).String())
++	if err != nil {
++		panic(rt.vm.NewTypeError("newapi.state.saveRaw() value is not JSON serializable: %s", err))
++	}
++	rt.setRawState(string(encoded))
++	return goja.Undefined()
 +}
 +
-+func (lw *limitWriter) Write(p []byte) (int, error) {
-+	if lw.n <= 0 {
-+		return len(p), nil
++func (rt *balanceScriptRuntime) setRawState(encoded string) {
++	if len(encoded) > balanceScriptMaxStateLen {
++		panic(rt.vm.NewTypeError("balance script state exceeds %d bytes", balanceScriptMaxStateLen))
 +	}
-+	if int64(len(p)) > lw.n {
-+		_, err := lw.w.Write(p[:lw.n])
-+		lw.n = 0
-+		if err != nil {
-+			return 0, err
++	rt.state = encoded
++	rt.hasState = true
++}
++
++// balanceFetchOptions is the normalized argument of newapi.fetch().
++type balanceFetchOptions struct {
++	url     string
++	method  string
++	headers map[string]string
++	body    string
++}
++
++func (rt *balanceScriptRuntime) fetch(call goja.FunctionCall) goja.Value {
++	options, err := rt.parseFetchOptions(call.Argument(0))
++	if err != nil {
++		panic(rt.vm.NewTypeError("newapi.fetch(): %s", err))
++	}
++
++	if rt.fetches >= balanceScriptMaxFetches {
++		panic(rt.vm.NewTypeError("newapi.fetch() called more than %d times", balanceScriptMaxFetches))
++	}
++	rt.fetches++
++
++	status, headers, body, err := rt.doFetch(options)
++	if err != nil {
++		panic(rt.vm.NewTypeError("newapi.fetch(): %s", err))
++	}
++
++	result := rt.vm.NewObject()
++	_ = result.Set("status", status)
++	_ = result.Set("headers", headers)
++	_ = result.Set("body", body)
++	return result
++}
++
++func (rt *balanceScriptRuntime) parseFetchOptions(value goja.Value) (*balanceFetchOptions, error) {
++	options := &balanceFetchOptions{method: http.MethodGet, headers: map[string]string{}}
++
++	if stringValue, ok := value.Export().(string); ok {
++		options.url = stringValue
++	} else if object, ok := value.(*goja.Object); ok {
++		exported, _ := object.Export().(map[string]any)
++		if exported == nil {
++			return nil, fmt.Errorf("options must be an object or a URL string")
 +		}
-+		return len(p), nil
++		if raw, present := exported["url"]; present {
++			options.url = toString(raw)
++		}
++		if raw, present := exported["method"]; present {
++			options.method = strings.ToUpper(toString(raw))
++		}
++		if raw, present := exported["body"]; present {
++			options.body = toString(raw)
++		}
++		if raw, present := exported["headers"]; present {
++			headers, ok := raw.(map[string]any)
++			if !ok {
++				return nil, fmt.Errorf("headers must be an object")
++			}
++			for name, header := range headers {
++				options.headers[name] = toString(header)
++			}
++		}
++	} else {
++		return nil, fmt.Errorf("options must be an object or a URL string")
 +	}
-+	n, err := lw.w.Write(p)
-+	lw.n -= int64(n)
-+	return n, err
++
++	if strings.TrimSpace(options.url) == "" {
++		return nil, fmt.Errorf("url is required")
++	}
++	return options, nil
 +}
 +
-+// balanceScriptHarness is the trusted Python wrapper that runs the user script.
-+// It enforces RestrictedPython + seccomp before executing untrusted code.
-+//
-+// User scripts MUST use the newapi module to communicate results:
-+//
-+//	from newapi import environ, state, balance
-+//	prev = state.get() or {}
-+//	state.save({"token": new_token})
-+//	balance.set(123.45)
-+//
-+// print() is disabled. Use stderr for debugging if needed.
-+const balanceScriptHarness = `
-+import os, json, sys
++func (rt *balanceScriptRuntime) doFetch(options *balanceFetchOptions) (int, map[string]string, string, error) {
++	parsed, err := url.Parse(options.url)
++	if err != nil {
++		return 0, nil, "", fmt.Errorf("invalid url: %s", err)
++	}
++	if parsed.Scheme != "http" && parsed.Scheme != "https" {
++		return 0, nil, "", fmt.Errorf("unsupported scheme %q, only http and https are allowed", parsed.Scheme)
++	}
 +
-+# Read channel inputs before seccomp filter is installed.
-+_channel_env = {
-+    'CHANNEL_BASE_URL':     os.environ.get('CHANNEL_BASE_URL', ''),
-+    'CHANNEL_KEY':          os.environ.get('CHANNEL_KEY', ''),
-+    'CHANNEL_TYPE':         os.environ.get('CHANNEL_TYPE', ''),
-+    'CHANNEL_ID':           os.environ.get('CHANNEL_ID', ''),
-+    'CHANNEL_IS_MULTI_KEY': os.environ.get('CHANNEL_IS_MULTI_KEY', ''),
-+}
-+_channel_state_raw = os.environ.get('CHANNEL_STATE', '')
-+_user_script = os.environ.get('BALANCE_SCRIPT_SOURCE', '')
++	var body io.Reader
++	if options.body != "" {
++		body = strings.NewReader(options.body)
++	}
++	request, err := http.NewRequestWithContext(rt.ctx, options.method, options.url, body)
++	if err != nil {
++		return 0, nil, "", err
++	}
++	request.Header.Set("User-Agent", "new-api/balance-script")
++	for name, value := range options.headers {
++		request.Header.Set(name, value)
++	}
 +
-+# Pre-import all allowed modules BEFORE seccomp filter is installed.
-+import urllib, urllib.request, urllib.parse, urllib.error
-+import math, datetime, re, base64, hashlib, hmac
-+import time, ssl, socket, http
-+import collections, itertools, functools, string
-+import random, secrets, uuid, decimal
++	client := &http.Client{
++		Transport: &http.Transport{
++			Proxy:                 nil,
++			DialContext:           balanceScriptDialContext,
++			TLSHandshakeTimeout:   balanceScriptFetchTimeout,
++			ResponseHeaderTimeout: balanceScriptFetchTimeout,
++		},
++		Timeout: balanceScriptFetchTimeout,
++		CheckRedirect: func(request *http.Request, via []*http.Request) error {
++			if len(via) >= balanceScriptMaxRedirects {
++				return fmt.Errorf("stopped after %d redirects", balanceScriptMaxRedirects)
++			}
++			return nil
++		},
++	}
 +
-+# RestrictedPython
-+from RestrictedPython import compile_restricted, safe_builtins
-+from RestrictedPython.Guards import safer_getattr, guarded_iter_unpack_sequence, guarded_unpack_sequence
-+from RestrictedPython.Eval import default_guarded_getiter
++	response, err := client.Do(request)
++	if err != nil {
++		return 0, nil, "", err
++	}
++	defer response.Body.Close()
 +
-+# Install seccomp filter before executing user code.
-+try:
-+    from seccomp import SyscallFilter, Action, Arg
-+    O_ACCMODE = 3
-+    f = SyscallFilter(def_action=Action.ERRNO(1))
-+    for s in [
-+        'read', 'write', 'close', 'mmap', 'mprotect', 'munmap', 'brk',
-+        'rt_sigaction', 'rt_sigprocmask', 'rt_sigreturn', 'ioctl',
-+        'poll', 'ppoll', 'pselect6', 'nanosleep', 'clock_gettime', 'clock_nanosleep',
-+        'stat', 'lstat', 'newfstatat', 'readlink', 'readlinkat', 'getcwd',
-+        'access', 'faccessat', 'fcntl', 'dup', 'dup2', 'dup3',
-+        'getrandom', 'futex', 'prlimit64', 'arch_prctl', 'rseq',
-+        'set_tid_address', 'set_robust_list', 'madvise', 'sched_yield',
-+        'getpid', 'gettid', 'getuid', 'geteuid', 'getgid', 'getegid',
-+        'socket', 'connect', 'bind', 'listen', 'accept', 'accept4',
-+        'sendto', 'recvfrom', 'sendmsg', 'recvmsg', 'shutdown',
-+        'setsockopt', 'getsockopt', 'getsockname', 'getpeername',
-+        'uname', 'sysinfo', 'getdents64', 'pread64', 'pwrite64',
-+    ]:
-+        f.add_rule(Action.ALLOW, s)
-+    f.add_rule(Action.ALLOW, 'openat', [Arg(2, 'masked_eq', O_ACCMODE, 0)])
-+    f.add_rule(Action.ERRNO(1), 'openat')
-+    f.add_rule(Action.ALLOW, 'open', [Arg(1, 'masked_eq', O_ACCMODE, 0)])
-+    f.add_rule(Action.ERRNO(1), 'open')
-+    f.load()
-+except Exception:
-+    pass
++	payload, err := io.ReadAll(io.LimitReader(response.Body, balanceScriptMaxBodyLen+1))
++	if err != nil {
++		return 0, nil, "", err
++	}
++	if len(payload) > balanceScriptMaxBodyLen {
++		return 0, nil, "", fmt.Errorf("response body exceeds %d bytes", balanceScriptMaxBodyLen)
++	}
 +
-+# --------------------------------------------------------------------------
-+# newapi module: the only interface user scripts should use.
-+# --------------------------------------------------------------------------
++	headers := make(map[string]string, len(response.Header))
++	for name := range response.Header {
++		headers[name] = response.Header.Get(name)
++	}
 +
-+class _State:
-+    _raw = _channel_state_raw
-+    _saved = None  # None = not saved; otherwise the raw object/string to be JSON-encoded
-+
-+    @staticmethod
-+    def get():
-+        # Defensive: tolerate corrupt or double-encoded state by unwrapping
-+        # JSON strings until a dict/list is obtained, falling back to {}.
-+        raw = _State._raw
-+        if not raw:
-+            return {}
-+        for _ in range(8):
-+            try:
-+                val = json.loads(raw)
-+            except Exception:
-+                return {}
-+            if isinstance(val, (dict, list)):
-+                return val
-+            if isinstance(val, str):
-+                raw = val  # double-encoded JSON string -> unwrap once more
-+                continue
-+            return {}
-+        return {}
-+
-+    @staticmethod
-+    def getRaw():
-+        return _State._raw
-+
-+    @staticmethod
-+    def save(obj):
-+        _State._saved = obj  # store object; json.dumps(out) serializes once
-+
-+    @staticmethod
-+    def saveRaw(s):
-+        _State._saved = str(s)  # store string; json.dumps encodes as JSON string value
-+
-+class _Balance:
-+    _value = None
-+
-+    @staticmethod
-+    def set(value):
-+        _Balance._value = float(value)
-+
-+class _Debug:
-+    _lines = []
-+    @staticmethod
-+    def log(*args, **kwargs):
-+        msg = ' '.join(str(a) for a in args)
-+        _Debug._lines.append(msg)
-+        print(msg, file=sys.stderr)
-+
-+# Register the synthetic newapi module.
-+import types as _types
-+_newapi_mod = _types.ModuleType('newapi')
-+_newapi_mod.environ = _channel_env
-+_newapi_mod.state = _State
-+_newapi_mod.balance = _Balance
-+_newapi_mod.debug = _Debug
-+sys.modules['newapi'] = _newapi_mod
-+
-+# Disable print in user scripts. RestrictedPython rewrites print(x) to:
-+#   _print = _print_(_getattr_)   # constructor call
-+#   _print._call_print(x)         # method call
-+# So _print_ must be a callable returning an object with _call_print.
-+def _disabled_print_call(*args, **kwargs):
-+    raise RuntimeError("print() is disabled in balance scripts; use newapi.debug.log() for debugging")
-+
-+class _DisabledPrint:
-+    def __new__(cls, *args, **kwargs):
-+        return _DisabledPrint
-+    @staticmethod
-+    def _call_print(*args, **kwargs):
-+        raise RuntimeError("print() is disabled in balance scripts; use newapi.debug.log() for debugging")
-+
-+ALLOWED_MODS = {
-+    'urllib', 'urllib.request', 'urllib.parse', 'urllib.error',
-+    'json', 'math', 'datetime', 're', 'base64', 'hashlib', 'hmac',
-+    'time', 'ssl', 'socket', 'http', 'collections', 'itertools',
-+    'functools', 'string', 'random', 'secrets', 'uuid', 'decimal',
-+    'newapi',
++	return response.StatusCode, headers, string(payload), nil
 +}
 +
-+def _safe_import(name, g=None, l=None, ff=(), level=0):
-+    root = name.split('.')[0]
-+    if root not in ALLOWED_MODS:
-+        raise ImportError("module '%s' is not allowed" % name)
-+    return __builtins__.__import__(name, g, l, ff, level)
++// balanceScriptDialContext dials only public addresses, so a script cannot reach
++// loopback, private or link-local services of the host it runs on.
++func balanceScriptDialContext(ctx context.Context, network, address string) (net.Conn, error) {
++	host, port, err := net.SplitHostPort(address)
++	if err != nil {
++		return nil, err
++	}
 +
-+b = dict(safe_builtins)
-+b['__import__'] = _safe_import
++	addresses, err := net.DefaultResolver.LookupIPAddr(ctx, host)
++	if err != nil {
++		return nil, err
++	}
++	if len(addresses) == 0 {
++		return nil, fmt.Errorf("no address found for %s", host)
++	}
 +
-+# Guard for inplace operations (x += 1, x -= 1, etc.)
-+# RestrictedPython rewrites 'x += y' to 'x = _inplacevar_("+=", x, y)'
-+def _inplacevar_(op, obj, val):
-+    if op == '+=': return obj + val
-+    if op == '-=': return obj - val
-+    if op == '*=': return obj * val
-+    if op == '/=': return obj / val
-+    if op == '//=': return obj // val
-+    if op == '%=': return obj % val
-+    if op == '**=': return obj ** val
-+    if op == '<<=': return obj << val
-+    if op == '>>=': return obj >> val
-+    if op == '&=': return obj & val
-+    if op == '|=': return obj | val
-+    if op == '^=': return obj ^ val
-+    raise TypeError(f"unsupported inplace operator: {op}")
-+
-+b['_inplacevar_'] = _inplacevar_
-+
-+# RestrictedPython's safe_builtins omits basic Python types; add them back
-+_builtins_dict = __builtins__ if isinstance(__builtins__, dict) else __builtins__.__dict__
-+for _name in ('dict', 'list', 'tuple', 'set', 'frozenset',
-+              'int', 'float', 'str', 'bytes', 'bytearray', 'bool',
-+              'None', 'True', 'False', 'type', 'object',
-+              'len', 'range', 'enumerate', 'zip', 'sorted', 'reversed',
-+              'min', 'max', 'sum', 'abs', 'round', 'pow', 'divmod',
-+              'isinstance', 'issubclass', 'hasattr', 'getattr', 'setattr', 'delattr',
-+              'KeyError', 'ValueError', 'TypeError', 'AttributeError',
-+              'IndexError', 'StopIteration', 'RuntimeError', 'Exception',
-+              'ArithmeticError', 'ZeroDivisionError', 'OverflowError',
-+              'AssertionError', 'ImportError', 'LookupError', 'NameError',
-+              'OSError', 'IOError', 'FileNotFoundError'):
-+    if _name in _builtins_dict:
-+        b[_name] = _builtins_dict[_name]
-+
-+g = {
-+    '__builtins__': b,
-+    '__metaclass__': type,
-+    '__name__': '__main__',
-+    '_getattr_': safer_getattr,
-+    '_getitem_': lambda o, k: o[k],
-+    '_write_': lambda o: o,
-+    '_getiter_': default_guarded_getiter,
-+    '_iter_unpack_sequence_': guarded_iter_unpack_sequence,
-+    '_unpack_sequence_': guarded_unpack_sequence,
-+    '_print_': _DisabledPrint,
++	dialer := &net.Dialer{Timeout: balanceScriptFetchTimeout}
++	var lastErr error
++	for _, candidate := range addresses {
++		if isBlockedBalanceScriptIP(candidate.IP) {
++			lastErr = fmt.Errorf("address %s is not allowed", candidate.IP)
++			continue
++		}
++		// Dial the resolved address directly so a DNS answer cannot change between
++		// the check and the connection.
++		connection, err := dialer.DialContext(ctx, network, net.JoinHostPort(candidate.IP.String(), port))
++		if err == nil {
++			return connection, nil
++		}
++		lastErr = err
++	}
++	if lastErr == nil {
++		lastErr = fmt.Errorf("unable to connect to %s", host)
++	}
++	return nil, lastErr
 +}
 +
-+try:
-+    code = compile_restricted(_user_script, '<balance_script>', 'exec')
-+    exec(code, g)
-+except Exception as e:
-+    sys.stderr.write(json.dumps({"error": str(e)}) + "\n")
-+    raise SystemExit(1)
++func isBlockedBalanceScriptIP(ip net.IP) bool {
++	return ip.IsLoopback() ||
++		ip.IsPrivate() ||
++		ip.IsLinkLocalUnicast() ||
++		ip.IsLinkLocalMulticast() ||
++		ip.IsInterfaceLocalMulticast() ||
++		ip.IsMulticast() ||
++		ip.IsUnspecified()
++}
 +
-+# Output result
-+if _Balance._value is None:
-+    sys.stderr.write(json.dumps({"error": "balance.set() was never called"}) + "\n")
-+    raise SystemExit(1)
-+
-+out = {"balance": _Balance._value}
-+if _State._saved is not None:
-+    out["state"] = _State._saved
-+if _Debug._lines:
-+    out["message"] = "\n".join(_Debug._lines)
-+sys.stdout.write(json.dumps(out))
-+`
++// toString converts an exported goja value into a string without producing
++// JS-style "[object Object]" noise for nil.
++func toString(value any) string {
++	if value == nil {
++		return ""
++	}
++	if text, ok := value.(string); ok {
++		return text
++	}
++	return fmt.Sprint(value)
++}
+diff --git a/go.mod b/go.mod
+index ae26a6bbf..f93874ab7 100644
+--- a/go.mod
++++ b/go.mod
+@@ -1,7 +1,7 @@
+ module github.com/QuantumNous/new-api
+ 
+ // +heroku goVersion go1.18
+-go 1.26
++go 1.26.0
+ 
+ require (
+ 	github.com/Calcium-Ion/go-epay v0.0.5
+@@ -54,9 +54,9 @@ require (
+ 	golang.org/x/image v0.41.0
+ 	golang.org/x/net v0.55.0
+ 	golang.org/x/oauth2 v0.36.0
+-	golang.org/x/sync v0.20.0
++	golang.org/x/sync v0.24.0
+ 	golang.org/x/sys v0.45.0
+-	golang.org/x/text v0.37.0
++	golang.org/x/text v0.43.0
+ 	gopkg.in/yaml.v3 v3.0.1
+ 	gorm.io/driver/mysql v1.5.7
+ 	gorm.io/driver/postgres v1.5.9
+@@ -72,10 +72,12 @@ require (
+ 	github.com/ClickHouse/ch-go v0.71.0 // indirect
+ 	github.com/bmatcuk/doublestar/v4 v4.6.1 // indirect
+ 	github.com/casbin/govaluate v1.10.0 // indirect
+-	github.com/dlclark/regexp2/v2 v2.5.1 // indirect
++	github.com/dlclark/regexp2/v2 v2.8.1 // indirect
+ 	github.com/go-faster/city v1.0.1 // indirect
+ 	github.com/go-faster/errors v0.7.1 // indirect
+ 	github.com/go-jose/go-jose/v4 v4.1.4 // indirect
++	github.com/go-sourcemap/sourcemap v2.1.3+incompatible // indirect
++	github.com/google/pprof v0.0.0-20250317173921-a4b03ec1a45e // indirect
+ 	github.com/hashicorp/go-version v1.8.0 // indirect
+ 	github.com/paulmach/orb v0.12.0 // indirect
+ 	github.com/pierrec/lz4/v4 v4.1.25 // indirect
+@@ -170,6 +172,7 @@ require (
+ 	github.com/ClickHouse/clickhouse-go/v2 v2.46.0
+ 	github.com/QuantumNous/new-api/relaykit v0.0.0
+ 	github.com/QuantumNous/new-api/tokenkit v0.0.0
++	github.com/dop251/goja v0.0.0-20261024144015-2a9269b6b6de
+ )
+ 
+ replace github.com/QuantumNous/new-api/relaykit => ./relaykit
+diff --git a/go.sum b/go.sum
+index 884c2d903..1ba61ca07 100644
+--- a/go.sum
++++ b/go.sum
+@@ -645,6 +645,8 @@ github.com/ClickHouse/clickhouse-go/v2 v2.46.0/go.mod h1:giJfUVlMkcfUEPVfRpt51zZ
+ github.com/DmitriyVTitov/size v1.5.0 h1:/PzqxYrOyOUX1BXj6J9OuVRVGe+66VL4D9FlUaW515g=
+ github.com/DmitriyVTitov/size v1.5.0/go.mod h1:le6rNI4CoLQV1b9gzp1+3d7hMAD/uu2QcJ+aYbNgiU0=
+ github.com/JohnCGriffin/overflow v0.0.0-20211019200055-46fa312c352c/go.mod h1:X0CRv0ky0k6m906ixxpzmDRLvX58TFUKS2eePweuyxk=
++github.com/Masterminds/semver/v3 v3.5.0 h1:kQceYJfbupGfZOKZQg0kou0DgAKhzDg2NZPAwZ/2OOE=
++github.com/Masterminds/semver/v3 v3.5.0/go.mod h1:4V+yj/TJE1HU9XfppCwVMZq3I84lprf4nC11bSS5beM=
+ github.com/Microsoft/go-winio v0.4.11/go.mod h1:VhR8bwka0BXejwEJY73c50VrPtXAaKcyvVC4A4RozmA=
+ github.com/Microsoft/go-winio v0.4.14/go.mod h1:qXqCSQ3Xa7+6tgxaGTIe4Kpcdsi+P8jBhyzoq1bpyYA=
+ github.com/Microsoft/go-winio v0.4.15-0.20190919025122-fc70bd9a86b5/go.mod h1:tTuCMEN+UleMWgg9dVx4Hu52b1bJo+59jBh3ajtinzw=
+@@ -1012,8 +1014,8 @@ github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f h1:lO4WD4F/r
+ github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f/go.mod h1:cuUVRXasLTGF7a8hSLbxyZXjz+1KgoB3wDUb6vlszIc=
+ github.com/dgryski/go-sip13 v0.0.0-20181026042036-e10d5fee7954/go.mod h1:vAd38F8PWV+bWy6jNmig1y/TA+kYO4g3RSRF0IAv0no=
+ github.com/distribution/distribution/v3 v3.0.0-20220526142353-ffbd94cbe269/go.mod h1:28YO/VJk9/64+sTGNuYaBjWxrXTPrj0C0XmgTIOjxX4=
+-github.com/dlclark/regexp2/v2 v2.5.1 h1:E5Ug7Dh264W1ymdySmiHNcDG7fmsR307APCE5R07a20=
+-github.com/dlclark/regexp2/v2 v2.5.1/go.mod h1:avUrQvPaLz2DrFNHJF0taWAFFX2C1GMSSoeiqFjcBmU=
++github.com/dlclark/regexp2/v2 v2.8.1 h1:I1jbaCbXeOxdVN8z3fb55Mvtgb94/6+Dh0zjmXjKV/0=
++github.com/dlclark/regexp2/v2 v2.8.1/go.mod h1:avUrQvPaLz2DrFNHJF0taWAFFX2C1GMSSoeiqFjcBmU=
+ github.com/dmarkham/enumer v1.5.8/go.mod h1:d10o8R3t/gROm2p3BXqTkMt2+HMuxEmWCXzorAruYak=
+ github.com/dnaeon/go-vcr v1.0.1/go.mod h1:aBB1+wY4s93YsC3HHjMBMrwTj2R9FHDzUr9KyGc8n1E=
+ github.com/docker/cli v0.0.0-20191017083524-a8ff7f821017/go.mod h1:JLrzqnKDaYBop7H2jaqPtU4hHvMKP+vjCwu2uszcLI8=
+@@ -1043,6 +1045,8 @@ github.com/docker/go-units v0.5.0/go.mod h1:fgPhTUdO+D/Jk86RDLlptpiXQzgHJF7gydDD
+ github.com/docker/libtrust v0.0.0-20150114040149-fa567046d9b1/go.mod h1:cyGadeNEkKy96OOhEzfZl+yxihPEzKnqJwvfuSUqbZE=
+ github.com/docker/spdystream v0.0.0-20160310174837-449fdfce4d96/go.mod h1:Qh8CwZgvJUkLughtfhJv5dyTYa91l1fOUCrgjqmcifM=
+ github.com/docopt/docopt-go v0.0.0-20180111231733-ee0de3bc6815/go.mod h1:WwZ+bS3ebgob9U8Nd0kOddGdZWjyMGR8Wziv+TBNwSE=
++github.com/dop251/goja v0.0.0-20261024144015-2a9269b6b6de h1:TZ5ozdZ1dej3o0xsj2s+MUgM2UIm6pUSof+PoWLM2/g=
++github.com/dop251/goja v0.0.0-20261024144015-2a9269b6b6de/go.mod h1:Cp9NYOLrEKg/ypIRkUWYXWLuKAyyFGkDmGeJ95Sw0zI=
+ github.com/dustin/go-humanize v0.0.0-20171111073723-bb3d318650d4/go.mod h1:HtrtbFcZ19U5GC7JDqmcUSB87Iq5E25KnS6fMYU6eOk=
+ github.com/dustin/go-humanize v1.0.0/go.mod h1:HtrtbFcZ19U5GC7JDqmcUSB87Iq5E25KnS6fMYU6eOk=
+ github.com/dustin/go-humanize v1.0.1 h1:GzkhY7T5VNhEkwH0PVJgjz+fX1rhBrR7pRT3mDkpeCY=
+@@ -1202,6 +1206,8 @@ github.com/go-playground/validator/v10 v10.20.0 h1:K9ISHbSaI0lyB2eWMPJo+kOS/FBEx
+ github.com/go-playground/validator/v10 v10.20.0/go.mod h1:dbuPbCMFw/DrkbEynArYaCwl3amGuJotoKCe95atGMM=
+ github.com/go-redis/redis/v8 v8.11.5 h1:AcZZR7igkdvfVmQTPnu9WE37LRrO/YrBH5zWyjDC0oI=
+ github.com/go-redis/redis/v8 v8.11.5/go.mod h1:gREzHqY1hg6oD9ngVRbLStwAWKhA0FEgq8Jd4h5lpwo=
++github.com/go-sourcemap/sourcemap v2.1.3+incompatible h1:W1iEw64niKVGogNgBN3ePyLFfuisuzeidWPMPWmECqU=
++github.com/go-sourcemap/sourcemap v2.1.3+incompatible/go.mod h1:F8jJfvm2KbVjc5NqelyYJmf/v5J0dwNLS2mL4sNA1Jg=
+ github.com/go-sql-driver/mysql v1.4.0/go.mod h1:zAC/RDZ24gD3HViQzih4MyKcchzm+sOG5ZlKdlhCg5w=
+ github.com/go-sql-driver/mysql v1.7.0 h1:ueSltNNllEqE3qcWBTD0iQd3IpL/6U+mJxLkazJ7YPc=
+ github.com/go-sql-driver/mysql v1.7.0/go.mod h1:OXbVy3sEdcQ2Doequ6Z5BW6fXNQTmx+9S1MCJN5yJMI=
+@@ -1216,6 +1222,8 @@ github.com/goccy/go-json v0.9.7/go.mod h1:6MelG93GURQebXPDq3khkgXZkazVtN9CRI+MGF
+ github.com/goccy/go-json v0.9.11/go.mod h1:6MelG93GURQebXPDq3khkgXZkazVtN9CRI+MGFi0w8I=
+ github.com/goccy/go-json v0.10.2 h1:CrxCmQqYDkv1z7lO7Wbh2HN93uovUHgrECaO5ZrCXAU=
+ github.com/goccy/go-json v0.10.2/go.mod h1:6MelG93GURQebXPDq3khkgXZkazVtN9CRI+MGFi0w8I=
++github.com/goccy/go-yaml v1.19.2 h1:PmFC1S6h8ljIz6gMRBopkjP1TVT7xuwrButHID66PoM=
++github.com/goccy/go-yaml v1.19.2/go.mod h1:XBurs7gK8ATbW4ZPGKgcbrY1Br56PdM69F7LkFRi1kA=
+ github.com/godbus/dbus v0.0.0-20151105175453-c7fdd8b5cd55/go.mod h1:/YcGZj5zSblfDWMMoOzV4fas9FZnQYTkDnsGvmh2Grw=
+ github.com/godbus/dbus v0.0.0-20180201030542-885f9cc04c9c/go.mod h1:/YcGZj5zSblfDWMMoOzV4fas9FZnQYTkDnsGvmh2Grw=
+ github.com/godbus/dbus v0.0.0-20190422162347-ade71ed3457e/go.mod h1:bBOAhwG1umN6/6ZUMtDFBMQR8jRg9O75tm9K00oMsK4=
+@@ -2264,8 +2272,8 @@ golang.org/x/mod v0.6.0/go.mod h1:4mET923SAdbXp2ki8ey+zGs1SLqsuM2Y0uvdZR/fUNI=
+ golang.org/x/mod v0.7.0/go.mod h1:iBbtSCu2XBx23ZKBPSOrRkjjQPZFPuis4dIYUhu/chs=
+ golang.org/x/mod v0.8.0/go.mod h1:iBbtSCu2XBx23ZKBPSOrRkjjQPZFPuis4dIYUhu/chs=
+ golang.org/x/mod v0.9.0/go.mod h1:iBbtSCu2XBx23ZKBPSOrRkjjQPZFPuis4dIYUhu/chs=
+-golang.org/x/mod v0.35.0 h1:Ww1D637e6Pg+Zb2KrWfHQUnH2dQRLBQyAtpr/haaJeM=
+-golang.org/x/mod v0.35.0/go.mod h1:+GwiRhIInF8wPm+4AoT6L0FA1QWAad3OMdTRx4tFYlU=
++golang.org/x/mod v0.41.0 h1:qJmnOUb4YB+FsEuM3HcWucdZASCPGhsX6uljO6pog0c=
++golang.org/x/mod v0.41.0/go.mod h1:Ek9pY8RKWXwsWvd3rQiHYtMqkjSUV+s1Rj7j4H5Ur6o=
+ golang.org/x/net v0.0.0-20180724234803-3673e40ba225/go.mod h1:mL1N/T3taQHkDXs73rZJwtUhF3w3ftmwwsq0BUmARs4=
+ golang.org/x/net v0.0.0-20180826012351-8a410e7b638d/go.mod h1:mL1N/T3taQHkDXs73rZJwtUhF3w3ftmwwsq0BUmARs4=
+ golang.org/x/net v0.0.0-20180906233101-161cd47e91fd/go.mod h1:mL1N/T3taQHkDXs73rZJwtUhF3w3ftmwwsq0BUmARs4=
+@@ -2401,8 +2409,8 @@ golang.org/x/sync v0.0.0-20220819030929-7fc1605a5dde/go.mod h1:RxMgew5VJxzue5/jJ
+ golang.org/x/sync v0.0.0-20220929204114-8fcdb60fdcc0/go.mod h1:RxMgew5VJxzue5/jJTE5uejpjVlOe/izrB70Jof72aM=
+ golang.org/x/sync v0.1.0/go.mod h1:RxMgew5VJxzue5/jJTE5uejpjVlOe/izrB70Jof72aM=
+ golang.org/x/sync v0.3.0/go.mod h1:FU7BRWz2tNW+3quACPkgCx/L+uEAv1htQ0V83Z9Rj+Y=
+-golang.org/x/sync v0.20.0 h1:e0PTpb7pjO8GAtTs2dQ6jYa5BWYlMuX047Dco/pItO4=
+-golang.org/x/sync v0.20.0/go.mod h1:9xrNwdLfx4jkKbNva9FpL6vEN7evnE43NNNJQ2LF3+0=
++golang.org/x/sync v0.24.0 h1:iqiDrGoDgyuvAKrhLQthUEzU/R378N78gXbBjxed7oA=
++golang.org/x/sync v0.24.0/go.mod h1:sUUOizhqBxiL6pEWpqNLUiaJn1ShEbZ6BBqskPbjZm0=
+ golang.org/x/sys v0.0.0-20180823144017-11551d06cbcc/go.mod h1:STP8DvDyc/dI5b8T5hshtkjS+E42TnysNCUPdjciGhY=
+ golang.org/x/sys v0.0.0-20180830151530-49385e6e1522/go.mod h1:STP8DvDyc/dI5b8T5hshtkjS+E42TnysNCUPdjciGhY=
+ golang.org/x/sys v0.0.0-20180905080454-ebe1bf3edb33/go.mod h1:STP8DvDyc/dI5b8T5hshtkjS+E42TnysNCUPdjciGhY=
+@@ -2587,8 +2595,8 @@ golang.org/x/text v0.7.0/go.mod h1:mrYo+phRRbMaCq/xk9113O4dZlRixOauAjOtrjsXDZ8=
+ golang.org/x/text v0.8.0/go.mod h1:e1OnstbJyHTd6l/uOt8jFFHp6TRDWZR/bV3emEE/zU8=
+ golang.org/x/text v0.9.0/go.mod h1:e1OnstbJyHTd6l/uOt8jFFHp6TRDWZR/bV3emEE/zU8=
+ golang.org/x/text v0.13.0/go.mod h1:TvPlkZtksWOMsz7fbANvkp4WM8x/WCo/om8BMLbz+aE=
+-golang.org/x/text v0.37.0 h1:Cqjiwd9eSg8e0QAkyCaQTNHFIIzWtidPahFWR83rTrc=
+-golang.org/x/text v0.37.0/go.mod h1:a5sjxXGs9hsn/AJVwuElvCAo9v8QYLzvavO5z2PiM38=
++golang.org/x/text v0.43.0 h1:1QivrlhwAsnMOcqgOdl9my7s9OyZl8O5/UGUTJVXoWc=
++golang.org/x/text v0.43.0/go.mod h1:hbSIYA/amXcRXTFSZqh8tWHEoqRvvbKPJ2uz/KU+a+s=
+ golang.org/x/time v0.0.0-20180412165947-fbb02b2291d2/go.mod h1:tRJNPiyCQ0inRvYxbN9jk5I+vvW/OXSQhTDSoE431IQ=
+ golang.org/x/time v0.0.0-20181108054448-85acf8d2951c/go.mod h1:tRJNPiyCQ0inRvYxbN9jk5I+vvW/OXSQhTDSoE431IQ=
+ golang.org/x/time v0.0.0-20190308202827-9d24e82272b4/go.mod h1:tRJNPiyCQ0inRvYxbN9jk5I+vvW/OXSQhTDSoE431IQ=
+@@ -2681,8 +2689,8 @@ golang.org/x/tools v0.3.0/go.mod h1:/rWhSS2+zyEVwoJf8YAX6L2f0ntZ7Kn/mGgAWcipA5k=
+ golang.org/x/tools v0.4.0/go.mod h1:UE5sM2OK9E/d67R0ANs2xJizIymRP5gJU295PvKXxjQ=
+ golang.org/x/tools v0.6.0/go.mod h1:Xwgl3UAJ/d3gWutnCtw505GrjyAbvKui8lOU390QaIU=
+ golang.org/x/tools v0.7.0/go.mod h1:4pg6aUX35JBAogB10C9AtvVL+qowtN4pT3CGSQex14s=
+-golang.org/x/tools v0.44.0 h1:UP4ajHPIcuMjT1GqzDWRlalUEoY+uzoZKnhOjbIPD2c=
+-golang.org/x/tools v0.44.0/go.mod h1:KA0AfVErSdxRZIsOVipbv3rQhVXTnlU6UhKxHd1seDI=
++golang.org/x/tools v0.51.0 h1:k4Xc/1Om9jwkBJBo4NVLMSARBoWtK10mx+W5BnXCeAI=
++golang.org/x/tools v0.51.0/go.mod h1:9eEncMayCV6zRMGhR5eZEC2iBx98qWcF1HZ9Z7wJOoA=
+ golang.org/x/xerrors v0.0.0-20190717185122-a985d3407aa7/go.mod h1:I/5z698sn9Ka8TeJc9MKroUUfqBBauWjQqLJ2OPfmY0=
+ golang.org/x/xerrors v0.0.0-20191011141410-1b5146add898/go.mod h1:I/5z698sn9Ka8TeJc9MKroUUfqBBauWjQqLJ2OPfmY0=
+ golang.org/x/xerrors v0.0.0-20191204190536-9bdfabe68543/go.mod h1:I/5z698sn9Ka8TeJc9MKroUUfqBBauWjQqLJ2OPfmY0=
 diff --git a/model/channel.go b/model/channel.go
 index b71f48603..617bb5de2 100644
 --- a/model/channel.go
@@ -510,20 +711,20 @@ index b71f48603..617bb5de2 100644
  	var err error
  	err = DB.Delete(channel).Error
 diff --git a/relaykit/dto/channel_settings.go b/relaykit/dto/channel_settings.go
-index 54892c8ff..f41f8f42f 100644
+index 54892c8ff..e6176517e 100644
 --- a/relaykit/dto/channel_settings.go
 +++ b/relaykit/dto/channel_settings.go
 @@ -103,6 +103,8 @@ const (
  )
  
  type ChannelOtherSettings struct {
-+	BalanceScript string `json:"balance_script,omitempty"` // Custom Python balance script using newapi.balance.set()
++	BalanceScript string `json:"balance_script,omitempty"` // Custom JavaScript balance script using newapi.balance.set()
 +
  	AzureResponsesVersion                 string                `json:"azure_responses_version,omitempty"`
  	VertexKeyType                         VertexKeyType         `json:"vertex_key_type,omitempty"`   // "json" or "api_key"
  	VertexProjectID                       string                `json:"vertex_project_id,omitempty"` // 仅当 vertex_key_type=api_key 时使用；JSON 模式下从 service account 解析
 diff --git a/web/src/features/channels/components/__tests__/channel-configuration.test.tsx b/web/src/features/channels/components/__tests__/channel-configuration.test.tsx
-index 8480cc1d8..6c0cd2fe3 100644
+index 8480cc1d8..9d250753d 100644
 --- a/web/src/features/channels/components/__tests__/channel-configuration.test.tsx
 +++ b/web/src/features/channels/components/__tests__/channel-configuration.test.tsx
 @@ -1299,7 +1299,7 @@ test('editing opens the shared configuration and omits an unchanged key on updat
@@ -535,7 +736,7 @@ index 8480cc1d8..6c0cd2fe3 100644
    expect(
      screen.getByRole('tab', { name: /Connection & Models/ })
    ).toHaveAccessibleName(/Ready/)
-@@ -1317,6 +1317,33 @@ test('editing opens the shared configuration and omits an unchanged key on updat
+@@ -1317,6 +1317,32 @@ test('editing opens the shared configuration and omits an unchanged key on updat
    expect(put.mock.calls[0]?.[1]).not.toHaveProperty('key')
  })
  
@@ -544,10 +745,10 @@ index 8480cc1d8..6c0cd2fe3 100644
 +  render(<ConfigurationHarness currentRow={editingChannel} />)
 +  expect(await screen.findByDisplayValue('Existing channel')).toBeVisible()
 +  expect(
-+    screen.queryByLabelText('Custom Balance Script (Python)')
++    screen.queryByLabelText('Custom Balance Script (JavaScript)')
 +  ).not.toBeVisible()
 +  await user.click(screen.getByRole('tab', { name: /Balance Script/ }))
-+  const script = screen.getByLabelText('Custom Balance Script (Python)')
++  const script = screen.getByLabelText('Custom Balance Script (JavaScript)')
 +  expect(script).toBeVisible()
 +  expect(
 +    screen.queryByText('CHANNEL_BASE_URL: channel API base URL')
@@ -557,13 +758,12 @@ index 8480cc1d8..6c0cd2fe3 100644
 +  expect(
 +    within(guide).getByText(/CHANNEL_BASE_URL: channel API base URL/)
 +  ).toBeVisible()
-+  expect(within(guide).getByText(/CHANNEL_STATE/)).toBeVisible()
-+  expect(within(guide).getByText(/BALANCE_SCRIPT_SOURCE/)).toBeVisible()
++  expect(within(guide).getByText(/newapi\.fetch\(\) is the only way out/)).toBeVisible()
 +  await user.click(within(guide).getByRole('button', { name: 'Close' }))
-+  fireEvent.change(script, { target: { value: 'from newapi import balance' } })
++  fireEvent.change(script, { target: { value: 'newapi.balance.set(1)' } })
 +  await user.click(screen.getByRole('tab', { name: /Connection & Models/ }))
 +  await user.click(screen.getByRole('tab', { name: /Balance Script/ }))
-+  expect(script).toHaveValue('from newapi import balance')
++  expect(script).toHaveValue('newapi.balance.set(1)')
 +})
 +
  test('editing legacy channels retains the full provider list and saves the original type', async () => {
@@ -679,10 +879,10 @@ index 6e85244df..9a2c29422 100644
              <ChannelQuickOptions
 diff --git a/web/src/features/channels/components/drawers/sections/balance-script-section.tsx b/web/src/features/channels/components/drawers/sections/balance-script-section.tsx
 new file mode 100644
-index 000000000..d7688cd49
+index 000000000..e02e39e7d
 --- /dev/null
 +++ b/web/src/features/channels/components/drawers/sections/balance-script-section.tsx
-@@ -0,0 +1,168 @@
+@@ -0,0 +1,164 @@
 +/*
 +Copyright (C) 2023-2026 QuantumNous
 +
@@ -716,20 +916,17 @@ index 000000000..d7688cd49
 +} from '@/components/ui/form'
 +import { Textarea } from '@/components/ui/textarea'
 +
-+const BALANCE_SCRIPT_TEMPLATE = `import urllib.request, json
-+from newapi import environ, state, balance
++const BALANCE_SCRIPT_TEMPLATE = `const url = newapi.environ.CHANNEL_BASE_URL + "/v1/user/balance";
++const resp = newapi.fetch({
++  url: url,
++  headers: { Authorization: "Bearer " + newapi.environ.CHANNEL_KEY },
++});
++const data = JSON.parse(resp.body);
 +
-+url = environ["CHANNEL_BASE_URL"] + "/v1/user/balance"
-+req = urllib.request.Request(url, headers={
-+    "Authorization": "Bearer " + environ["CHANNEL_KEY"]
-+})
-+with urllib.request.urlopen(req, timeout=15) as resp:
-+    data = json.loads(resp.read())
-+
-+balance.set(data["balance"])
-+# Save state (state.get() returns {} on first run)
-+s = state.get()
-+state.save(s)
++newapi.balance.set(data.balance);
++// State survives between runs; get() returns {} on the first run.
++newapi.state.save(newapi.state.get());
++newapi.debug.log("Balance: " + data.balance);
 +`
 +
 +interface BalanceScriptFieldProps<TFieldValues extends FieldValues> {
@@ -751,11 +948,11 @@ index 000000000..d7688cd49
 +        <FormItem className='space-y-3'>
 +          <div className='flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between'>
 +            <div className='flex items-center gap-2'>
-+              <FormLabel>{t('Custom Balance Script (Python)')}</FormLabel>
++              <FormLabel>{t('Custom Balance Script (JavaScript)')}</FormLabel>
 +              <Dialog
 +                title={t('Balance Script Guide')}
 +                description={t(
-+                  'Use a restricted Python script to query an upstream balance and return an optional status message.'
++                  'Use a sandboxed JavaScript script to query an upstream balance and return an optional status message.'
 +                )}
 +                trigger={
 +                  <Button
@@ -780,23 +977,20 @@ index 000000000..d7688cd49
 +CHANNEL_KEY: API key; multiple keys are joined with commas
 +CHANNEL_TYPE: channel type ID (string)
 +CHANNEL_ID: channel ID (string)
-+CHANNEL_IS_MULTI_KEY: "1" for multiple keys, otherwise "0"
-+
-+Process inputs (not in newapi.environ):
-+CHANNEL_STATE: saved JSON; read using state.get()/getRaw()
-+BALANCE_SCRIPT_SOURCE: script source; supplied by the runner`}
++CHANNEL_IS_MULTI_KEY: "1" for multiple keys, otherwise "0"`}
 +                    </pre>
 +                  </section>
 +                  <section className='space-y-2'>
 +                    <h3 className='font-medium'>{t('Script API')}</h3>
 +                    <pre className='bg-muted/50 overflow-x-auto rounded-md border p-3 text-xs whitespace-pre-wrap'>
-+                      {`from newapi import environ, state, balance, debug
++                      {`const saved = newapi.state.get() // {} on the first run
++newapi.balance.set(12.34)
++newapi.state.save(saved)
++newapi.debug.log("Balance: $12.34")
++newapi.debug.log("Weekly: $5.00")
 +
-+saved = state.get()  # {} on the first run
-+balance.set(12.34)
-+state.save(saved)
-+debug.log("Balance: $12.34")
-+debug.log("Weekly: $5.00")`}
++const resp = newapi.fetch({ url, method, headers, body })
++// -> { status, headers, body }; http(s) only, 1 MiB body cap`}
 +                    </pre>
 +                  </section>
 +                  <section className='space-y-2'>
@@ -804,15 +998,17 @@ index 000000000..d7688cd49
 +                      {t('Return values and limits')}
 +                    </h3>
 +                    <p className='text-muted-foreground'>
-+                      Use Fill Template for a urllib.request HTTP example;
++                      Use Fill Template for a newapi.fetch() HTTP example;
 +                      adjust its endpoint and JSON balance field for your
 +                      provider. balance.set() sets the numeric result;
 +                      state.get()/save() persists JSON between runs. debug.log()
 +                      returns a message; multiple calls are shown on separate
-+                      lines. print() is disabled. Scripts have a 30-second
-+                      timeout and restricted imports; saved state is limited to
-+                      64 KiB. Leave the editor empty to use the default balance
-+                      API.
++                      lines. Scripts run on a JavaScript engine without file,
++                      process or socket access: newapi.fetch() is the only way
++                      out, http(s) only. A run is limited to 30 seconds, 16
++                      fetches, a 1 MiB response body, 72 KiB of messages and
++                      64 KiB of saved state. Leave the editor empty to use the
++                      default balance API.
 +                    </p>
 +                  </section>
 +                </div>
@@ -897,7 +1093,7 @@ index 40f661027..2321e8758 100644
      request: 'idle',
      other: 'idle',
 diff --git a/web/src/features/channels/lib/channel-form.ts b/web/src/features/channels/lib/channel-form.ts
-index 12d4caec1..c06cbea5f 100644
+index 12d4caec1..e89b22938 100644
 --- a/web/src/features/channels/lib/channel-form.ts
 +++ b/web/src/features/channels/lib/channel-form.ts
 @@ -294,6 +294,7 @@ export const channelFormSchema = z
@@ -944,7 +1140,7 @@ index 12d4caec1..c06cbea5f 100644
      delete settingsObj.advanced_custom
    }
  
-+  // Custom balance script (Python) — applies to any channel type
++  // Custom balance script (JavaScript) — applies to any channel type
 +  if (formData.balance_script && formData.balance_script.trim()) {
 +    settingsObj.balance_script = formData.balance_script
 +  } else if ('balance_script' in settingsObj) {

@@ -12,7 +12,7 @@ The date describes the source commit, not when the image was built. A runtime
 
 # Active custom patches
 
-- `balance-script`: Python channel balance scripts, state persistence and result messages.
+- `balance-script`: sandboxed JavaScript channel balance scripts, state persistence and result messages.
 - `self-use-default-price`: use model ratio 0.5 for unconfigured models in self-use mode.
 - `billing-header-filter`: remove Claude Code billing-header markers from forwarded requests.
 - `oauth-step-up`: offer linked OAuth for sensitive browser actions even with a password,
@@ -80,23 +80,50 @@ This document describes the custom balance script feature for new-api channels.
 
 ## Overview
 
-Balance scripts allow you to fetch channel balance using custom Python code. This is useful for providers that don't have built-in balance API support, or for implementing custom authentication/login flows.
+Balance scripts fetch a channel balance by running a short JavaScript program on
+an embedded engine (goja). Nothing is spawned: the script runs in-process, so
+there is no interpreter binary, no pip package and no wrapper process.
 
-**Important**: Scripts MUST call `balance.set()` to return the balance. `print()` is disabled.
+**Important**: Scripts MUST call `newapi.balance.set()` to return the balance.
+`print()`, `require()` and file/process/socket access do not exist.
 
 ## API Reference
 
-### `newapi.environ` (dict, read-only)
+### `newapi.environ` (object, read-only)
 
 Channel input parameters:
 
 | Key | Description |
 |-----|-------------|
 | `CHANNEL_BASE_URL` | Channel's base URL |
-| `CHANNEL_KEY` | API key (for multi-key channels: first key only) |
-| `CHANNEL_TYPE` | Channel type integer |
-| `CHANNEL_ID` | Channel ID |
+| `CHANNEL_KEY` | API key (for multi-key channels: all keys joined with `,`) |
+| `CHANNEL_TYPE` | Channel type integer, as string |
+| `CHANNEL_ID` | Channel ID, as string |
 | `CHANNEL_IS_MULTI_KEY` | `"1"` if multi-key channel, `"0"` otherwise |
+
+### `newapi.fetch(options)` — The Only Way Out
+
+```js
+const r = newapi.fetch({
+  url: "https://example.com/v1/user/balance",  // required
+  method: "GET",                                // optional, default GET
+  headers: { Authorization: "Bearer " + key },   // optional
+  body: "{\"a\":1}",                           // optional
+});
+// r -> { status: 200, headers: { ... }, body: "..." }
+```
+
+`options` may also be a plain URL string. `fetch` throws on failure, so wrap it
+in `try`/`catch` when a provider has several endpoints.
+
+| Limit | Value |
+|-------|-------|
+| Schemes | `http`, `https` only |
+| Per-request timeout | 10s |
+| Response body | 1 MiB (larger responses throw) |
+| Calls per run | 16 |
+| Redirects | 3 |
+| Private / loopback / link-local targets | rejected |
 
 ### `newapi.state` — State Persistence
 
@@ -104,145 +131,158 @@ For saving login tokens, session data, etc. across balance checks.
 
 | Method | Description |
 |--------|-------------|
-| `state.get()` | Returns previous state as JSON-parsed object, or `{}` on first run |
-| `state.getRaw()` | Returns previous state as raw string, or `""` on first run |
-| `state.save(obj)` | Save state (any JSON-serializable object) |
-| `state.saveRaw(s)` | Save state as raw string |
+| `state.get()` | Previous state as parsed JSON, or `{}` on first run |
+| `state.getRaw()` | Previous state as a raw string, or `""` on first run |
+| `state.save(obj)` | Save state (any JSON-serializable value) |
+| `state.saveRaw(s)` | Save a raw string |
 
-State size limit: 65536 bytes.
+State size limit: 65536 bytes. State is only written when the script saves it.
 
 ### `newapi.balance` — Result Output (Required)
 
 | Method | Description |
 |--------|-------------|
-| `balance.set(value)` | Set channel balance (float). **Must be called exactly once.** |
+| `balance.set(value)` | Set channel balance (number). **Must be called at least once.** |
 
-### `newapi.debug` — Debug Output
+### `newapi.debug` — Result Message
 
 | Method | Description |
 |--------|-------------|
-| `debug.log(*args, **kwargs)` | Write to stderr (visible in error messages) |
+| `debug.log(...args)` | Collects a message line; arguments are joined with spaces |
 
-## Available Python Modules
+Multiple calls produce multiple lines in the channel's result message. Total
+message text is capped at 72 KiB; further lines are dropped.
 
-Only Python standard library is available:
+## JavaScript Environment
 
-- `urllib`, `urllib.request`, `urllib.parse`, `urllib.error` — HTTP requests
-- `json` — JSON parsing
-- `math`, `datetime`, `re` — Utilities
-- `base64`, `hashlib`, `hmac` — Encoding/crypto
-- `time`, `ssl`, `socket`, `http` — Low-level networking
-- `collections`, `itertools`, `functools` — Data structures
-- `string`, `random`, `secrets`, `uuid` — String/ID generation
-- `decimal` — Precise decimals
-
-`os`, `sys`, `subprocess`, `print()`, and other modules/functions with filesystem/system access are **not available**.
+Standard ECMAScript is available and nothing else: `JSON`, `Math`, `Date`,
+`String`/`Array`/`Object` methods, regular expressions, `try`/`catch`,
+`class`, closures, `let`/`const`, template strings. There is no `require()`,
+no `process`, no timers and no `print()`.
 
 ## Example Scripts
 
 ### Basic Balance Fetch
 
-```python
-import urllib.request, json
-from newapi import environ, balance
+```js
+const url = newapi.environ.CHANNEL_BASE_URL + "/v1/user/balance";
+const resp = newapi.fetch({
+  url: url,
+  headers: { Authorization: "Bearer " + newapi.environ.CHANNEL_KEY },
+});
+const data = JSON.parse(resp.body);
 
-url = environ["CHANNEL_BASE_URL"] + "/v1/user/balance"
-req = urllib.request.Request(url, headers={
-    "Authorization": "Bearer " + environ["CHANNEL_KEY"]
-})
-with urllib.request.urlopen(req, timeout=15) as resp:
-    data = json.loads(resp.read())
-
-balance.set(data["balance"])
+newapi.balance.set(data.balance);
 ```
 
 ### With State Persistence (Login Token)
 
-```python
-import urllib.request, json
-from newapi import environ, state, balance
+```js
+const s = newapi.state.get(); // {} on the first run
+let token = s.token;
 
-# Load previous state (returns {} on first run)
-s = state.get()
-token = s.get("token")
+if (!token) {
+  const login = newapi.fetch({
+    url: newapi.environ.CHANNEL_BASE_URL + "/v1/login",
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username: "user", password: "pass" }),
+  });
+  token = JSON.parse(login.body).token;
+  s.token = token;
+  newapi.state.save(s);
+}
 
-# If no token, login first
-if not token:
-    login_url = environ["CHANNEL_BASE_URL"] + "/v1/login"
-    login_req = urllib.request.Request(
-        login_url,
-        data=json.dumps({"username": "user", "password": "pass"}).encode(),
-        headers={"Content-Type": "application/json"}
-    )
-    with urllib.request.urlopen(login_req, timeout=15) as resp:
-        login_data = json.loads(resp.read())
-        token = login_data["token"]
-        s["token"] = token
-        state.save(s)
+const resp = newapi.fetch({
+  url: newapi.environ.CHANNEL_BASE_URL + "/v1/user/balance",
+  headers: { Authorization: "Bearer " + token },
+});
+const data = JSON.parse(resp.body);
 
-# Fetch balance with token
-url = environ["CHANNEL_BASE_URL"] + "/v1/user/balance"
-req = urllib.request.Request(url, headers={
-    "Authorization": "Bearer " + token
-})
-with urllib.request.urlopen(req, timeout=15) as resp:
-    data = json.loads(resp.read())
+newapi.balance.set(data.balance);
 
-balance.set(data["balance"])
+if (data.new_token) {
+  s.token = data.new_token;
+  newapi.state.save(s);
+}
+```
 
-# Update state if token refreshed
-if "new_token" in data:
-    s["token"] = data["new_token"]
-    state.save(s)
+### Picking A Field From A Provider List
+
+```js
+const PROVIDER = "trae-global";      // data[].provider
+const WINDOW = "Dollar Usage";       // windows[].name
+const AMOUNT_KEY = "remaining";      // field used as amount
+const LIMIT_KEY = "limit";           // field used as the cap
+
+const resp = newapi.fetch({
+  url: newapi.environ.CHANNEL_BASE_URL + "/v1/magpie/quotas",
+  headers: { Authorization: "Bearer " + newapi.environ.CHANNEL_KEY },
+});
+
+let item = {};
+for (const provider of JSON.parse(resp.body).data) {
+  if (provider.provider === PROVIDER) { item = provider; break; }
+}
+
+let win = {};
+for (const window of item.windows || []) {
+  if (window.name === WINDOW) { win = window; break; }
+}
+if (!win.name && (item.windows || []).length) { win = item.windows[0]; }
+
+newapi.debug.log(item.name + " [" + win.name + "]");
+newapi.balance.set(win[AMOUNT_KEY] || 0);
 ```
 
 ### Debugging
 
-```python
-import urllib.request, json
-from newapi import environ, balance, debug
-
-debug.log("Fetching balance for channel:", environ["CHANNEL_ID"])
-
-url = environ["CHANNEL_BASE_URL"] + "/v1/user/balance"
-req = urllib.request.Request(url, headers={
-    "Authorization": "Bearer " + environ["CHANNEL_KEY"]
-})
-with urllib.request.urlopen(req, timeout=15) as resp:
-    data = json.loads(resp.read())
-
-debug.log("Balance response:", data)
-balance.set(data["balance"])
+```js
+newapi.debug.log("Channel:", newapi.environ.CHANNEL_ID);
+const resp = newapi.fetch(newapi.environ.CHANNEL_BASE_URL + "/v1/user/balance");
+newapi.debug.log("Response:", resp.status, resp.body);
+newapi.balance.set(JSON.parse(resp.body).balance);
 ```
 
-## Security
+## Security and Limits
 
-Scripts run with the following restrictions:
+There is no process sandbox any more; isolation comes from the engine's empty
+environment plus caps at every entry point:
 
-1. **RestrictedPython**: Blocks dangerous attributes (`__subclasses__`, `__globals__`, etc.)
-2. **Import whitelist**: Only allowed modules can be imported
-3. **seccomp**: System call filtering
-   - Allowed: read, write, network I/O, read-only file open
-   - Blocked: execve, fork, clone, write operations, file modification
-4. **prlimit**: Resource limits
-   - 30 second timeout
-   - 128MB memory
-   - 25s CPU time
-   - 64 max processes
-5. **print() disabled**: Use `newapi.debug.log()` for debug output
+1. **No host capability by default**: a fresh goja runtime only knows
+   ECMAScript. File system, processes, sockets and `require()` are not exposed.
+2. **Single egress path**: `newapi.fetch()` is the only network call, restricted
+   to `http`/`https`, and it refuses loopback, private, link-local and multicast
+   addresses (it dials the resolved IP itself, so DNS answers cannot change
+   between the check and the connection).
+3. **Entry-point limits**: 30s wall clock (the VM is interrupted, not killed),
+   10s per request, 1 MiB per response, 16 fetches per run, 256 call depth,
+   72 KiB of messages, 64 KiB of state, 64 KiB of script source.
+4. **Panic isolation**: an exception escaping the engine is returned as a script
+   error instead of crashing the process.
+
+Known gap: there is no per-run memory cap. A runaway script can still allocate
+through ordinary JS value construction; only the entry-point sizes above bound
+it. Script authors are expected to be trusted channel administrators.
 
 ## Error Handling
 
-Script errors are returned as:
+Script errors are returned as `balance script error: ...` with the position of
+the failure:
 
-```json
-{"error": "error message"}
+```
+balance script error: TypeError: Cannot read property 'foo' of undefined
+    at <balance_script>:2:6(5)
 ```
 
 Common errors:
 
-- `module 'xxx' is not allowed` — Tried to import a blocked module
-- `balance script timed out` — Exceeded 30s timeout
-- `balance script state exceeds 65536 bytes` — State too large
-- `balance.set() was never called` — Script didn't set balance
-- `print() is disabled in balance scripts` — Used `print()` instead of `debug.log()`
+- `balance script error: ...` — the script threw (message includes line/column)
+- `balance script error: newapi.balance.set() was never called` — no result set
+- `balance script error: balance script timed out after 30s` — exceeded 30s
+- `newapi.fetch(): unsupported scheme "file", only http and https are allowed`
+- `newapi.fetch(): address 127.0.0.1 is not allowed` — private target blocked
+- `newapi.fetch(): called more than 16 times`
+- `newapi.fetch(): response body exceeds 1048576 bytes`
+- `balance script error: TypeError: balance script state exceeds 65536 bytes`
+- `balance script exceeds 65536 bytes` — the source itself is too large
