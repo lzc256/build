@@ -131,8 +131,8 @@ apply_all_patches() {
         return 1
     fi
 
-    # 收集所有 patch 子目录，按目录名排序
-    local patch_dirs=($(ls -d "$patches_root"/*/ 2>/dev/null | sort))
+    # 收集所有 patch 子目录，按目录名排序；*.disabled 是暂时停用的补丁，跳过
+    local patch_dirs=($(ls -d "$patches_root"/*/ 2>/dev/null | grep -v '\.disabled/$' | sort))
     if [ ${#patch_dirs[@]} -eq 0 ]; then
         echo "Error: No patch directories found under $patches_root"
         return 1

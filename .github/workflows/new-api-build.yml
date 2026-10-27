@@ -107,10 +107,15 @@ jobs:
           source scripts/common.sh
           apply_patch oauth-step-up new-api-src
 
-      - name: Hide the primary site on secondary domains
-        run: |
-          source scripts/common.sh
-          apply_patch secondary-domain new-api-src
+      # Disabled: the primary/secondary split trusts X-Forwarded-Host, so an
+      # attacker who can set headers is treated as the primary site and the
+      # 403-versus-proceed difference becomes an oracle for guessing the hidden
+      # primary address. Re-enable by renaming the patch directory back and
+      # restoring this step.
+      # - name: Hide the primary site on secondary domains
+      #   run: |
+      #     source scripts/common.sh
+      #     apply_patch secondary-domain new-api-src
 
       - name: Stamp upstream build version
         id: version
@@ -125,7 +130,6 @@ jobs:
           git -C new-api-src diff --stat
           test -f new-api-src/controller/channel_balance_script.go && echo "balance-script: channel_balance_script.go OK" || { echo "balance-script: channel_balance_script.go MISSING"; exit 1; }
           test -f new-api-src/relay/common/builtin_override.go && echo "billing-header-filter: builtin_override.go OK" || { echo "billing-header-filter: builtin_override.go MISSING"; exit 1; }
-          test -f new-api-src/common/site_origin.go && echo "secondary-domain: site_origin.go OK" || { echo "secondary-domain: site_origin.go MISSING"; exit 1; }
 
       - name: Login to GHCR
         uses: docker/login-action@v4
