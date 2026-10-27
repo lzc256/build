@@ -117,12 +117,13 @@ jobs:
           if [ -z "${{ secrets.FCITX5_ANDROID_KEYSTORE_BASE64 }}" ]; then
             echo "::warning::No keystore configured (FCITX5_ANDROID_KEYSTORE_*). Building UNSIGNED release APKs. Set the secrets for signed builds."
           fi
-          ./gradlew :app:assembleRelease :plugin:sync:assembleRelease --no-daemon --stacktrace
+          ./gradlew :app:assembleRelease :plugin:rime:assembleRelease :plugin:sync:assembleRelease --no-daemon --stacktrace
 
       - name: Collect APKs
         run: |
           mkdir -p apks
           cp fcitx5-android-src/app/build/outputs/apk/release/*.apk apks/ 2>/dev/null || true
+          cp fcitx5-android-src/plugin/rime/build/outputs/apk/release/*.apk apks/ 2>/dev/null || true
           cp fcitx5-android-src/plugin/sync/build/outputs/apk/release/*.apk apks/ 2>/dev/null || true
           ls -la apks/
 
