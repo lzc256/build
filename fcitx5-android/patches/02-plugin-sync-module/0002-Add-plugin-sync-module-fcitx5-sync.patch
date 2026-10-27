@@ -1,0 +1,594 @@
+From 549abadeeb6b6cff70f726c6bf597c1d05e71154 Mon Sep 17 00:00:00 2001
+From: lzc256 <lzc256@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 19:52:59 +0800
+Subject: [PATCH 2/2] Add plugin/sync module (fcitx5-sync)
+
+Auto network sync of Rime user dictionary via a central server:
+- SyncService: periodic loop (trigger rime sync via IPC, upload
+  snapshots, pull hub, trigger import) using the shared Go core
+  bound via gomobile (fcitx5-sync-core.aar)
+- MainActivity: server/device/token config + all-files access grant
+- gomobile bind runs at gradle build time from FCITX5_SYNC_CORE_DIR
+---
+ plugin/sync/build.gradle.kts                  |  69 ++++++++
+ plugin/sync/proguard-rules.pro                |   4 +
+ plugin/sync/src/main/AndroidManifest.xml      |  36 +++++
+ .../android/plugin/sync/MainActivity.kt       | 141 ++++++++++++++++
+ .../fcitx5/android/plugin/sync/Settings.kt    |  49 ++++++
+ .../fcitx5/android/plugin/sync/SyncService.kt | 150 ++++++++++++++++++
+ .../src/main/res/values-zh-rCN/strings.xml    |  18 +++
+ plugin/sync/src/main/res/values/strings.xml   |  22 +++
+ plugin/sync/src/main/res/xml/plugin.xml       |   6 +
+ settings.gradle.kts                           |   1 +
+ 10 files changed, 496 insertions(+)
+ create mode 100644 plugin/sync/build.gradle.kts
+ create mode 100644 plugin/sync/proguard-rules.pro
+ create mode 100644 plugin/sync/src/main/AndroidManifest.xml
+ create mode 100644 plugin/sync/src/main/java/org/fcitx/fcitx5/android/plugin/sync/MainActivity.kt
+ create mode 100644 plugin/sync/src/main/java/org/fcitx/fcitx5/android/plugin/sync/Settings.kt
+ create mode 100644 plugin/sync/src/main/java/org/fcitx/fcitx5/android/plugin/sync/SyncService.kt
+ create mode 100644 plugin/sync/src/main/res/values-zh-rCN/strings.xml
+ create mode 100644 plugin/sync/src/main/res/values/strings.xml
+ create mode 100644 plugin/sync/src/main/res/xml/plugin.xml
+
+diff --git a/plugin/sync/build.gradle.kts b/plugin/sync/build.gradle.kts
+new file mode 100644
+index 0000000..0dac43b
+--- /dev/null
++++ b/plugin/sync/build.gradle.kts
+@@ -0,0 +1,69 @@
++import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
++
++plugins {
++    id("org.fcitx.fcitx5.android.app-convention")
++    id("org.fcitx.fcitx5.android.plugin-app-convention")
++    id("org.fcitx.fcitx5.android.build-metadata")
++    id("org.fcitx.fcitx5.android.data-descriptor")
++}
++
++android {
++    namespace = "org.fcitx.fcitx5.android.plugin.sync"
++
++    defaultConfig {
++        applicationId = "org.fcitx.fcitx5.android.plugin.sync"
++    }
++
++    buildFeatures {
++        resValues = true
++    }
++
++    buildTypes {
++        release {
++            resValue("string", "app_name", "@string/app_name_release")
++            proguardFile("proguard-rules.pro")
++        }
++        debug {
++            resValue("string", "app_name", "@string/app_name_debug")
++        }
++    }
++}
++
++// ---- Go 共享核心（gomobile bind）----
++//
++// fcitx5-sync 的协议客户端核心是 Go 库（github.com/lzc256/fcitx5-sync/core/syncclient），
++// mac-agent / 未来 iOS、桌面客户端与 Android 共用同一份代码。
++// 此任务用 gomobile 把它编译成 AAR；核心源码目录由 FCITX5_SYNC_CORE_DIR 指定
++// （CI 中与 fork 同级 checkout，默认假设 ../fcitx5-sync/core）。
++val coreDir: String = providers.environmentVariable("FCITX5_SYNC_CORE_DIR")
++    .orElse(providers.gradleProperty("fcitx5SyncCoreDir"))
++    .orElse(File(rootDir.parentFile, "fcitx5-sync/core").absolutePath)
++    .get()
++
++val coreAar = file("libs/fcitx5-sync-core.aar")
++
++val buildGoCore by tasks.registering(Exec::class) {
++    group = "build"
++    description = "gomobile bind fcitx5-sync core -> AAR"
++    inputs.dir(File(coreDir))
++    outputs.file(coreAar)
++    doFirst {
++        coreAar.parentFile.mkdirs()
++    }
++    commandLine(
++        "gomobile", "bind",
++        "-target=android",
++        "-androidapi", "23",
++        "-o", coreAar.absolutePath,
++        File(coreDir, "syncclient").absolutePath,
++    )
++}
++
++tasks.named("preBuild") {
++    dependsOn(buildGoCore)
++}
++
++dependencies {
++    implementation(project(":lib:plugin-base"))
++    implementation(files(coreAar))
++}
+diff --git a/plugin/sync/proguard-rules.pro b/plugin/sync/proguard-rules.pro
+new file mode 100644
+index 0000000..d559aa6
+--- /dev/null
++++ b/plugin/sync/proguard-rules.pro
+@@ -0,0 +1,4 @@
++# gomobile 生成的绑定类
++-keep class syncclient.** { *; }
++-keep class go.** { *; }
++-dontwarn go.**
+diff --git a/plugin/sync/src/main/AndroidManifest.xml b/plugin/sync/src/main/AndroidManifest.xml
+new file mode 100644
+index 0000000..b8bc23b
+--- /dev/null
++++ b/plugin/sync/src/main/AndroidManifest.xml
+@@ -0,0 +1,36 @@
++<?xml version="1.0" encoding="utf-8"?>
++<manifest xmlns:android="http://schemas.android.com/apk/res/android"
++    xmlns:tools="http://schemas.android.com/tools">
++
++    <uses-permission android:name="${mainApplicationId}.permission.IPC" />
++    <uses-permission android:name="android.permission.INTERNET" />
++    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
++
++    <application
++        android:icon="@mipmap/ic_launcher_plugin_generic"
++        android:label="@string/app_name">
++
++        <!-- 与主程序同签名的插件服务：主程序可启停（FcitxPluginService 生命周期） -->
++        <service
++            android:name=".SyncService"
++            android:directBootAware="true"
++            android:exported="true"
++            android:permission="${mainApplicationId}.permission.PLUGIN"
++            tools:targetApi="24">
++            <intent-filter>
++                <action android:name="${mainApplicationId}.plugin.SERVICE" />
++            </intent-filter>
++        </service>
++
++        <!-- 配置界面 -->
++        <activity
++            android:name=".MainActivity"
++            android:exported="true"
++            android:label="@string/app_name">
++            <intent-filter>
++                <action android:name="android.intent.action.MAIN" />
++                <category android:name="android.intent.category.LAUNCHER" />
++            </intent-filter>
++        </activity>
++    </application>
++</manifest>
+diff --git a/plugin/sync/src/main/java/org/fcitx/fcitx5/android/plugin/sync/MainActivity.kt b/plugin/sync/src/main/java/org/fcitx/fcitx5/android/plugin/sync/MainActivity.kt
+new file mode 100644
+index 0000000..40f8e57
+--- /dev/null
++++ b/plugin/sync/src/main/java/org/fcitx/fcitx5/android/plugin/sync/MainActivity.kt
+@@ -0,0 +1,141 @@
++/*
++ * SPDX-License-Identifier: LGPL-2.1-or-later
++ * SPDX-FileCopyrightText: Copyright 2026 fcitx5-sync contributors
++ */
++package org.fcitx.fcitx5.android.plugin.sync
++
++import android.Manifest
++import android.app.Activity
++import android.content.Intent
++import android.content.pm.PackageManager
++import android.net.Uri
++import android.os.Build
++import android.os.Bundle
++import android.os.Environment
++import android.provider.Settings
++import android.widget.Button
++import android.widget.EditText
++import android.widget.LinearLayout
++import android.widget.TextView
++import android.widget.Toast
++
++/**
++ * 极简配置界面：服务器 / 设备 ID / Token / 间隔 + 所有文件访问权限申请。
++ * 有意不引入 PreferenceX 依赖，保持插件体积与依赖面最小。
++ */
++class MainActivity : Activity() {
++
++    private lateinit var serverInput: EditText
++    private lateinit var deviceInput: EditText
++    private lateinit var tokenInput: EditText
++    private lateinit var intervalInput: EditText
++    private lateinit var rimeDirInput: EditText
++    private lateinit var storageStatus: TextView
++
++    override fun onCreate(savedInstanceState: Bundle?) {
++        super.onCreate(savedInstanceState)
++        Settings.init(this)
++
++        val dp = (resources.displayMetrics.density * 8).toInt()
++        val root = LinearLayout(this).apply {
++            orientation = LinearLayout.VERTICAL
++            setPadding(dp * 2, dp * 2, dp * 2, dp * 2)
++        }
++
++        fun label(textRes: Int): TextView =
++            TextView(this@MainActivity).apply { setText(textRes) }
++
++        fun input(hintRes: Int, isPassword: Boolean = false): EditText =
++            EditText(this@MainActivity).apply {
++                setHint(hintRes)
++                setInputType(
++                    android.text.InputType.TYPE_CLASS_TEXT or
++                        if (isPassword) android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
++                        else android.text.InputType.TYPE_TEXT_VARIATION_NORMAL
++                )
++            }
++
++        root.addView(label(R.string.server_url))
++        serverInput = input(R.string.server_url_hint)
++        root.addView(serverInput)
++
++        root.addView(label(R.string.device_id))
++        deviceInput = input(R.string.device_id_hint)
++        root.addView(deviceInput)
++
++        root.addView(label(R.string.device_token))
++        tokenInput = input(R.string.device_token, isPassword = true)
++        root.addView(tokenInput)
++
++        root.addView(label(R.string.interval))
++        intervalInput = EditText(this).apply {
++            setHint("30")
++            inputType = android.text.InputType.TYPE_CLASS_NUMBER
++        }
++        root.addView(intervalInput)
++
++        root.addView(label(R.string.rime_dir))
++        rimeDirInput = input(R.string.rime_dir_hint)
++        root.addView(rimeDirInput)
++
++        val save = Button(this).apply { setText(R.string.save) }
++        root.addView(save)
++
++        storageStatus = TextView(this)
++        root.addView(storageStatus)
++
++        val grant = Button(this).apply { setText(R.string.grant_storage) }
++        grant.setOnClickListener { requestAllFilesAccess() }
++        root.addView(grant)
++
++        setContentView(root)
++
++        serverInput.setText(Settings.server)
++        deviceInput.setText(Settings.deviceId)
++        tokenInput.setText(Settings.token)
++        intervalInput.setText(Settings.intervalSeconds.toString())
++        rimeDirInput.setText(Settings.rimeDirOverride)
++        refreshStorageStatus()
++
++        save.setOnClickListener {
++            Settings.server = serverInput.text.toString()
++            Settings.deviceId = deviceInput.text.toString()
++            Settings.token = tokenInput.text.toString()
++            Settings.intervalSeconds = intervalInput.text.toString().toIntOrNull() ?: 30
++            Settings.rimeDirOverride = rimeDirInput.text.toString()
++            Toast.makeText(this, R.string.saved, Toast.LENGTH_SHORT).show()
++        }
++    }
++
++    override fun onResume() {
++        super.onResume()
++        refreshStorageStatus()
++    }
++
++    private fun refreshStorageStatus() {
++        storageStatus.setText(
++            if (hasAllFilesAccess()) R.string.storage_granted else R.string.storage_needed
++        )
++    }
++
++    private fun hasAllFilesAccess(): Boolean =
++        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
++            Environment.isExternalStorageManager()
++        } else {
++            checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) ==
++                PackageManager.PERMISSION_GRANTED
++        }
++
++    private fun requestAllFilesAccess() {
++        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
++            startActivity(
++                Intent(
++                    Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
++                    Uri.parse("package:$packageName")
++                )
++            )
++        } else {
++            requestPermissions(arrayOf(Manifest.permission.WRITE_EXTERNAL_STORAGE), 1)
++        }
++    }
++}
+diff --git a/plugin/sync/src/main/java/org/fcitx/fcitx5/android/plugin/sync/Settings.kt b/plugin/sync/src/main/java/org/fcitx/fcitx5/android/plugin/sync/Settings.kt
+new file mode 100644
+index 0000000..f31d081
+--- /dev/null
++++ b/plugin/sync/src/main/java/org/fcitx/fcitx5/android/plugin/sync/Settings.kt
+@@ -0,0 +1,49 @@
++/*
++ * SPDX-License-Identifier: LGPL-2.1-or-later
++ * SPDX-FileCopyrightText: Copyright 2026 fcitx5-sync contributors
++ */
++package org.fcitx.fcitx5.android.plugin.sync
++
++import android.content.Context
++import android.content.SharedPreferences
++
++/** 插件配置，存本 App 的 SharedPreferences。 */
++object Settings {
++    private const val PREFS = "sync_settings"
++
++    private lateinit var prefs: SharedPreferences
++
++    fun init(context: Context) {
++        if (!::prefs.isInitialized) {
++            prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
++        }
++    }
++
++    /** 服务器地址，如 https://sync.example.com */
++    var server: String
++        get() = prefs.getString("server", null)?.trim()?.trimEnd('/') ?: ""
++        set(value) = prefs.edit().putString("server", value).apply()
++
++    /** 设备 id，须与主程序 rime installation.yaml 的 installation_id 一致 */
++    var deviceId: String
++        get() = prefs.getString("device_id", null)?.trim() ?: ""
++        set(value) = prefs.edit().putString("device_id", value).apply()
++
++    /** 设备 bearer token（服务器 POST /v1/devices 签发） */
++    var token: String
++        get() = prefs.getString("token", null)?.trim() ?: ""
++        set(value) = prefs.edit().putString("token", value).apply()
++
++    /** 轮询间隔（秒） */
++    var intervalSeconds: Int
++        get() = prefs.getInt("interval_seconds", 30).coerceAtLeast(5)
++        set(value) = prefs.edit().putInt("interval_seconds", value).apply()
++
++    /** Rime 数据目录覆盖（默认按主程序包名推导） */
++    var rimeDirOverride: String
++        get() = prefs.getString("rime_dir_override", null)?.trim()?.trimEnd('/') ?: ""
++        set(value) = prefs.edit().putString("rime_dir_override", value).apply()
++
++    val configured: Boolean
++        get() = server.isNotBlank() && deviceId.isNotBlank() && token.isNotBlank()
++}
+diff --git a/plugin/sync/src/main/java/org/fcitx/fcitx5/android/plugin/sync/SyncService.kt b/plugin/sync/src/main/java/org/fcitx/fcitx5/android/plugin/sync/SyncService.kt
+new file mode 100644
+index 0000000..475eb7c
+--- /dev/null
++++ b/plugin/sync/src/main/java/org/fcitx/fcitx5/android/plugin/sync/SyncService.kt
+@@ -0,0 +1,150 @@
++/*
++ * SPDX-License-Identifier: LGPL-2.1-or-later
++ * SPDX-FileCopyrightText: Copyright 2026 fcitx5-sync contributors
++ */
++package org.fcitx.fcitx5.android.plugin.sync
++
++import android.util.Log
++import org.fcitx.fcitx5.android.common.FcitxPluginService
++import org.fcitx.fcitx5.android.common.ipc.FcitxRemoteConnection
++import org.fcitx.fcitx5.android.common.ipc.IFcitxRemoteService
++import org.fcitx.fcitx5.android.common.ipc.bindFcitxRemoteService
++import kotlinx.coroutines.CoroutineName
++import kotlinx.coroutines.CoroutineScope
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.SupervisorJob
++import kotlinx.coroutines.cancel
++import kotlinx.coroutines.delay
++import kotlinx.coroutines.isActive
++import kotlinx.coroutines.launch
++import syncclient.Syncclient
++import java.io.File
++
++/**
++ * fcitx5-sync 的 Android 端同步服务。
++ *
++ * 同步循环（每 interval 秒）：
++ *  1. AIDL 调 triggerRimeSync() —— 主程序内 fcitx5-rime 执行 RIME 同步，
++ *     把本地 userdb 导出为 sync/<installation_id>/*.userdb.txt
++ *  2. 上传这些快照到中心服务器（Go 共享核心 syncclient）
++ *  3. 轮询 hub 版本，有更新则下载到 sync/hub/
++ *  4. 再次 triggerRimeSync() —— 引擎把 hub/（视为另一台"设备"）合并进本地 userdb
++ */
++class SyncService : FcitxPluginService() {
++
++    private var scope: CoroutineScope? = null
++    private var connection: FcitxRemoteConnection? = null
++
++    override fun start() {
++        Settings.init(this)
++        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO + CoroutineName("fcitx5-sync"))
++        this.scope = scope
++
++        if (!Settings.configured) {
++            log("Not configured (server/device/token). Open ${BuildConfig.APPLICATION_ID} to configure.")
++            return
++        }
++
++        connection = bindFcitxRemoteService(BuildConfig.MAIN_APPLICATION_ID) { remote ->
++            log("Bound to fcitx remote, starting sync loop")
++            scope.launch {
++                syncLoop(remote)
++            }
++        }
++    }
++
++    override fun stop() {
++        log("Stopping sync loop")
++        scope?.cancel()
++        scope = null
++        connection?.let {
++            runCatching { unbindService(it) }
++        }
++        connection = null
++    }
++
++    private suspend fun syncLoop(remote: IFcitxRemoteService) {
++        val client = Syncclient.newClient(Settings.server, Settings.deviceId, Settings.token)
++        val state = getSharedPreferences("sync_state", MODE_PRIVATE)
++        while (scope?.isActive == true) {
++            try {
++                cycle(remote, client, state)
++            } catch (t: Throwable) {
++                log("Cycle failed: ${t.message}")
++            }
++            delay(Settings.intervalSeconds * 1000L)
++        }
++    }
++
++    private suspend fun cycle(
++        remote: IFcitxRemoteService,
++        client: Syncclient,
++        state: android.content.SharedPreferences,
++    ) {
++        val syncDir = rimeSyncDir()
++
++        // 1. 导出：AIDL 是同步调用，返回时 RIME 快照已落盘
++        remote.triggerRimeSync()
++
++        // 2. 上传 sync/<device>/*.userdb.txt
++        val deviceDir = File(syncDir, Settings.deviceId)
++        deviceDir.listFiles { f -> f.isFile && f.name.endsWith(".userdb.txt") }
++            ?.forEach { file ->
++                val db = file.name.removeSuffix(".userdb.txt")
++                val data = file.readBytes()
++                if (client.validateSnapshot(data) == null) {
++                    val v = client.uploadSnapshot(db, data)
++                    log("Uploaded $db -> hub v$v")
++                } else {
++                    log("Skip invalid snapshot $db")
++                }
++            }
++
++        // 3. 拉 hub 更新
++        var changed = false
++        for (db in client.hubDBs()) {
++            val v = client.hubVersion(db)
++            if (state.getLong("hub_$db", 0L) >= v) continue
++            val data = client.downloadHub(db)
++            val hubDir = File(syncDir, "hub")
++            hubDir.mkdirs()
++            val dst = File(hubDir, "$db.userdb.txt")
++            val tmp = File(hubDir, "$db.userdb.txt.tmp")
++            tmp.writeBytes(data)
++            if (!tmp.renameTo(dst)) {
++                log("Failed to rename hub tmp for $db")
++                continue
++            }
++            state.edit().putLong("hub_$db", v).apply()
++            changed = true
++            log("Hub/$db updated to v$v")
++        }
++
++        // 4. 导入：引擎把 sync/hub/（视为另一台"设备"）合并进本地 userdb
++        if (changed) {
++            remote.triggerRimeSync()
++            log("Hub merged into local userdb")
++        }
++    }
++
++    /**
++     * Rime 用户数据目录（含 sync/）。
++     * 默认 <外部存储>/Android/data/<主程序包名>/files/data/rime，
++     * 需要所有文件访问权限（MainActivity 里授权）才能跨应用读取。
++     */
++    private fun rimeSyncDir(): File {
++        Settings.rimeDirOverride.takeIf { it.isNotBlank() }?.let {
++            return File(it, "sync")
++        }
++        val ext = android.os.Environment.getExternalStorageDirectory()
++        return File(ext, "Android/data/${BuildConfig.MAIN_APPLICATION_ID}/files/data/rime/sync")
++    }
++
++    private fun log(msg: String) {
++        Log.d(TAG, msg)
++    }
++
++    companion object {
++        private const val TAG = "fcitx5-sync"
++    }
++}
+diff --git a/plugin/sync/src/main/res/values-zh-rCN/strings.xml b/plugin/sync/src/main/res/values-zh-rCN/strings.xml
+new file mode 100644
+index 0000000..dd8e2ab
+--- /dev/null
++++ b/plugin/sync/src/main/res/values-zh-rCN/strings.xml
+@@ -0,0 +1,18 @@
++<?xml version="1.0" encoding="utf-8"?>
++<resources>
++    <string name="settings_title">同步设置</string>
++    <string name="server_url">服务器地址</string>
++    <string name="server_url_hint">https://sync.example.com</string>
++    <string name="device_id">设备 ID</string>
++    <string name="device_id_hint">须与 installation.yaml 的 installation_id 一致</string>
++    <string name="device_token">设备 Token</string>
++    <string name="interval">轮询间隔（秒）</string>
++    <string name="rime_dir">Rime 数据目录覆盖（可选）</string>
++    <string name="rime_dir_hint">/storage/emulated/0/Android/data/&lt;主程序包名&gt;/files/data/rime</string>
++    <string name="save">保存</string>
++    <string name="saved">已保存</string>
++    <string name="grant_storage">授予所有文件访问权限</string>
++    <string name="storage_granted">已授予所有文件访问权限</string>
++    <string name="storage_needed">同步需要「所有文件访问权限」以读取主程序的 rime 目录（Android/data）。</string>
++    <string name="not_configured">请先填写服务器 / 设备 ID / Token，然后在 Fcitx5 设置里重新启用本插件。</string>
++</resources>
+diff --git a/plugin/sync/src/main/res/values/strings.xml b/plugin/sync/src/main/res/values/strings.xml
+new file mode 100644
+index 0000000..67a1f16
+--- /dev/null
++++ b/plugin/sync/src/main/res/values/strings.xml
+@@ -0,0 +1,22 @@
++<?xml version="1.0" encoding="utf-8"?>
++<resources>
++    <string name="app_name_release" translatable="false">Fcitx Sync</string>
++    <string name="app_name_debug" translatable="false">Fcitx Sync (Debug)</string>
++    <string name="description">Sync Rime user dictionary across devices via a central server (fcitx5-sync).</string>
++
++    <string name="settings_title">Sync Settings</string>
++    <string name="server_url">Server URL</string>
++    <string name="server_url_hint">https://sync.example.com</string>
++    <string name="device_id">Device ID</string>
++    <string name="device_id_hint">must match installation_id in installation.yaml</string>
++    <string name="device_token">Device Token</string>
++    <string name="interval">Interval (seconds)</string>
++    <string name="rime_dir">Rime data dir override (optional)</string>
++    <string name="rime_dir_hint">/storage/emulated/0/Android/data/&lt;main app id&gt;/files/data/rime</string>
++    <string name="save">Save</string>
++    <string name="saved">Saved</string>
++    <string name="grant_storage">Grant All-Files Access</string>
++    <string name="storage_granted">All-files access granted</string>
++    <string name="storage_needed">Sync needs all-files access to read the main app\'s rime directory (Android/data).</string>
++    <string name="not_configured">Fill in server / device id / token, then re-enable the plugin in Fcitx5 settings.</string>
++</resources>
+diff --git a/plugin/sync/src/main/res/xml/plugin.xml b/plugin/sync/src/main/res/xml/plugin.xml
+new file mode 100644
+index 0000000..335a0df
+--- /dev/null
++++ b/plugin/sync/src/main/res/xml/plugin.xml
+@@ -0,0 +1,6 @@
++<?xml version="1.0" encoding="utf-8"?>
++<plugin xmlns="../../../../../pluginSchema.xsd">
++    <apiVersion>0.1</apiVersion>
++    <description>@string/description</description>
++    <hasService>true</hasService>
++</plugin>
+diff --git a/settings.gradle.kts b/settings.gradle.kts
+index 7744dd6..07db917 100644
+--- a/settings.gradle.kts
++++ b/settings.gradle.kts
+@@ -35,3 +35,4 @@ include(":plugin:chewing")
+ include(":plugin:sayura")
+ include(":plugin:jyutping")
+ include(":plugin:thai")
++include(":plugin:sync")
+-- 
+2.56.0
+

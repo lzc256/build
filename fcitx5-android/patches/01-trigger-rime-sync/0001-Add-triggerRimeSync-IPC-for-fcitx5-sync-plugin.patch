@@ -1,0 +1,60 @@
+From b0396b271519a997ab232901ab8190100cc80c8b Mon Sep 17 00:00:00 2001
+From: lzc256 <lzc256@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 19:52:59 +0800
+Subject: [PATCH 1/2] Add triggerRimeSync IPC for fcitx5-sync plugin
+
+- IFcitxRemoteService.aidl: expose triggerRimeSync()
+- FcitxRemoteService: implement via FcitxDaemon connection
+- AddonSubconfig: trigger fcitx5-rime 'sync' subconfig
+  (RimeEngine::setSubConfig("sync") -> rime userdb sync)
+---
+ .../java/org/fcitx/fcitx5/android/FcitxRemoteService.kt     | 4 ++++
+ .../java/org/fcitx/fcitx5/android/core/AddonSubconfig.kt    | 6 ++++++
+ .../fcitx5/android/common/ipc/IFcitxRemoteService.aidl      | 3 +++
+ 3 files changed, 13 insertions(+)
+
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/FcitxRemoteService.kt b/app/src/main/java/org/fcitx/fcitx5/android/FcitxRemoteService.kt
+index 9e292e0..b2c2a49 100644
+--- a/app/src/main/java/org/fcitx/fcitx5/android/FcitxRemoteService.kt
++++ b/app/src/main/java/org/fcitx/fcitx5/android/FcitxRemoteService.kt
+@@ -107,6 +107,10 @@ class FcitxRemoteService : Service() {
+         override fun reloadQuickPhrase() {
+             FcitxDaemon.getFirstConnectionOrNull()?.runIfReady { reloadQuickPhrase() }
+         }
++
++        override fun triggerRimeSync() {
++            FcitxDaemon.getFirstConnectionOrNull()?.runIfReady { triggerRimeSync() }
++        }
+     }
+ 
+     override fun onCreate() {
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/core/AddonSubconfig.kt b/app/src/main/java/org/fcitx/fcitx5/android/core/AddonSubconfig.kt
+index 0f56aa8..74b9c7a 100644
+--- a/app/src/main/java/org/fcitx/fcitx5/android/core/AddonSubconfig.kt
++++ b/app/src/main/java/org/fcitx/fcitx5/android/core/AddonSubconfig.kt
+@@ -15,3 +15,9 @@ suspend fun FcitxAPI.savePunctuationConfig(lang: String = "zh_CN", config: RawCo
+ suspend fun FcitxAPI.reloadQuickPhrase() = setAddonSubConfig("quickphrase", "editor")
+ 
+ suspend fun FcitxAPI.reloadPinyinCustomPhrase() = setAddonSubConfig("pinyin", "customphrase")
++
++/**
++ * 触发 fcitx5-rime 的用户数据同步（等价于 UI 上的「Synchronize」动作）：
++ * RimeEngine::setSubConfig("sync") → rime api 同步 userdb 到 sync_dir。
++ */
++suspend fun FcitxAPI.triggerRimeSync() = setAddonSubConfig("rime", "sync")
+diff --git a/lib/common/src/main/aidl/org/fcitx/fcitx5/android/common/ipc/IFcitxRemoteService.aidl b/lib/common/src/main/aidl/org/fcitx/fcitx5/android/common/ipc/IFcitxRemoteService.aidl
+index 3a26081..7deaf48 100644
+--- a/lib/common/src/main/aidl/org/fcitx/fcitx5/android/common/ipc/IFcitxRemoteService.aidl
++++ b/lib/common/src/main/aidl/org/fcitx/fcitx5/android/common/ipc/IFcitxRemoteService.aidl
+@@ -22,4 +22,7 @@ interface IFcitxRemoteService {
+    void reloadPinyinDict();
+    /** Reload fcitx quick phrase */
+    void reloadQuickPhrase();
++
++   /** Trigger fcitx5-rime user data sync (exports userdb snapshots to rime sync dir) */
++   void triggerRimeSync();
+ }
+\ No newline at end of file
+-- 
+2.56.0
+

@@ -118,3 +118,8 @@ apply_patch <patch_name> <target_dir>
 - 自动处理上游的空白变化和行偏移
 - 失败时提供清晰的冲突标记
 - 通过 `git am --abort` 原子回滚
+
+- `fcitx5-android/` — fcitx5-android（Android 输入法框架）
+  - patches: `01-trigger-rime-sync`（AIDL 暴露 triggerRimeSync）、`02-plugin-sync-module`（fcitx5-sync 同步插件模块）
+  - workflow: `.github/workflows/fcitx5-android-build.yml`
+  - secrets: `SIGN_KEY_BASE64` / `FCITX5_ANDROID_KEYSTORE_PASSWORD` / `FCITX5_ANDROID_KEY_ALIAS`
