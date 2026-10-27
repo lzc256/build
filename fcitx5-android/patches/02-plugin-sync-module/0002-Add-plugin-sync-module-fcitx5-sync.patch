@@ -1,26 +1,29 @@
-From 549abadeeb6b6cff70f726c6bf597c1d05e71154 Mon Sep 17 00:00:00 2001
+From 596c47a76ae76d3fa653003e3c9f310175976793 Mon Sep 17 00:00:00 2001
 From: lzc256 <lzc256@users.noreply.github.com>
-Date: Tue, 27 Oct 2026 19:52:59 +0800
+Date: Tue, 27 Oct 2026 20:26:55 +0800
 Subject: [PATCH 2/2] Add plugin/sync module (fcitx5-sync)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
 
 Auto network sync of Rime user dictionary via a central server:
-- SyncService: periodic loop (trigger rime sync via IPC, upload
-  snapshots, pull hub, trigger import) using the shared Go core
-  bound via gomobile (fcitx5-sync-core.aar)
-- MainActivity: server/device/token config + all-files access grant
-- gomobile bind runs at gradle build time from FCITX5_SYNC_CORE_DIR
+- SyncService: periodic loop with trigger mode negotiation —
+  patched fork: triggerRimeSync (precise, no side effects);
+  stock resigned APK: restartFcitx fallback (save->sync on exit)
+- Uses shared Go core via gomobile AAR (FCITX5_SYNC_CORE_DIR)
+- MainActivity: config + all-files access grant
 ---
- plugin/sync/build.gradle.kts                  |  69 ++++++++
+ plugin/sync/build.gradle.kts                  |  69 +++++++
  plugin/sync/proguard-rules.pro                |   4 +
- plugin/sync/src/main/AndroidManifest.xml      |  36 +++++
- .../android/plugin/sync/MainActivity.kt       | 141 ++++++++++++++++
- .../fcitx5/android/plugin/sync/Settings.kt    |  49 ++++++
- .../fcitx5/android/plugin/sync/SyncService.kt | 150 ++++++++++++++++++
- .../src/main/res/values-zh-rCN/strings.xml    |  18 +++
- plugin/sync/src/main/res/values/strings.xml   |  22 +++
+ plugin/sync/src/main/AndroidManifest.xml      |  36 ++++
+ .../android/plugin/sync/MainActivity.kt       | 141 +++++++++++++
+ .../fcitx5/android/plugin/sync/Settings.kt    |  49 +++++
+ .../fcitx5/android/plugin/sync/SyncService.kt | 192 ++++++++++++++++++
+ .../src/main/res/values-zh-rCN/strings.xml    |  18 ++
+ plugin/sync/src/main/res/values/strings.xml   |  22 ++
  plugin/sync/src/main/res/xml/plugin.xml       |   6 +
  settings.gradle.kts                           |   1 +
- 10 files changed, 496 insertions(+)
+ 10 files changed, 538 insertions(+)
  create mode 100644 plugin/sync/build.gradle.kts
  create mode 100644 plugin/sync/proguard-rules.pro
  create mode 100644 plugin/sync/src/main/AndroidManifest.xml
@@ -362,10 +365,10 @@ index 0000000..f31d081
 +}
 diff --git a/plugin/sync/src/main/java/org/fcitx/fcitx5/android/plugin/sync/SyncService.kt b/plugin/sync/src/main/java/org/fcitx/fcitx5/android/plugin/sync/SyncService.kt
 new file mode 100644
-index 0000000..475eb7c
+index 0000000..cd035ca
 --- /dev/null
 +++ b/plugin/sync/src/main/java/org/fcitx/fcitx5/android/plugin/sync/SyncService.kt
-@@ -0,0 +1,150 @@
+@@ -0,0 +1,192 @@
 +/*
 + * SPDX-License-Identifier: LGPL-2.1-or-later
 + * SPDX-FileCopyrightText: Copyright 2026 fcitx5-sync contributors
@@ -451,8 +454,8 @@ index 0000000..475eb7c
 +    ) {
 +        val syncDir = rimeSyncDir()
 +
-+        // 1. 导出：AIDL 是同步调用，返回时 RIME 快照已落盘
-+        remote.triggerRimeSync()
++        // 1. 触发引擎同步（导出快照 + 合并 sync/hub/）
++        triggerEngineSync(remote, state)
 +
 +        // 2. 上传 sync/<device>/*.userdb.txt
 +        val deviceDir = File(syncDir, Settings.deviceId)
@@ -490,9 +493,46 @@ index 0000000..475eb7c
 +
 +        // 4. 导入：引擎把 sync/hub/（视为另一台"设备"）合并进本地 userdb
 +        if (changed) {
-+            remote.triggerRimeSync()
++            triggerEngineSync(remote, state)
 +            log("Hub merged into local userdb")
 +        }
++    }
++
++    /**
++     * 触发 RIME 引擎同步（导出 userdb 快照 + 合并 sync/hub/）。
++     *
++     * 两种模式，自动协商：
++     *  - trigger 模式：主程序打过 triggerRimeSync() 补丁（fcitx5-sync fork），
++     *    精确调用 fcitx5-rime 的 sync 子配置，无副作用 —— 首选
++     *  - restart 模式：主程序是重签名的上游原版（未打补丁），
++     *    降级用 restartFcitx()：fcitx5 退出时 RimeEngine::save() → sync(false)，
++     *    同样完成导出+合并，但会短暂重启输入法引擎 —— 兜底
++     *
++     * 协商结果缓存在 SharedPreferences，每个周期只探测一次。
++     */
++    private suspend fun triggerEngineSync(
++        remote: IFcitxRemoteService,
++        state: android.content.SharedPreferences,
++    ) {
++        val mode = state.getString(KEY_TRIGGER_MODE, TRIGGER_MODE_TRY)
++        if (mode != TRIGGER_MODE_RESTART) {
++            try {
++                remote.triggerRimeSync()
++                if (mode != TRIGGER_MODE_TRIGGER) {
++                    state.edit().putString(KEY_TRIGGER_MODE, TRIGGER_MODE_TRIGGER).apply()
++                    log("Trigger mode: triggerRimeSync (patched main app)")
++                }
++                return
++            } catch (t: Throwable) {
++                // 主程序未实现该 AIDL 事务（原版 APK）→ 降级并缓存
++                log("triggerRimeSync unsupported (${t.javaClass.simpleName}), falling back to restartFcitx")
++                state.edit().putString(KEY_TRIGGER_MODE, TRIGGER_MODE_RESTART).apply()
++            }
++        }
++        // restart 模式：重启 fcitx 引擎以触发 save+sync
++        remote.restartFcitx()
++        // 引擎重启需要时间，等它起来再继续（下一循环的文件读取才完整）
++        delay(3000)
 +    }
 +
 +    /**
@@ -514,6 +554,11 @@ index 0000000..475eb7c
 +
 +    companion object {
 +        private const val TAG = "fcitx5-sync"
++
++        private const val KEY_TRIGGER_MODE = "trigger_mode"
++        private const val TRIGGER_MODE_TRY = "try"
++        private const val TRIGGER_MODE_TRIGGER = "trigger"
++        private const val TRIGGER_MODE_RESTART = "restart"
 +    }
 +}
 diff --git a/plugin/sync/src/main/res/values-zh-rCN/strings.xml b/plugin/sync/src/main/res/values-zh-rCN/strings.xml
