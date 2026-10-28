@@ -73,6 +73,12 @@ jobs:
       - name: Show patched files
         run: git -C fcitx5-android-src status --short
 
+      - name: Install system deps (ECM/gettext, 照上游 CI)
+        run: |
+          sudo apt update
+          sudo apt install -y extra-cmake-modules gettext
+          sdkmanager --install "cmake;3.31.6" >/dev/null || true
+
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
