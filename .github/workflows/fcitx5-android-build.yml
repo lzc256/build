@@ -25,6 +25,7 @@ jobs:
       should_build: ${{ steps.check.outputs.should_build }}
       cache_key: ${{ steps.check.outputs.cache_key }}
       upstream_sha: ${{ steps.hashes.outputs.upstream_sha }}
+      sync_sha: ${{ steps.hashes.outputs.sync_sha }}
     steps:
       - name: Checkout framework
         uses: actions/checkout@v4
@@ -33,13 +34,15 @@ jobs:
         id: hashes
         run: |
           UPSTREAM_SHA=$(curl -s https://api.github.com/repos/fcitx5-android/fcitx5-android/commits/master | jq -r .sha)
+          SYNC_SHA=$(curl -s -H "Authorization: Bearer ${{ secrets.GH_PAT }}" https://api.github.com/repos/lzc256/fcitx5-sync/commits/master | jq -r .sha)
           echo "upstream_sha=$UPSTREAM_SHA" >> $GITHUB_OUTPUT
+          echo "sync_sha=$SYNC_SHA" >> $GITHUB_OUTPUT
 
       - name: Check if build needed
         id: check
         uses: ./.github/workflows/utils/check-update
         with:
-          cache_key: fcitx5-android-v1-${{ steps.hashes.outputs.upstream_sha }}-${{ github.sha }}
+          cache_key: fcitx5-android-v1-${{ steps.hashes.outputs.upstream_sha }}-${{ steps.hashes.outputs.sync_sha }}-${{ github.sha }}
 
   build:
     needs: check-update
