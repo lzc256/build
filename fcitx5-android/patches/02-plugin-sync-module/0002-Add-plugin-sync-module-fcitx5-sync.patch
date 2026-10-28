@@ -1,13 +1,13 @@
-From ae0b68e9baaf9cfe83842b71362dd681cb3fac98 Mon Sep 17 00:00:00 2001
+From 10470cdd0499e3273b6cf1efc4798b88814e0ecb Mon Sep 17 00:00:00 2001
 From: lzc256 <lzc256@users.noreply.github.com>
-Date: Wed, 28 Oct 2026 19:58:47 +0800
+Date: Wed, 28 Oct 2026 20:23:57 +0800
 Subject: [PATCH] Add plugin/sync module (fcitx5-sync)
 
 Standalone plugin APK: periodic Rime userdb snapshot sync against a
 fcitx5-syncd hub. buildGoCore sets workingDir to the Go core module dir
 so its go.mod (x/mobile tool directives) resolves during gomobile bind.
 ---
- plugin/sync/build.gradle.kts                  |  70 +++++++
+ plugin/sync/build.gradle.kts                  |  71 +++++++
  plugin/sync/proguard-rules.pro                |   4 +
  plugin/sync/src/main/AndroidManifest.xml      |  36 ++++
  .../android/plugin/sync/MainActivity.kt       | 140 +++++++++++++
@@ -17,7 +17,7 @@ so its go.mod (x/mobile tool directives) resolves during gomobile bind.
  plugin/sync/src/main/res/values/strings.xml   |  22 ++
  plugin/sync/src/main/res/xml/plugin.xml       |   6 +
  settings.gradle.kts                           |   2 +
- 10 files changed, 539 insertions(+)
+ 10 files changed, 540 insertions(+)
  create mode 100644 plugin/sync/build.gradle.kts
  create mode 100644 plugin/sync/proguard-rules.pro
  create mode 100644 plugin/sync/src/main/AndroidManifest.xml
@@ -30,10 +30,10 @@ so its go.mod (x/mobile tool directives) resolves during gomobile bind.
 
 diff --git a/plugin/sync/build.gradle.kts b/plugin/sync/build.gradle.kts
 new file mode 100644
-index 00000000..9864c721
+index 00000000..168ed7b2
 --- /dev/null
 +++ b/plugin/sync/build.gradle.kts
-@@ -0,0 +1,70 @@
+@@ -0,0 +1,71 @@
 +import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
 +
 +plugins {
@@ -102,6 +102,7 @@ index 00000000..9864c721
 +
 +dependencies {
 +    implementation(project(":lib:plugin-base"))
++    implementation(libs.kotlinx.coroutines)
 +    implementation(files(coreAar))
 +}
 diff --git a/plugin/sync/proguard-rules.pro b/plugin/sync/proguard-rules.pro
