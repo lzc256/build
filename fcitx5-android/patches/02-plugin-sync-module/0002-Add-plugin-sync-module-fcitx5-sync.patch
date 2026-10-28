@@ -1,6 +1,6 @@
-From cfa3dad3a06e23958c85572cfe08a2db126b465c Mon Sep 17 00:00:00 2001
+From ae0b68e9baaf9cfe83842b71362dd681cb3fac98 Mon Sep 17 00:00:00 2001
 From: lzc256 <lzc256@users.noreply.github.com>
-Date: Wed, 28 Oct 2026 19:30:38 +0800
+Date: Wed, 28 Oct 2026 19:58:47 +0800
 Subject: [PATCH] Add plugin/sync module (fcitx5-sync)
 
 Standalone plugin APK: periodic Rime userdb snapshot sync against a
@@ -10,14 +10,14 @@ so its go.mod (x/mobile tool directives) resolves during gomobile bind.
  plugin/sync/build.gradle.kts                  |  70 +++++++
  plugin/sync/proguard-rules.pro                |   4 +
  plugin/sync/src/main/AndroidManifest.xml      |  36 ++++
- .../android/plugin/sync/MainActivity.kt       | 141 +++++++++++++
+ .../android/plugin/sync/MainActivity.kt       | 140 +++++++++++++
  .../fcitx5/android/plugin/sync/Settings.kt    |  49 +++++
  .../fcitx5/android/plugin/sync/SyncService.kt | 192 ++++++++++++++++++
  .../src/main/res/values-zh-rCN/strings.xml    |  18 ++
  plugin/sync/src/main/res/values/strings.xml   |  22 ++
  plugin/sync/src/main/res/xml/plugin.xml       |   6 +
  settings.gradle.kts                           |   2 +
- 10 files changed, 540 insertions(+)
+ 10 files changed, 539 insertions(+)
  create mode 100644 plugin/sync/build.gradle.kts
  create mode 100644 plugin/sync/proguard-rules.pro
  create mode 100644 plugin/sync/src/main/AndroidManifest.xml
@@ -158,10 +158,10 @@ index 00000000..b8bc23b9
 +</manifest>
 diff --git a/plugin/sync/src/main/java/org/fcitx/fcitx5/android/plugin/sync/MainActivity.kt b/plugin/sync/src/main/java/org/fcitx/fcitx5/android/plugin/sync/MainActivity.kt
 new file mode 100644
-index 00000000..40f8e570
+index 00000000..014b9722
 --- /dev/null
 +++ b/plugin/sync/src/main/java/org/fcitx/fcitx5/android/plugin/sync/MainActivity.kt
-@@ -0,0 +1,141 @@
+@@ -0,0 +1,140 @@
 +/*
 + * SPDX-License-Identifier: LGPL-2.1-or-later
 + * SPDX-FileCopyrightText: Copyright 2026 fcitx5-sync contributors
@@ -176,7 +176,6 @@ index 00000000..40f8e570
 +import android.os.Build
 +import android.os.Bundle
 +import android.os.Environment
-+import android.provider.Settings
 +import android.widget.Button
 +import android.widget.EditText
 +import android.widget.LinearLayout
@@ -294,7 +293,7 @@ index 00000000..40f8e570
 +        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
 +            startActivity(
 +                Intent(
-+                    Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
++                    android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
 +                    Uri.parse("package:$packageName")
 +                )
 +            )
