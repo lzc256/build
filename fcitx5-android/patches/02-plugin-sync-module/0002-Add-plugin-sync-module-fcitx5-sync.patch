@@ -1,4 +1,4 @@
-From 10470cdd0499e3273b6cf1efc4798b88814e0ecb Mon Sep 17 00:00:00 2001
+From 73b90b5aa1339f99f62838b435add542875e5b2f Mon Sep 17 00:00:00 2001
 From: lzc256 <lzc256@users.noreply.github.com>
 Date: Wed, 28 Oct 2026 20:23:57 +0800
 Subject: [PATCH] Add plugin/sync module (fcitx5-sync)
@@ -10,14 +10,14 @@ so its go.mod (x/mobile tool directives) resolves during gomobile bind.
  plugin/sync/build.gradle.kts                  |  71 +++++++
  plugin/sync/proguard-rules.pro                |   4 +
  plugin/sync/src/main/AndroidManifest.xml      |  36 ++++
- .../android/plugin/sync/MainActivity.kt       | 140 +++++++++++++
+ .../android/plugin/sync/MainActivity.kt       | 140 ++++++++++++
  .../fcitx5/android/plugin/sync/Settings.kt    |  49 +++++
- .../fcitx5/android/plugin/sync/SyncService.kt | 192 ++++++++++++++++++
+ .../fcitx5/android/plugin/sync/SyncService.kt | 201 ++++++++++++++++++
  .../src/main/res/values-zh-rCN/strings.xml    |  18 ++
  plugin/sync/src/main/res/values/strings.xml   |  22 ++
  plugin/sync/src/main/res/xml/plugin.xml       |   6 +
  settings.gradle.kts                           |   2 +
- 10 files changed, 540 insertions(+)
+ 10 files changed, 549 insertions(+)
  create mode 100644 plugin/sync/build.gradle.kts
  create mode 100644 plugin/sync/proguard-rules.pro
  create mode 100644 plugin/sync/src/main/AndroidManifest.xml
@@ -360,10 +360,10 @@ index 00000000..f31d0813
 +}
 diff --git a/plugin/sync/src/main/java/org/fcitx/fcitx5/android/plugin/sync/SyncService.kt b/plugin/sync/src/main/java/org/fcitx/fcitx5/android/plugin/sync/SyncService.kt
 new file mode 100644
-index 00000000..8d6157da
+index 00000000..1c39b46c
 --- /dev/null
 +++ b/plugin/sync/src/main/java/org/fcitx/fcitx5/android/plugin/sync/SyncService.kt
-@@ -0,0 +1,192 @@
+@@ -0,0 +1,201 @@
 +/*
 + * SPDX-License-Identifier: LGPL-2.1-or-later
 + * SPDX-FileCopyrightText: Copyright 2026 fcitx5-sync contributors
@@ -383,6 +383,7 @@ index 00000000..8d6157da
 +import kotlinx.coroutines.delay
 +import kotlinx.coroutines.isActive
 +import kotlinx.coroutines.launch
++import syncclient.Client
 +import syncclient.Syncclient
 +import java.io.File
 +
@@ -444,7 +445,7 @@ index 00000000..8d6157da
 +
 +    private suspend fun cycle(
 +        remote: IFcitxRemoteService,
-+        client: Syncclient,
++        client: Client,
 +        state: android.content.SharedPreferences,
 +    ) {
 +        val syncDir = rimeSyncDir()
@@ -458,17 +459,25 @@ index 00000000..8d6157da
 +            ?.forEach { file ->
 +                val db = file.name.removeSuffix(".userdb.txt")
 +                val data = file.readBytes()
-+                if (client.validateSnapshot(data) == null) {
++                val invalid = runCatching { client.validateSnapshot(data) }.exceptionOrNull()
++                if (invalid == null) {
 +                    val v = client.uploadSnapshot(db, data)
 +                    log("Uploaded $db -> hub v$v")
 +                } else {
-+                    log("Skip invalid snapshot $db")
++                    log("Skip invalid snapshot $db: ${invalid.message}")
 +                }
 +            }
 +
 +        // 3. 拉 hub 更新
 +        var changed = false
-+        for (db in client.hubDBs()) {
++        val hubDBs = runCatching { client.hubDBsJSON() }
++            .getOrNull()
++            ?.let { json ->
++                // 简单解析 JSON 数组：["a","b"]
++                json.trim().removePrefix("[").removeSuffix("]")
++                    .split(",").map { it.trim().trim('"') }.filter { it.isNotEmpty() }
++            } ?: emptyList()
++        for (db in hubDBs) {
 +            val v = client.hubVersion(db)
 +            if (state.getLong("hub_$db", 0L) >= v) continue
 +            val data = client.downloadHub(db)
