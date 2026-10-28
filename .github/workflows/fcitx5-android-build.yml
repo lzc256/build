@@ -53,7 +53,9 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: lzc256/fcitx5-sync
+          ref: master
           path: fcitx5-sync
+          token: ${{ secrets.GH_PAT }}
 
       - name: Clone fcitx5-android (with native submodules)
         uses: actions/checkout@v4
