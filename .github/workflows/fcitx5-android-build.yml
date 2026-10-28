@@ -84,13 +84,16 @@ jobs:
         with:
           go-version: '1.24'
 
-      - name: Setup NDK
+      - name: Setup NDK (r28, 与上游 build-logic Versions.defaultNDK = 28.0.13004108 一致)
         id: ndk
-        uses: nttld/setup-ndk@v1
-        with:
-          # 与上游 build-logic Versions.defaultNDK 一致
-          ndk-version: r28.0.13004108
-          add-to-path: true
+        run: |
+          if [ ! -d "$HOME/ndk-r28" ]; then
+            curl -sSL -o /tmp/ndk.zip https://dl.google.com/android/repository/android-ndk-r28-linux.zip
+            unzip -q /tmp/ndk.zip -d $HOME
+            mv $HOME/android-ndk-r28 $HOME/ndk-r28
+            rm /tmp/ndk.zip
+          fi
+          echo "ndk-path=$HOME/ndk-r28" >> $GITHUB_OUTPUT
 
       - name: Setup gomobile
         run: |
