@@ -1,22 +1,15 @@
-From 4c77f964321d2e473ba27c85f1c4f1183cba9445 Mon Sep 17 00:00:00 2001
+From a9ebd761b26b46af79443a95daba79b02c71ea71 Mon Sep 17 00:00:00 2001
 From: lzc256 <lzc256@users.noreply.github.com>
-Date: Wed, 28 Oct 2026 19:01:52 +0800
+Date: Wed, 28 Oct 2026 19:05:35 +0800
 Subject: [PATCH] Add plugin/sync module (fcitx5-sync)
 
 Standalone plugin APK: periodic Rime userdb snapshot sync against a
-fcitx5-syncd hub. BuildConfig.MAIN_APPLICATION_ID wires the IPC
-permission/action names to the (patched, renamed) main app.
+fcitx5-syncd hub. BuildConfig.MAIN_APPLICATION_ID wires IPC
+permission/action names to the main app.
 
-- buildGoCore runs gomobile bind with workingDir set to the Go core
-  module dir so go.mod (with x/mobile tool directives) is resolved
+buildGoCore sets workingDir to the Go core module dir so its go.mod
+(with golang.org/x/mobile tool directives) resolves during gomobile bind.
 ---
- app/build.gradle.kts                          |   2 +-
- .../fcitx5/android/FcitxRemoteService.kt      |   4 +
- .../fcitx5/android/core/AddonSubconfig.kt     |   6 +
- .../android/core/data/PluginDescriptor.kt     |   2 +-
- .../AndroidPluginAppConventionPlugin.kt       |   8 +-
- .../common/ipc/IFcitxRemoteService.aidl       |   3 +
- plugin/rime/build.gradle.kts                  |   2 +-
  plugin/sync/build.gradle.kts                  |  70 +++++++
  plugin/sync/proguard-rules.pro                |   4 +
  plugin/sync/src/main/AndroidManifest.xml      |  36 ++++
@@ -26,8 +19,8 @@ permission/action names to the (patched, renamed) main app.
  .../src/main/res/values-zh-rCN/strings.xml    |  18 ++
  plugin/sync/src/main/res/values/strings.xml   |  22 ++
  plugin/sync/src/main/res/xml/plugin.xml       |   6 +
- settings.gradle.kts                           |   1 +
- 17 files changed, 559 insertions(+), 7 deletions(-)
+ settings.gradle.kts                           |   2 +
+ 10 files changed, 540 insertions(+)
  create mode 100644 plugin/sync/build.gradle.kts
  create mode 100644 plugin/sync/proguard-rules.pro
  create mode 100644 plugin/sync/src/main/AndroidManifest.xml
@@ -38,114 +31,6 @@ permission/action names to the (patched, renamed) main app.
  create mode 100644 plugin/sync/src/main/res/values/strings.xml
  create mode 100644 plugin/sync/src/main/res/xml/plugin.xml
 
-diff --git a/app/build.gradle.kts b/app/build.gradle.kts
-index 53f1eb8c..ad9c50fb 100644
---- a/app/build.gradle.kts
-+++ b/app/build.gradle.kts
-@@ -13,7 +13,7 @@ android {
-     namespace = "org.fcitx.fcitx5.android"
- 
-     defaultConfig {
--        applicationId = "org.fcitx.fcitx5.android"
-+        applicationId = "org.fcitx.fcitx5.android.sync"
-         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
- 
-         @Suppress("UnstableApiUsage")
-diff --git a/app/src/main/java/org/fcitx/fcitx5/android/FcitxRemoteService.kt b/app/src/main/java/org/fcitx/fcitx5/android/FcitxRemoteService.kt
-index 9e292e04..b2c2a496 100644
---- a/app/src/main/java/org/fcitx/fcitx5/android/FcitxRemoteService.kt
-+++ b/app/src/main/java/org/fcitx/fcitx5/android/FcitxRemoteService.kt
-@@ -107,6 +107,10 @@ class FcitxRemoteService : Service() {
-         override fun reloadQuickPhrase() {
-             FcitxDaemon.getFirstConnectionOrNull()?.runIfReady { reloadQuickPhrase() }
-         }
-+
-+        override fun triggerRimeSync() {
-+            FcitxDaemon.getFirstConnectionOrNull()?.runIfReady { triggerRimeSync() }
-+        }
-     }
- 
-     override fun onCreate() {
-diff --git a/app/src/main/java/org/fcitx/fcitx5/android/core/AddonSubconfig.kt b/app/src/main/java/org/fcitx/fcitx5/android/core/AddonSubconfig.kt
-index 0f56aa83..74b9c7a9 100644
---- a/app/src/main/java/org/fcitx/fcitx5/android/core/AddonSubconfig.kt
-+++ b/app/src/main/java/org/fcitx/fcitx5/android/core/AddonSubconfig.kt
-@@ -15,3 +15,9 @@ suspend fun FcitxAPI.savePunctuationConfig(lang: String = "zh_CN", config: RawCo
- suspend fun FcitxAPI.reloadQuickPhrase() = setAddonSubConfig("quickphrase", "editor")
- 
- suspend fun FcitxAPI.reloadPinyinCustomPhrase() = setAddonSubConfig("pinyin", "customphrase")
-+
-+/**
-+ * 触发 fcitx5-rime 的用户数据同步（等价于 UI 上的「Synchronize」动作）：
-+ * RimeEngine::setSubConfig("sync") → rime api 同步 userdb 到 sync_dir。
-+ */
-+suspend fun FcitxAPI.triggerRimeSync() = setAddonSubConfig("rime", "sync")
-diff --git a/app/src/main/java/org/fcitx/fcitx5/android/core/data/PluginDescriptor.kt b/app/src/main/java/org/fcitx/fcitx5/android/core/data/PluginDescriptor.kt
-index cec9078e..ae90f86b 100644
---- a/app/src/main/java/org/fcitx/fcitx5/android/core/data/PluginDescriptor.kt
-+++ b/app/src/main/java/org/fcitx/fcitx5/android/core/data/PluginDescriptor.kt
-@@ -37,7 +37,7 @@ data class PluginDescriptor(
-     val name = packageName.removePrefix(pluginPackagePrefix).removeSuffix(pluginPackageSuffix)
- 
-     companion object {
--        const val pluginPackagePrefix = "org.fcitx.fcitx5.android.plugin."
-+        const val pluginPackagePrefix = "org.fcitx.fcitx5.android.sync.plugin."
-         const val pluginPackageSuffix = ".${BuildConfig.BUILD_TYPE}"
-         const val pluginAPI = "0.1"
-     }
-diff --git a/build-logic/convention/src/main/kotlin/AndroidPluginAppConventionPlugin.kt b/build-logic/convention/src/main/kotlin/AndroidPluginAppConventionPlugin.kt
-index 8a19dd27..4aa4a7fd 100644
---- a/build-logic/convention/src/main/kotlin/AndroidPluginAppConventionPlugin.kt
-+++ b/build-logic/convention/src/main/kotlin/AndroidPluginAppConventionPlugin.kt
-@@ -21,18 +21,18 @@ class AndroidPluginAppConventionPlugin : Plugin<Project> {
-             }
-             buildTypes {
-                 release {
--                    buildConfigField("String", "MAIN_APPLICATION_ID", "\"org.fcitx.fcitx5.android\"")
-+                    buildConfigField("String", "MAIN_APPLICATION_ID", "\"org.fcitx.fcitx5.android.sync\"")
-                     addManifestPlaceholders(
-                         mapOf(
--                            "mainApplicationId" to "org.fcitx.fcitx5.android",
-+                            "mainApplicationId" to "org.fcitx.fcitx5.android.sync",
-                         )
-                     )
-                 }
-                 debug {
--                    buildConfigField("String", "MAIN_APPLICATION_ID", "\"org.fcitx.fcitx5.android.debug\"")
-+                    buildConfigField("String", "MAIN_APPLICATION_ID", "\"org.fcitx.fcitx5.android.sync.debug\"")
-                     addManifestPlaceholders(
-                         mapOf(
--                            "mainApplicationId" to "org.fcitx.fcitx5.android.debug",
-+                            "mainApplicationId" to "org.fcitx.fcitx5.android.sync.debug",
-                         )
-                     )
-                 }
-diff --git a/lib/common/src/main/aidl/org/fcitx/fcitx5/android/common/ipc/IFcitxRemoteService.aidl b/lib/common/src/main/aidl/org/fcitx/fcitx5/android/common/ipc/IFcitxRemoteService.aidl
-index 3a260816..7deaf48f 100644
---- a/lib/common/src/main/aidl/org/fcitx/fcitx5/android/common/ipc/IFcitxRemoteService.aidl
-+++ b/lib/common/src/main/aidl/org/fcitx/fcitx5/android/common/ipc/IFcitxRemoteService.aidl
-@@ -22,4 +22,7 @@ interface IFcitxRemoteService {
-    void reloadPinyinDict();
-    /** Reload fcitx quick phrase */
-    void reloadQuickPhrase();
-+
-+   /** Trigger fcitx5-rime user data sync (exports userdb snapshots to rime sync dir) */
-+   void triggerRimeSync();
- }
-\ No newline at end of file
-diff --git a/plugin/rime/build.gradle.kts b/plugin/rime/build.gradle.kts
-index 1733282c..a03cf412 100644
---- a/plugin/rime/build.gradle.kts
-+++ b/plugin/rime/build.gradle.kts
-@@ -11,7 +11,7 @@ android {
-     namespace = "org.fcitx.fcitx5.android.plugin.rime"
- 
-     defaultConfig {
--        applicationId = "org.fcitx.fcitx5.android.plugin.rime"
-+        applicationId = "org.fcitx.fcitx5.android.sync.plugin.rime"
- 
-         @Suppress("UnstableApiUsage")
-         externalNativeBuild {
 diff --git a/plugin/sync/build.gradle.kts b/plugin/sync/build.gradle.kts
 new file mode 100644
 index 00000000..9864c721
@@ -739,13 +624,14 @@ index 00000000..335a0df4
 +    <hasService>true</hasService>
 +</plugin>
 diff --git a/settings.gradle.kts b/settings.gradle.kts
-index 7744dd60..07db9173 100644
+index 7744dd60..6e8cbab5 100644
 --- a/settings.gradle.kts
 +++ b/settings.gradle.kts
-@@ -35,3 +35,4 @@ include(":plugin:chewing")
+@@ -35,3 +35,5 @@ include(":plugin:chewing")
  include(":plugin:sayura")
  include(":plugin:jyutping")
  include(":plugin:thai")
++
 +include(":plugin:sync")
 -- 
 2.56.0
