@@ -105,6 +105,10 @@ jobs:
         run: |
           go install golang.org/x/mobile/cmd/gomobile@latest
           gomobile init
+          # gomobile bind 要求目标模块依赖 golang.org/x/mobile/bind
+          cd fcitx5-sync/core
+          go get golang.org/x/mobile/bind@latest
+          go mod tidy
 
       - name: Gradle cache
         uses: actions/cache@v4
