@@ -128,6 +128,9 @@ jobs:
           ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
           ANDROID_NDK_ROOT: ${{ steps.ndk.outputs.ndk-path }}
           FCITX5_SYNC_CORE_DIR: ${{ github.workspace }}/fcitx5-sync/core
+          # 只构建 arm64-v8a（上游 splits.abi 会据 BUILD_ABI 只出一个 split，
+          # isUniversalApk=false 故不会额外产出 universal 包）
+          BUILD_ABI: arm64-v8a
           SIGN_KEY_BASE64: ${{ secrets.FCITX5_ANDROID_KEYSTORE_BASE64 }}
           SIGN_KEY_PWD: ${{ secrets.FCITX5_ANDROID_KEYSTORE_PASSWORD }}
           SIGN_KEY_ALIAS: ${{ secrets.FCITX5_ANDROID_KEY_ALIAS }}
@@ -137,19 +140,39 @@ jobs:
           fi
           ./gradlew :app:assembleRelease :plugin:rime:assembleRelease :plugin:sync:assembleRelease --no-daemon --stacktrace
 
-      - name: Collect APKs
+      - name: Collect APKs (per-module dirs, arm64-v8a only)
         run: |
-          mkdir -p apks
-          cp fcitx5-android-src/app/build/outputs/apk/release/*.apk apks/ 2>/dev/null || true
-          cp fcitx5-android-src/plugin/rime/build/outputs/apk/release/*.apk apks/ 2>/dev/null || true
-          cp fcitx5-android-src/plugin/sync/build/outputs/apk/release/*.apk apks/ 2>/dev/null || true
-          ls -la apks/
+          rm -rf apks && mkdir -p apks/main apks/plugin-rime apks/plugin-sync
+          cp fcitx5-android-src/app/build/outputs/apk/release/*.apk apks/main/ 2>/dev/null || true
+          cp fcitx5-android-src/plugin/rime/build/outputs/apk/release/*.apk apks/plugin-rime/ 2>/dev/null || true
+          cp fcitx5-android-src/plugin/sync/build/outputs/apk/release/*.apk apks/plugin-sync/ 2>/dev/null || true
+          # 兜底校验：不应出现 universal / 其他 ABI 的包
+          if ls apks/main/*.apk 2>/dev/null | grep -vq 'arm64-v8a'; then
+            echo "::error::main APK 不是 arm64-v8a split"; ls -la apks/main; exit 1
+          fi
+          for d in apks/*/; do echo "== $d"; ls -la "$d"; done
 
-      - name: Upload artifacts
+      - name: Upload main APK (arm64-v8a)
         uses: actions/upload-artifact@v4
         with:
-          name: fcitx5-sync-apks-${{ needs.check-update.outputs.upstream_sha }}
-          path: apks/
+          name: fcitx5-android-main-arm64-v8a
+          path: apks/main/*.apk
+          retention-days: 90
+          if-no-files-found: error
+
+      - name: Upload rime plugin APK (arm64-v8a)
+        uses: actions/upload-artifact@v4
+        with:
+          name: fcitx5-android-plugin-rime-arm64-v8a
+          path: apks/plugin-rime/*.apk
+          retention-days: 90
+          if-no-files-found: error
+
+      - name: Upload sync plugin APK (arm64-v8a)
+        uses: actions/upload-artifact@v4
+        with:
+          name: fcitx5-android-plugin-sync-arm64-v8a
+          path: apks/plugin-sync/*.apk
           retention-days: 90
           if-no-files-found: error
 

@@ -1,13 +1,17 @@
-From 73b90b5aa1339f99f62838b435add542875e5b2f Mon Sep 17 00:00:00 2001
+From 6b00daf442303befc9108434ebf02b52e276cb4b Mon Sep 17 00:00:00 2001
 From: lzc256 <lzc256@users.noreply.github.com>
-Date: Wed, 28 Oct 2026 20:23:57 +0800
+Date: Thu, 29 Oct 2026 15:24:08 +0800
 Subject: [PATCH] Add plugin/sync module (fcitx5-sync)
 
 Standalone plugin APK: periodic Rime userdb snapshot sync against a
-fcitx5-syncd hub. buildGoCore sets workingDir to the Go core module dir
-so its go.mod (x/mobile tool directives) resolves during gomobile bind.
+fcitx5-syncd hub.
+
+- buildGoCore runs gomobile bind with workingDir set to the Go core
+  module dir so its go.mod (x/mobile tool directives) resolves
+- native libs are limited to one ABI (BUILD_ABI, default arm64-v8a),
+  for both the packaged APK and the gomobile bind target
 ---
- plugin/sync/build.gradle.kts                  |  71 +++++++
+ plugin/sync/build.gradle.kts                  |  93 ++++++++
  plugin/sync/proguard-rules.pro                |   4 +
  plugin/sync/src/main/AndroidManifest.xml      |  36 ++++
  .../android/plugin/sync/MainActivity.kt       | 140 ++++++++++++
@@ -17,7 +21,7 @@ so its go.mod (x/mobile tool directives) resolves during gomobile bind.
  plugin/sync/src/main/res/values/strings.xml   |  22 ++
  plugin/sync/src/main/res/xml/plugin.xml       |   6 +
  settings.gradle.kts                           |   2 +
- 10 files changed, 549 insertions(+)
+ 10 files changed, 571 insertions(+)
  create mode 100644 plugin/sync/build.gradle.kts
  create mode 100644 plugin/sync/proguard-rules.pro
  create mode 100644 plugin/sync/src/main/AndroidManifest.xml
@@ -30,10 +34,10 @@ so its go.mod (x/mobile tool directives) resolves during gomobile bind.
 
 diff --git a/plugin/sync/build.gradle.kts b/plugin/sync/build.gradle.kts
 new file mode 100644
-index 00000000..168ed7b2
+index 00000000..883a8eb9
 --- /dev/null
 +++ b/plugin/sync/build.gradle.kts
-@@ -0,0 +1,71 @@
+@@ -0,0 +1,93 @@
 +import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
 +
 +plugins {
@@ -48,6 +52,17 @@ index 00000000..168ed7b2
 +
 +    defaultConfig {
 +        applicationId = "org.fcitx.fcitx5.android.sync.plugin.sync"
++        // 只打包指定 ABI 的 native 库（含 Go 核心 libgojni.so）。
++        // 与 app/plugin 一致地读取 BUILD_ABI 环境变量，默认 arm64-v8a：
++        // 不这样做此插件会把 4 个 ABI 的 Go 核心全部塞进一个 universal APK（>40MB）。
++        val buildAbi: String = providers.environmentVariable("BUILD_ABI")
++            .orElse(providers.gradleProperty("buildABI"))
++            .orElse("arm64-v8a")
++            .get()
++        ndk {
++            abiFilters.clear()
++            abiFilters.addAll(buildAbi.split(",").map { it.trim() }.filter { it.isNotEmpty() })
++        }
 +    }
 +
 +    buildFeatures {
@@ -78,6 +93,15 @@ index 00000000..168ed7b2
 +
 +val coreAar = file("libs/fcitx5-sync-core.aar")
 +
++// Android ABI -> Go 架构名（gomobile -target=android/<goarch>）
++fun goArchForAbi(abi: String): String = when (abi) {
++    "arm64-v8a" -> "arm64"
++    "armeabi-v7a" -> "arm"
++    "x86" -> "386"
++    "x86_64" -> "amd64"
++    else -> "arm64"
++}
++
 +val buildGoCore by tasks.registering(Exec::class) {
 +    group = "build"
 +    description = "gomobile bind fcitx5-sync core -> AAR"
@@ -89,7 +113,9 @@ index 00000000..168ed7b2
 +    }
 +    commandLine(
 +        "gomobile", "bind",
-+        "-target=android",
++        // 只为目标 ABI 编译 Go 核心（gomobile target 语法：android/<goarch>），
++        // 避免白白编译 4 个架构。
++        "-target=android/" + goArchForAbi(buildAbi),
 +        "-androidapi", "23",
 +        "-o", coreAar.absolutePath,
 +        "./syncclient",
