@@ -122,6 +122,24 @@ jobs:
           key: gradle-fcitx5-android-${{ hashFiles('fcitx5-android-src/gradle/libs.versions.toml') }}
           restore-keys: gradle-fcitx5-android-
 
+      - name: Resolve signing config
+        id: sign
+        env:
+          KS_B64: ${{ secrets.FCITX5_ANDROID_KEYSTORE_BASE64 }}
+          KS_PWD: ${{ secrets.FCITX5_ANDROID_KEYSTORE_PASSWORD }}
+          KS_ALIAS: ${{ secrets.FCITX5_ANDROID_KEY_ALIAS }}
+        run: |
+          # 三个 secret 齐全才启用签名；缺任何一个都只构建 unsigned，
+          # 否则上游 build-logic 会创建空的 signingConfig 并在
+          # validateSigningRelease 阶段失败（Keystore file not set）。
+          if [ -n "$KS_B64" ] && [ -n "$KS_PWD" ] && [ -n "$KS_ALIAS" ]; then
+            echo "enabled=true" >> $GITHUB_OUTPUT
+            echo "Signing enabled (fcitx5-sync keystore)"
+          else
+            echo "enabled=false" >> $GITHUB_OUTPUT
+            echo "::warning::FCITX5_ANDROID_KEYSTORE_* incomplete (need BASE64+PASSWORD+ALIAS). Building UNSIGNED APKs; sign them locally with apksigner."
+          fi
+
       - name: Build release APKs
         working-directory: fcitx5-android-src
         env:
@@ -131,13 +149,10 @@ jobs:
           # 只构建 arm64-v8a（上游 splits.abi 会据 BUILD_ABI 只出一个 split，
           # isUniversalApk=false 故不会额外产出 universal 包）
           BUILD_ABI: arm64-v8a
-          SIGN_KEY_BASE64: ${{ secrets.FCITX5_ANDROID_KEYSTORE_BASE64 }}
-          SIGN_KEY_PWD: ${{ secrets.FCITX5_ANDROID_KEYSTORE_PASSWORD }}
-          SIGN_KEY_ALIAS: ${{ secrets.FCITX5_ANDROID_KEY_ALIAS }}
+          SIGN_KEY_BASE64: ${{ steps.sign.outputs.enabled == 'true' && secrets.FCITX5_ANDROID_KEYSTORE_BASE64 || '' }}
+          SIGN_KEY_PWD: ${{ steps.sign.outputs.enabled == 'true' && secrets.FCITX5_ANDROID_KEYSTORE_PASSWORD || '' }}
+          SIGN_KEY_ALIAS: ${{ steps.sign.outputs.enabled == 'true' && secrets.FCITX5_ANDROID_KEY_ALIAS || '' }}
         run: |
-          if [ -z "${{ secrets.FCITX5_ANDROID_KEYSTORE_BASE64 }}" ]; then
-            echo "::warning::No keystore configured (FCITX5_ANDROID_KEYSTORE_*). Building UNSIGNED release APKs. Set the secrets for signed builds."
-          fi
           ./gradlew :app:assembleRelease :plugin:rime:assembleRelease :plugin:sync:assembleRelease --no-daemon --stacktrace
 
       - name: Collect APKs (per-module dirs, arm64-v8a only)
