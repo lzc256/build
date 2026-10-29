@@ -1,6 +1,6 @@
-From 6b00daf442303befc9108434ebf02b52e276cb4b Mon Sep 17 00:00:00 2001
+From 7290703e362a4906c9a02d11164db2da1e4fe5f8 Mon Sep 17 00:00:00 2001
 From: lzc256 <lzc256@users.noreply.github.com>
-Date: Thu, 29 Oct 2026 15:24:08 +0800
+Date: Thu, 29 Oct 2026 15:36:57 +0800
 Subject: [PATCH] Add plugin/sync module (fcitx5-sync)
 
 Standalone plugin APK: periodic Rime userdb snapshot sync against a
@@ -11,7 +11,7 @@ fcitx5-syncd hub.
 - native libs are limited to one ABI (BUILD_ABI, default arm64-v8a),
   for both the packaged APK and the gomobile bind target
 ---
- plugin/sync/build.gradle.kts                  |  93 ++++++++
+ plugin/sync/build.gradle.kts                  |  95 +++++++++
  plugin/sync/proguard-rules.pro                |   4 +
  plugin/sync/src/main/AndroidManifest.xml      |  36 ++++
  .../android/plugin/sync/MainActivity.kt       | 140 ++++++++++++
@@ -21,7 +21,7 @@ fcitx5-syncd hub.
  plugin/sync/src/main/res/values/strings.xml   |  22 ++
  plugin/sync/src/main/res/xml/plugin.xml       |   6 +
  settings.gradle.kts                           |   2 +
- 10 files changed, 571 insertions(+)
+ 10 files changed, 573 insertions(+)
  create mode 100644 plugin/sync/build.gradle.kts
  create mode 100644 plugin/sync/proguard-rules.pro
  create mode 100644 plugin/sync/src/main/AndroidManifest.xml
@@ -34,10 +34,10 @@ fcitx5-syncd hub.
 
 diff --git a/plugin/sync/build.gradle.kts b/plugin/sync/build.gradle.kts
 new file mode 100644
-index 00000000..883a8eb9
+index 00000000..731203d8
 --- /dev/null
 +++ b/plugin/sync/build.gradle.kts
-@@ -0,0 +1,93 @@
+@@ -0,0 +1,95 @@
 +import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
 +
 +plugins {
@@ -47,18 +47,20 @@ index 00000000..883a8eb9
 +    id("org.fcitx.fcitx5.android.data-descriptor")
 +}
 +
++// 目标 ABI：与 app / plugin 共用上游的 BUILD_ABI（默认 arm64-v8a）。
++// 顶层声明，供 defaultConfig 的 abiFilters 与 buildGoCore 的 gomobile target 共用。
++val buildAbi: String = providers.environmentVariable("BUILD_ABI")
++    .orElse(providers.gradleProperty("buildABI"))
++    .orElse("arm64-v8a")
++    .get()
++
 +android {
 +    namespace = "org.fcitx.fcitx5.android.plugin.sync"
 +
 +    defaultConfig {
 +        applicationId = "org.fcitx.fcitx5.android.sync.plugin.sync"
-+        // 只打包指定 ABI 的 native 库（含 Go 核心 libgojni.so）。
-+        // 与 app/plugin 一致地读取 BUILD_ABI 环境变量，默认 arm64-v8a：
-+        // 不这样做此插件会把 4 个 ABI 的 Go 核心全部塞进一个 universal APK（>40MB）。
-+        val buildAbi: String = providers.environmentVariable("BUILD_ABI")
-+            .orElse(providers.gradleProperty("buildABI"))
-+            .orElse("arm64-v8a")
-+            .get()
++        // 只打包目标 ABI 的 native 库（含 Go 核心 libgojni.so，见 buildAbi）。
++        // 不这样做此插件会把 4 个 ABI 的 Go 核心全塞进一个 universal APK（>40MB）。
 +        ndk {
 +            abiFilters.clear()
 +            abiFilters.addAll(buildAbi.split(",").map { it.trim() }.filter { it.isNotEmpty() })
@@ -115,7 +117,7 @@ index 00000000..883a8eb9
 +        "gomobile", "bind",
 +        // 只为目标 ABI 编译 Go 核心（gomobile target 语法：android/<goarch>），
 +        // 避免白白编译 4 个架构。
-+        "-target=android/" + goArchForAbi(buildAbi),
++        "-target=android/" + goArchForAbi(buildAbi.split(",").first().trim()),
 +        "-androidapi", "23",
 +        "-o", coreAar.absolutePath,
 +        "./syncclient",
