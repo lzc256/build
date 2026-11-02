@@ -24,9 +24,10 @@ The date describes the source commit, not when the image was built. A runtime
 - `build-version`: embed the checked-out source commit date and hash.
 - `secondary-domain`: treat every host other than `ServerAddress` as a restricted
   entry point. A secondary domain answers `/api/status` as if the primary address,
-  OIDC, Passkey and third-party sign-in had never been configured, rejects those
-  endpoints with `403 PRIMARY_ORIGIN_REQUIRED`, and keeps payment redirects and
-  Midjourney image URLs on the address the browser is using. See "Secondary
+  OIDC, Passkey and third-party sign-in had never been configured, and keeps
+  payment redirects and Midjourney image URLs on the address the browser is
+  using. Its sign-in endpoints answer like a stock instance whose provider is not
+  configured, so nothing reveals that another address exists. See "Secondary
   domain" below.
 
 Protocol conversion and model configuration use the upstream implementation.
@@ -42,9 +43,19 @@ secondary domain must not learn that the primary one exists, so there:
   and no third-party provider ids. The SPA builds its links from
   `window.location.origin` when these values are empty, so it needs no change and
   shows only password sign-in.
-- `/api/oauth/state`, `/api/oauth/{provider}`, the WeChat and Telegram OAuth
-  routes and the Passkey login routes answer `403 PRIMARY_ORIGIN_REQUIRED`.
-  Hiding a button is not enough: the routes themselves must refuse the request.
+- The sign-in endpoints answer exactly like a stock instance whose provider is
+  not configured, instead of rejecting with a code of their own. A dedicated
+  response — a `403`, a bespoke error code — would itself announce that this
+  instance has another, hidden address:
+  - `POST /api/oauth/state` → the body an unknown provider gets
+    (`Invalid parameters`).
+  - `GET /api/oauth/{provider}` → the body an unknown provider gets
+    (`Unknown OAuth provider`).
+  - WeChat, Passkey login and Passkey second factor → their own "not enabled"
+    or "method unavailable" responses, produced by the same branches that run on
+    a site without them.
+  - Telegram keeps its permanent `410 TELEGRAM_LEGACY_AUTH_REMOVED`, so it needs
+    no guard at all.
 - `GET /api/verify/methods` drops linked-provider step-up verification, so
   sensitive actions fall back to the password.
 - Payment return URLs, Stripe success/cancel URLs and Midjourney image URLs use
@@ -56,6 +67,18 @@ Deployment notes:
   Leave it empty only for a single-address deployment; an empty value keeps every
   request primary. The patch drops the upstream `http://localhost:3000`
   compile-time default so a fresh install cannot be mistaken for a secondary one.
+- The primary/secondary decision reads `X-Forwarded-Proto` and `X-Forwarded-Host`,
+  so the reverse proxy must **overwrite** them rather than pass client values
+  through:
+
+  ```nginx
+  proxy_set_header Host              $host;
+  proxy_set_header X-Forwarded-Host  $host;    # not $http_x_forwarded_host
+  proxy_set_header X-Forwarded-Proto $scheme;
+  ```
+
+  With `$host`, a client-supplied header is discarded and the split cannot be
+  spoofed; if the client can choose the value, it can pose as the primary site.
 - Both origins must be listed for session cookies:
   `SESSION_COOKIE_SECURE=true` and
   `SESSION_COOKIE_TRUSTED_URL=https://panel.example.com,https://shop.example.net`.

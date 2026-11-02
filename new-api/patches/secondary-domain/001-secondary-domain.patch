@@ -1,6 +1,6 @@
 diff --git a/common/site_origin.go b/common/site_origin.go
 new file mode 100644
-index 000000000..ea028f9b8
+index 00000000..ea028f9b
 --- /dev/null
 +++ b/common/site_origin.go
 @@ -0,0 +1,37 @@
@@ -43,7 +43,7 @@ index 000000000..ea028f9b8
 +}
 diff --git a/common/site_origin_test.go b/common/site_origin_test.go
 new file mode 100644
-index 000000000..2b3aff803
+index 00000000..2b3aff80
 --- /dev/null
 +++ b/common/site_origin_test.go
 @@ -0,0 +1,96 @@
@@ -143,8 +143,36 @@ index 000000000..2b3aff803
 +	_, ok := RequestPublicOrigin(nil)
 +	assert.False(t, ok)
 +}
+diff --git a/controller/login_verification.go b/controller/login_verification.go
+index 8f08d82f..e0b2e7f2 100644
+--- a/controller/login_verification.go
++++ b/controller/login_verification.go
+@@ -40,6 +40,11 @@ func VerifyLogin(c *gin.Context) {
+ }
+ 
+ func LoginPasskeyBegin(c *gin.Context) {
++	if isSecondaryDomainRequest(c) {
++		// Same body as an account that has no passkey enrolled.
++		writeSecurityOperationError(c, service.ErrVerificationUnavailable)
++		return
++	}
+ 	var request struct {
+ 		FlowToken string `json:"flow_token"`
+ 		RPID      string `json:"rp_id"`
+@@ -85,6 +90,11 @@ func LoginPasskeyBegin(c *gin.Context) {
+ }
+ 
+ func LoginPasskeyFinish(c *gin.Context) {
++	if isSecondaryDomainRequest(c) {
++		// Same body as an account that has no passkey enrolled.
++		writeSecurityOperationError(c, service.ErrVerificationUnavailable)
++		return
++	}
+ 	var request struct {
+ 		FlowToken        string          `json:"flow_token"`
+ 		PasskeyFlowToken string          `json:"passkey_flow_token"`
 diff --git a/controller/midjourney.go b/controller/midjourney.go
-index de465bc7b..f41197b1a 100644
+index de465bc7..f41197b1 100644
 --- a/controller/midjourney.go
 +++ b/controller/midjourney.go
 @@ -14,7 +14,6 @@ import (
@@ -174,10 +202,10 @@ index de465bc7b..f41197b1a 100644
  		}
  	}
 diff --git a/controller/misc.go b/controller/misc.go
-index fe7f7eba0..9dac942dd 100644
+index e75331ef..3b85e0e0 100644
 --- a/controller/misc.go
 +++ b/controller/misc.go
-@@ -166,6 +166,11 @@ func GetStatus(c *gin.Context) {
+@@ -168,6 +168,11 @@ func GetStatus(c *gin.Context) {
  		data["custom_oauth_providers"] = providersInfo
  	}
  
@@ -189,8 +217,58 @@ index fe7f7eba0..9dac942dd 100644
  	c.JSON(http.StatusOK, gin.H{
  		"success": true,
  		"message": "",
+diff --git a/controller/oauth.go b/controller/oauth.go
+index ee8e3561..11447c41 100644
+--- a/controller/oauth.go
++++ b/controller/oauth.go
+@@ -44,6 +44,11 @@ func providerParams(name string) map[string]any {
+ 
+ // GenerateOAuthCode generates a state code for OAuth CSRF protection
+ func GenerateOAuthCode(c *gin.Context) {
++	if isSecondaryDomainRequest(c) {
++		// Same body as an unregistered provider below.
++		common.ApiErrorT(c, "Invalid parameters")
++		return
++	}
+ 	var request oauthStateRequest
+ 	if err := common.DecodeJson(c.Request.Body, &request); err != nil {
+ 		common.ApiErrorT(c, "Invalid parameters")
+@@ -145,6 +150,11 @@ func GenerateOAuthCode(c *gin.Context) {
+ // HandleOAuth handles OAuth callback for all standard OAuth providers
+ func HandleOAuth(c *gin.Context) {
+ 	providerName := c.Param("provider")
++	if isSecondaryDomainRequest(c) {
++		// Same body as an unregistered provider below.
++		writeAccountStatusError(c, http.StatusBadRequest, "Unknown OAuth provider")
++		return
++	}
+ 	provider := oauth.GetProvider(providerName)
+ 	if provider == nil {
+ 		writeAccountStatusError(c, http.StatusBadRequest, "Unknown OAuth provider")
+diff --git a/controller/passkey.go b/controller/passkey.go
+index aed8ded0..e81566a3 100644
+--- a/controller/passkey.go
++++ b/controller/passkey.go
+@@ -269,7 +269,7 @@ func PasskeyStatus(c *gin.Context) {
+ }
+ 
+ func PasskeyLoginBegin(c *gin.Context) {
+-	if !system_setting.PasskeySettingsSnapshot().Enabled {
++	if isSecondaryDomainRequest(c) || !system_setting.PasskeySettingsSnapshot().Enabled {
+ 		common.ApiErrorT(c, "Passkey authentication is disabled.")
+ 		return
+ 	}
+@@ -318,7 +318,7 @@ func PasskeyLoginBegin(c *gin.Context) {
+ }
+ 
+ func PasskeyLoginFinish(c *gin.Context) {
+-	if !system_setting.PasskeySettingsSnapshot().Enabled {
++	if isSecondaryDomainRequest(c) || !system_setting.PasskeySettingsSnapshot().Enabled {
+ 		common.ApiErrorT(c, "Passkey authentication is disabled.")
+ 		return
+ 	}
 diff --git a/controller/passkey_test.go b/controller/passkey_test.go
-index 8fc445680..7050e9a73 100644
+index 8fc44568..7050e9a7 100644
 --- a/controller/passkey_test.go
 +++ b/controller/passkey_test.go
 @@ -67,7 +67,7 @@ func TestGetStatusDoesNotExposePasskeyOrigins(t *testing.T) {
@@ -203,7 +281,7 @@ index 8fc445680..7050e9a73 100644
  			GetStatus(context)
  
 diff --git a/controller/payment_webhook_availability_test.go b/controller/payment_webhook_availability_test.go
-index ab596d5b4..1910c7cc0 100644
+index ab596d5b..1910c7cc 100644
 --- a/controller/payment_webhook_availability_test.go
 +++ b/controller/payment_webhook_availability_test.go
 @@ -241,9 +241,10 @@ func TestEpayCallbacksVerifyBeforeSettlement(t *testing.T) {
@@ -221,7 +299,7 @@ index ab596d5b4..1910c7cc0 100644
  	}
  	router := gin.New()
 diff --git a/controller/return_path.go b/controller/return_path.go
-index 55c348e26..9a5005eeb 100644
+index 55c348e2..9a5005ee 100644
 --- a/controller/return_path.go
 +++ b/controller/return_path.go
 @@ -3,10 +3,24 @@ package controller
@@ -253,7 +331,7 @@ index 55c348e26..9a5005eeb 100644
 +	return origin
  }
 diff --git a/controller/return_path_test.go b/controller/return_path_test.go
-index f4f499b32..0bcd516ec 100644
+index f4f499b3..0bcd516e 100644
 --- a/controller/return_path_test.go
 +++ b/controller/return_path_test.go
 @@ -1,25 +1,61 @@
@@ -330,7 +408,7 @@ index f4f499b32..0bcd516ec 100644
 +	assert.Equal(t, "https://gateway.example.com/newapi", requestBaseURL(c))
  }
 diff --git a/controller/secure_verification.go b/controller/secure_verification.go
-index 0626f9570..1a5176e7e 100644
+index 0626f957..1a5176e7 100644
 --- a/controller/secure_verification.go
 +++ b/controller/secure_verification.go
 @@ -29,6 +29,12 @@ func GetVerificationMethods(c *gin.Context) {
@@ -347,7 +425,7 @@ index 0626f9570..1a5176e7e 100644
  }
  
 diff --git a/controller/security_enrollment_test.go b/controller/security_enrollment_test.go
-index bb5a8e064..58fd93b20 100644
+index 6e031ebe..bd3bf77e 100644
 --- a/controller/security_enrollment_test.go
 +++ b/controller/security_enrollment_test.go
 @@ -118,7 +118,8 @@ func setupSecurityEnrollmentTest(t *testing.T) (*model.User, service.AuthIdentit
@@ -362,16 +440,17 @@ index bb5a8e064..58fd93b20 100644
  	c.Set("id", identity.UserID)
 diff --git a/controller/site_scope.go b/controller/site_scope.go
 new file mode 100644
-index 000000000..e34977555
+index 00000000..ac3aa03e
 --- /dev/null
 +++ b/controller/site_scope.go
-@@ -0,0 +1,58 @@
+@@ -0,0 +1,68 @@
 +package controller
 +
 +import (
 +	"slices"
 +
 +	"github.com/QuantumNous/new-api/service"
++	"github.com/QuantumNous/new-api/setting/system_setting"
 +
 +	"github.com/gin-gonic/gin"
 +)
@@ -424,9 +503,108 @@ index 000000000..e34977555
 +	})
 +	return requirements
 +}
++
++// isSecondaryDomainRequest reports whether a browser reached this instance
++// through an address other than ServerAddress. Sign-in providers are hidden
++// there, and the endpoints answer exactly like a stock instance whose provider
++// is not configured: a dedicated response (a distinct code, an outright 403)
++// would tell an observer that another, hidden address exists.
++func isSecondaryDomainRequest(c *gin.Context) bool {
++	return !system_setting.IsPrimaryRequest(c.Request)
++}
+diff --git a/controller/site_scope_masking_test.go b/controller/site_scope_masking_test.go
+new file mode 100644
+index 00000000..a10dbaa9
+--- /dev/null
++++ b/controller/site_scope_masking_test.go
+@@ -0,0 +1,84 @@
++package controller
++
++import (
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"testing"
++
++	"github.com/QuantumNous/new-api/common"
++	"github.com/QuantumNous/new-api/setting/system_setting"
++	"github.com/gin-gonic/gin"
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++)
++
++// A secondary domain must not answer differently from a stock instance whose
++// providers are not configured: any dedicated code, status or hint would reveal
++// that another, hidden address exists.
++func TestSecondaryDomainLoginRejectionsLookLikeUnconfiguredFeatures(t *testing.T) {
++	previousAddress := system_setting.ServerAddress
++	previousWeChat := common.WeChatAuthEnabled
++	previousOptionMap := common.OptionMap
++	t.Cleanup(func() {
++		system_setting.ServerAddress = previousAddress
++		common.WeChatAuthEnabled = previousWeChat
++		common.OptionMap = previousOptionMap
++	})
++	system_setting.ServerAddress = "https://panel.example.com"
++	common.OptionMap = map[string]string{}
++
++	secondary := func(method, target, body string, handler gin.HandlerFunc) *httptest.ResponseRecorder {
++		response := httptest.NewRecorder()
++		c, _ := gin.CreateTestContext(response)
++		c.Request = httptest.NewRequest(method, target, strings.NewReader(body))
++		c.Request.Header.Set("Content-Type", "application/json")
++		c.Params = gin.Params{{Key: "provider", Value: "oidc"}}
++		handler(c)
++		return response
++	}
++
++	// Unknown provider: same body, same status, no trace of this patch.
++	t.Run("oauth state", func(t *testing.T) {
++		response := secondary(http.MethodPost, "https://shop.example.net/api/oauth/state",
++			`{"provider":"oidc","intent":"login"}`, GenerateOAuthCode)
++		assert.Equal(t, http.StatusOK, response.Code)
++		assert.NotContains(t, response.Body.String(), "PRIMARY_ORIGIN")
++		assert.NotContains(t, response.Body.String(), "panel.example.com")
++		assert.Contains(t, response.Body.String(), `"success":false`)
++	})
++
++	t.Run("provider callback", func(t *testing.T) {
++		response := secondary(http.MethodGet, "https://shop.example.net/api/oauth/oidc",
++			"", HandleOAuth)
++		assert.Equal(t, http.StatusBadRequest, response.Code)
++		assert.Contains(t, response.Body.String(), "Unknown OAuth provider")
++		assert.NotContains(t, response.Body.String(), "PRIMARY_ORIGIN")
++	})
++
++	t.Run("wechat", func(t *testing.T) {
++		common.WeChatAuthEnabled = true
++		response := secondary(http.MethodGet, "https://shop.example.net/api/oauth/wechat",
++			"", WeChatAuth)
++		assert.Equal(t, http.StatusOK, response.Code)
++		assert.Contains(t, response.Body.String(), "has not been enabled by administrator")
++		assert.NotContains(t, response.Body.String(), "PRIMARY_ORIGIN")
++	})
++
++	t.Run("passkey login", func(t *testing.T) {
++		response := secondary(http.MethodPost, "https://shop.example.net/api/user/passkey/login/begin",
++			`{}`, PasskeyLoginBegin)
++		assert.Equal(t, http.StatusOK, response.Code)
++		assert.Contains(t, response.Body.String(), "Passkey authentication is disabled")
++		assert.NotContains(t, response.Body.String(), "PRIMARY_ORIGIN")
++	})
++
++	// The primary address keeps the provider: the request reaches the stock
++	// state check instead of being answered as an unknown provider.
++	t.Run("primary keeps provider", func(t *testing.T) {
++		response := secondary(http.MethodGet, "https://panel.example.com/api/oauth/oidc", "", HandleOAuth)
++		require.Equal(t, http.StatusForbidden, response.Code)
++		assert.Contains(t, response.Body.String(), "State parameter is empty or mismatched")
++		assert.NotContains(t, response.Body.String(), "Unknown OAuth provider")
++	})
++}
 diff --git a/controller/site_scope_test.go b/controller/site_scope_test.go
 new file mode 100644
-index 000000000..3d29b018d
+index 00000000..3d29b018
 --- /dev/null
 +++ b/controller/site_scope_test.go
 @@ -0,0 +1,214 @@
@@ -645,7 +823,7 @@ index 000000000..3d29b018d
 +	}
 +}
 diff --git a/controller/subscription_payment_epay.go b/controller/subscription_payment_epay.go
-index 3654ee6cc..69b42dd1a 100644
+index 3654ee6c..69b42dd1 100644
 --- a/controller/subscription_payment_epay.go
 +++ b/controller/subscription_payment_epay.go
 @@ -176,7 +176,7 @@ func SubscriptionEpayReturn(c *gin.Context) {
@@ -694,7 +872,7 @@ index 3654ee6cc..69b42dd1a 100644
 +	c.Redirect(http.StatusFound, requestBaseURL(c)+"/wallet?pay=pending")
  }
 diff --git a/controller/subscription_payment_stripe.go b/controller/subscription_payment_stripe.go
-index e287a392b..97eff799c 100644
+index e287a392..97eff799 100644
 --- a/controller/subscription_payment_stripe.go
 +++ b/controller/subscription_payment_stripe.go
 @@ -79,7 +79,7 @@ func SubscriptionRequestStripePay(c *gin.Context) {
@@ -724,7 +902,7 @@ index e287a392b..97eff799c 100644
  			{
  				Price:    stripe.String(priceId),
 diff --git a/controller/topup.go b/controller/topup.go
-index 3ee8125cc..502c7d1b8 100644
+index 3ee8125c..502c7d1b 100644
 --- a/controller/topup.go
 +++ b/controller/topup.go
 @@ -313,7 +313,7 @@ func RequestEpay(c *gin.Context) {
@@ -737,7 +915,7 @@ index 3ee8125cc..502c7d1b8 100644
  	tradeNo := fmt.Sprintf("%s%d", common.GetRandomString(6), time.Now().Unix())
  	tradeNo = fmt.Sprintf("USR%dNO%s", id, tradeNo)
 diff --git a/controller/topup_stripe.go b/controller/topup_stripe.go
-index 35b1bcf09..e670d0490 100644
+index 35b1bcf0..e670d049 100644
 --- a/controller/topup_stripe.go
 +++ b/controller/topup_stripe.go
 @@ -109,7 +109,7 @@ func (*StripeAdaptor) RequestPay(c *gin.Context, req *StripePayRequest) {
@@ -775,7 +953,7 @@ index 35b1bcf09..e670d0490 100644
  
  	params := &stripe.CheckoutSessionParams{
 diff --git a/controller/topup_waffo.go b/controller/topup_waffo.go
-index 85a2bac87..ab91a7660 100644
+index 85a2bac8..ab91a766 100644
 --- a/controller/topup_waffo.go
 +++ b/controller/topup_waffo.go
 @@ -251,7 +251,7 @@ func RequestWaffoPay(c *gin.Context) {
@@ -787,42 +965,30 @@ index 85a2bac87..ab91a7660 100644
  	if setting.WaffoReturnUrl != "" {
  		returnUrl = setting.WaffoReturnUrl
  	}
-diff --git a/middleware/primary_origin.go b/middleware/primary_origin.go
-new file mode 100644
-index 000000000..681bd4b76
---- /dev/null
-+++ b/middleware/primary_origin.go
-@@ -0,0 +1,28 @@
-+package middleware
-+
-+import (
-+	"net/http"
-+
-+	"github.com/QuantumNous/new-api/setting/system_setting"
-+
-+	"github.com/gin-gonic/gin"
-+)
-+
-+// PrimaryOriginOnly rejects authentication endpoints reached through a
-+// secondary domain. Hiding a provider from /api/status only removes the button:
-+// without this guard, anyone who knows the route could still start an OIDC
-+// login from a secondary address and be handed the primary address by the
-+// identity provider.
-+func PrimaryOriginOnly() gin.HandlerFunc {
-+	return func(c *gin.Context) {
-+		if system_setting.IsPrimaryRequest(c.Request) {
-+			c.Next()
-+			return
-+		}
-+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
-+			"success": false,
-+			"code":    "PRIMARY_ORIGIN_REQUIRED",
-+			"message": "This sign-in method is not available on this address.",
-+		})
-+	}
-+}
+diff --git a/controller/wechat.go b/controller/wechat.go
+index d3e46a0c..c5126dee 100644
+--- a/controller/wechat.go
++++ b/controller/wechat.go
+@@ -57,7 +57,7 @@ func getWeChatIdByCode(code string) (string, error) {
+ }
+ 
+ func WeChatAuth(c *gin.Context) {
+-	if !common.WeChatAuthEnabled {
++	if isSecondaryDomainRequest(c) || !common.WeChatAuthEnabled {
+ 		common.ApiErrorT(c, "{{provider}} login and registration has not been enabled by administrator", providerParams("WeChat"))
+ 		return
+ 	}
+@@ -118,7 +118,7 @@ func WeChatBind(c *gin.Context) {
+ 	defer func() {
+ 		recordUserSecurityAudit(c, identity.UserID, "user.binding_bind", map[string]any{"provider": "wechat", "success": succeeded, "notification_failed": notificationFailed})
+ 	}()
+-	if !common.WeChatAuthEnabled {
++	if isSecondaryDomainRequest(c) || !common.WeChatAuthEnabled {
+ 		common.ApiErrorT(c, "{{provider}} login and registration has not been enabled by administrator", providerParams("WeChat"))
+ 		return
+ 	}
 diff --git a/oauth/discord.go b/oauth/discord.go
-index 805068c76..248abde87 100644
+index 805068c7..248abde8 100644
 --- a/oauth/discord.go
 +++ b/oauth/discord.go
 @@ -3,7 +3,6 @@ package oauth
@@ -843,7 +1009,7 @@ index 805068c76..248abde87 100644
  	values.Set("client_id", settings.ClientId)
  	values.Set("client_secret", settings.ClientSecret)
 diff --git a/oauth/generic.go b/oauth/generic.go
-index 9132bae62..bc0442524 100644
+index 9132bae6..bc044252 100644
 --- a/oauth/generic.go
 +++ b/oauth/generic.go
 @@ -17,7 +17,6 @@ import (
@@ -864,7 +1030,7 @@ index 9132bae62..bc0442524 100644
  	values.Set("grant_type", "authorization_code")
  	values.Set("code", code)
 diff --git a/oauth/oidc.go b/oauth/oidc.go
-index 0ecc92cf2..735eb27cf 100644
+index 0ecc92cf..735eb27c 100644
 --- a/oauth/oidc.go
 +++ b/oauth/oidc.go
 @@ -3,7 +3,6 @@ package oauth
@@ -886,7 +1052,7 @@ index 0ecc92cf2..735eb27cf 100644
  	values.Set("client_secret", settings.ClientSecret)
 diff --git a/oauth/redirect_base.go b/oauth/redirect_base.go
 new file mode 100644
-index 000000000..aa7c38239
+index 00000000..aa7c3823
 --- /dev/null
 +++ b/oauth/redirect_base.go
 @@ -0,0 +1,20 @@
@@ -912,7 +1078,7 @@ index 000000000..aa7c38239
 +}
 diff --git a/oauth/redirect_base_test.go b/oauth/redirect_base_test.go
 new file mode 100644
-index 000000000..b503501e3
+index 00000000..b503501e
 --- /dev/null
 +++ b/oauth/redirect_base_test.go
 @@ -0,0 +1,28 @@
@@ -945,7 +1111,7 @@ index 000000000..b503501e3
 +	assert.Equal(t, "", redirectBase())
 +}
 diff --git a/oauth/telegram.go b/oauth/telegram.go
-index a84cccdec..4f6e0aa11 100644
+index a84cccde..4f6e0aa1 100644
 --- a/oauth/telegram.go
 +++ b/oauth/telegram.go
 @@ -54,7 +54,7 @@ func NewTelegramOAuthFlow() (*TelegramOAuthFlow, error) {
@@ -966,54 +1132,9 @@ index a84cccdec..4f6e0aa11 100644
  		return nil, ErrTelegramOAuthFailed
  	}
  	values := url.Values{
-diff --git a/router/api-router.go b/router/api-router.go
-index 1009affbf..0abe3ae39 100644
---- a/router/api-router.go
-+++ b/router/api-router.go
-@@ -47,18 +47,18 @@ func SetApiRouter(router *gin.Engine) {
- 		apiRouter.GET("/reset_password", middleware.CriticalRateLimit(), middleware.TurnstileCheck(), controller.SendPasswordResetEmail)
- 		apiRouter.POST("/user/reset", middleware.CriticalRateLimit(), anonymousRequestBodyLimit, controller.ResetPassword)
- 		// OAuth routes - specific routes must come before :provider wildcard
--		apiRouter.POST("/oauth/state", middleware.CriticalRateLimit(), middleware.DisableCache(), middleware.TryUserAuth(), anonymousRequestBodyLimit, controller.GenerateOAuthCode)
-+		apiRouter.POST("/oauth/state", middleware.PrimaryOriginOnly(), middleware.CriticalRateLimit(), middleware.DisableCache(), middleware.TryUserAuth(), anonymousRequestBodyLimit, controller.GenerateOAuthCode)
- 		apiRouter.POST("/oauth/email/bind/start", middleware.UserAuth(), middleware.CriticalRateLimit(), middleware.UserCriticalRateLimit("account-security"), middleware.EmailVerificationRateLimit(), middleware.DisableCache(), controller.EmailBindStart)
- 		apiRouter.POST("/oauth/email/bind/resend", middleware.UserAuth(), middleware.CriticalRateLimit(), middleware.UserCriticalRateLimit("account-security"), middleware.EmailVerificationRateLimit(), middleware.DisableCache(), controller.EmailBindResend)
- 		apiRouter.POST("/oauth/email/bind", middleware.UserAuth(), middleware.CriticalRateLimit(), middleware.UserCriticalRateLimit("account-security"), middleware.DisableCache(), controller.EmailBind)
- 		// WeChat uses its existing authorization-code service.
--		apiRouter.GET("/oauth/wechat", middleware.CriticalRateLimit(), middleware.DisableCache(), controller.WeChatAuth)
--		apiRouter.POST("/oauth/wechat/bind", middleware.UserAuth(), middleware.CriticalRateLimit(), controller.WeChatBind)
--		apiRouter.GET("/oauth/telegram/login", middleware.CriticalRateLimit(), middleware.DisableCache(), controller.TelegramLegacyAuth)
--		apiRouter.POST("/oauth/telegram/bind/start", middleware.UserAuth(), middleware.CriticalRateLimit(), middleware.DisableCache(), controller.TelegramLegacyAuth)
--		apiRouter.GET("/oauth/telegram/bind/:flow_token", middleware.CriticalRateLimit(), middleware.DisableCache(), controller.TelegramLegacyAuth)
-+		apiRouter.GET("/oauth/wechat", middleware.PrimaryOriginOnly(), middleware.CriticalRateLimit(), middleware.DisableCache(), controller.WeChatAuth)
-+		apiRouter.POST("/oauth/wechat/bind", middleware.PrimaryOriginOnly(), middleware.UserAuth(), middleware.CriticalRateLimit(), controller.WeChatBind)
-+		apiRouter.GET("/oauth/telegram/login", middleware.PrimaryOriginOnly(), middleware.CriticalRateLimit(), middleware.DisableCache(), controller.TelegramLegacyAuth)
-+		apiRouter.POST("/oauth/telegram/bind/start", middleware.PrimaryOriginOnly(), middleware.UserAuth(), middleware.CriticalRateLimit(), middleware.DisableCache(), controller.TelegramLegacyAuth)
-+		apiRouter.GET("/oauth/telegram/bind/:flow_token", middleware.PrimaryOriginOnly(), middleware.CriticalRateLimit(), middleware.DisableCache(), controller.TelegramLegacyAuth)
- 		// Standard OAuth providers (GitHub, Discord, OIDC, LinuxDO, Telegram) - unified route
--		apiRouter.GET("/oauth/:provider", middleware.CriticalRateLimit(), middleware.DisableCache(), middleware.TryUserAuth(), controller.HandleOAuth)
-+		apiRouter.GET("/oauth/:provider", middleware.PrimaryOriginOnly(), middleware.CriticalRateLimit(), middleware.DisableCache(), middleware.TryUserAuth(), controller.HandleOAuth)
- 		apiRouter.GET("/ratio_config", middleware.CriticalRateLimit(), controller.GetRatioConfig)
- 
- 		apiRouter.POST("/stripe/webhook", anonymousRequestBodyLimit, controller.StripeWebhook)
-@@ -81,10 +81,10 @@ func SetApiRouter(router *gin.Engine) {
- 			userRoute.POST("/login", middleware.CriticalRateLimit(), middleware.DisableCache(), anonymousRequestBodyLimit, middleware.TurnstileCheck(), controller.Login)
- 			userRoute.POST("/login/2fa", middleware.CriticalRateLimit(), middleware.DisableCache(), anonymousRequestBodyLimit, controller.Verify2FALogin)
- 			userRoute.POST("/login/verify", middleware.CriticalRateLimit(), middleware.DisableCache(), anonymousRequestBodyLimit, controller.VerifyLogin)
--			userRoute.POST("/login/passkey/begin", middleware.CriticalRateLimit(), middleware.DisableCache(), anonymousRequestBodyLimit, controller.LoginPasskeyBegin)
--			userRoute.POST("/login/passkey/finish", middleware.CriticalRateLimit(), middleware.DisableCache(), anonymousRequestBodyLimit, controller.LoginPasskeyFinish)
--			userRoute.POST("/passkey/login/begin", middleware.CriticalRateLimit(), middleware.DisableCache(), anonymousRequestBodyLimit, controller.PasskeyLoginBegin)
--			userRoute.POST("/passkey/login/finish", middleware.CriticalRateLimit(), middleware.DisableCache(), anonymousRequestBodyLimit, controller.PasskeyLoginFinish)
-+			userRoute.POST("/login/passkey/begin", middleware.PrimaryOriginOnly(), middleware.CriticalRateLimit(), middleware.DisableCache(), anonymousRequestBodyLimit, controller.LoginPasskeyBegin)
-+			userRoute.POST("/login/passkey/finish", middleware.PrimaryOriginOnly(), middleware.CriticalRateLimit(), middleware.DisableCache(), anonymousRequestBodyLimit, controller.LoginPasskeyFinish)
-+			userRoute.POST("/passkey/login/begin", middleware.PrimaryOriginOnly(), middleware.CriticalRateLimit(), middleware.DisableCache(), anonymousRequestBodyLimit, controller.PasskeyLoginBegin)
-+			userRoute.POST("/passkey/login/finish", middleware.PrimaryOriginOnly(), middleware.CriticalRateLimit(), middleware.DisableCache(), anonymousRequestBodyLimit, controller.PasskeyLoginFinish)
- 			//userRoute.POST("/tokenlog", middleware.CriticalRateLimit(), controller.TokenLog)
- 			userRoute.POST("/epay/notify", anonymousRequestBodyLimit, controller.EpayNotify)
- 			userRoute.GET("/epay/notify", controller.EpayNotify)
 diff --git a/setting/system_setting/primary_origin.go b/setting/system_setting/primary_origin.go
 new file mode 100644
-index 000000000..f3393cd7c
+index 00000000..f3393cd7
 --- /dev/null
 +++ b/setting/system_setting/primary_origin.go
 @@ -0,0 +1,42 @@
@@ -1061,7 +1182,7 @@ index 000000000..f3393cd7c
 +}
 diff --git a/setting/system_setting/primary_origin_test.go b/setting/system_setting/primary_origin_test.go
 new file mode 100644
-index 000000000..21c0a8584
+index 00000000..21c0a858
 --- /dev/null
 +++ b/setting/system_setting/primary_origin_test.go
 @@ -0,0 +1,64 @@
@@ -1130,7 +1251,7 @@ index 000000000..21c0a8584
 +	assert.True(t, IsPrimaryRequest(request))
 +}
 diff --git a/setting/system_setting/system_setting_old.go b/setting/system_setting/system_setting_old.go
-index 737bd3820..4999a5584 100644
+index 737bd382..4999a558 100644
 --- a/setting/system_setting/system_setting_old.go
 +++ b/setting/system_setting/system_setting_old.go
 @@ -1,6 +1,9 @@
