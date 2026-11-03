@@ -84,9 +84,16 @@ Deployment notes:
   `SESSION_COOKIE_TRUSTED_URL=https://panel.example.com,https://shop.example.net`.
   Cookies carry no `Domain` attribute, so each domain keeps its own session.
 - Epay (易支付) needs no fixed callback in its dashboard: `notify_url` and
-  `return_url` are sent per order. `notify_url` stays on the primary address (or
-  `CustomCallbackAddress`) because it is a server-to-server call the browser never
-  sees; `return_url` follows the buyer's domain.
+  `return_url` are sent per order. Both follow the buyer's address, because these
+  parameters are handed to the browser and posted to the cashier page — letting
+  `notify_url` name the primary address published it on every checkout. The
+  webhook then arrives on whichever domain the buyer used, so every domain the
+  instance answers on must be publicly reachable.
+- `CustomCallbackAddress` is honoured on the primary address only, and the Waffo
+  `notify`/`return` overrides likewise: on a secondary domain they are ignored in
+  favour of the request address, since a configured value names the primary
+  domain and would resurface in the checkout payload. The password-reset link
+  follows the request address for the same reason.
 - The identity provider still needs `https://panel.example.com/oauth/oidc`
   registered. The secondary domain never starts an OIDC flow, so it needs none.
 - Remaining, intentional leaks to review by content: `TaskPublicAddress`

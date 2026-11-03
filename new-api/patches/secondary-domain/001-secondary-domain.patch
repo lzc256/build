@@ -202,7 +202,7 @@ index de465bc7..f41197b1 100644
  		}
  	}
 diff --git a/controller/misc.go b/controller/misc.go
-index e75331ef..3b85e0e0 100644
+index e75331ef..d6c411df 100644
 --- a/controller/misc.go
 +++ b/controller/misc.go
 @@ -168,6 +168,11 @@ func GetStatus(c *gin.Context) {
@@ -217,6 +217,17 @@ index e75331ef..3b85e0e0 100644
  	c.JSON(http.StatusOK, gin.H{
  		"success": true,
  		"message": "",
+@@ -260,7 +265,9 @@ func SendPasswordResetEmail(c *gin.Context) {
+ 	if user, err := model.GetUniqueUserByEmail(email); err == nil {
+ 		code := common.GenerateVerificationCode(0)
+ 		common.RegisterVerificationCodeWithKey(email, code, common.PasswordResetPurpose)
+-		link := fmt.Sprintf("%s/user/reset?email=%s&token=%s", system_setting.ServerAddress, email, code)
++		// The reset page exists on every domain, so the link follows the one the
++		// request came through instead of naming the primary address.
++		link := fmt.Sprintf("%s/user/reset?email=%s&token=%s", requestBaseURL(c), email, code)
+ 		lang := user.GetSetting().Language
+ 		if lang == "" {
+ 			lang = i18n.StatedLang(c)
 diff --git a/controller/oauth.go b/controller/oauth.go
 index ee8e3561..11447c41 100644
 --- a/controller/oauth.go
@@ -299,14 +310,15 @@ index ab596d5b..1910c7cc 100644
  	}
  	router := gin.New()
 diff --git a/controller/return_path.go b/controller/return_path.go
-index 55c348e2..9a5005ee 100644
+index 55c348e2..17e6de43 100644
 --- a/controller/return_path.go
 +++ b/controller/return_path.go
-@@ -3,10 +3,24 @@ package controller
+@@ -3,10 +3,39 @@ package controller
  import (
  	"strings"
  
 +	"github.com/QuantumNous/new-api/common"
++	"github.com/QuantumNous/new-api/setting/operation_setting"
  	"github.com/QuantumNous/new-api/setting/system_setting"
 +
 +	"github.com/gin-gonic/gin"
@@ -319,6 +331,20 @@ index 55c348e2..9a5005ee 100644
 +// using, so redirects and links handed to that browser stay on the address it
 +// opened. A single-address deployment is unaffected: the primary origin keeps
 +// ServerAddress verbatim, which preserves a configured path prefix.
++// paymentCallbackBaseURL is the base for URLs the payment gateway uses to reach
++// this instance. They end up in the parameters the browser posts to the cashier,
++// so on a secondary domain they must name that domain and nothing else; on the
++// primary address an explicitly configured CustomCallbackAddress still wins, as
++// that is where the operator wants the gateway to call.
++func paymentCallbackBaseURL(c *gin.Context) string {
++	if !isSecondaryDomainRequest(c) {
++		if custom := strings.TrimRight(strings.TrimSpace(operation_setting.CustomCallbackAddress), "/"); custom != "" {
++			return custom
++		}
++	}
++	return requestBaseURL(c)
++}
++
 +func requestBaseURL(c *gin.Context) string {
 +	configured := strings.TrimRight(strings.TrimSpace(system_setting.ServerAddress), "/")
 +	origin, ok := common.RequestPublicOrigin(c.Request)
@@ -331,16 +357,17 @@ index 55c348e2..9a5005ee 100644
 +	return origin
  }
 diff --git a/controller/return_path_test.go b/controller/return_path_test.go
-index f4f499b3..0bcd516e 100644
+index f4f499b3..b6d9d18b 100644
 --- a/controller/return_path_test.go
 +++ b/controller/return_path_test.go
-@@ -1,25 +1,61 @@
+@@ -1,25 +1,88 @@
  package controller
  
  import (
 +	"net/http/httptest"
  	"testing"
  
++	"github.com/QuantumNous/new-api/setting/operation_setting"
  	"github.com/QuantumNous/new-api/setting/system_setting"
 +	"github.com/gin-gonic/gin"
  	"github.com/stretchr/testify/assert"
@@ -406,6 +433,32 @@ index f4f499b3..0bcd516e 100644
 +
 +	c := newBaseURLRequest(t, "gateway.example.com", map[string]string{"X-Forwarded-Proto": "https"})
 +	assert.Equal(t, "https://gateway.example.com/newapi", requestBaseURL(c))
++}
++
++func TestPaymentCallbackBaseURLNeverNamesThePrimaryDomain(t *testing.T) {
++	previousAddress := system_setting.ServerAddress
++	previousCustom := operation_setting.CustomCallbackAddress
++	t.Cleanup(func() {
++		system_setting.ServerAddress = previousAddress
++		operation_setting.CustomCallbackAddress = previousCustom
++	})
++	system_setting.ServerAddress = "https://panel.example.com"
++	operation_setting.CustomCallbackAddress = ""
++
++	// The gateway parameters end up in the browser, so a secondary domain must
++	// sign its own webhook URL instead of pointing at the primary one.
++	secondary := newBaseURLRequest(t, "shop.example.net", map[string]string{"X-Forwarded-Proto": "https"})
++	assert.Equal(t, "https://shop.example.net", paymentCallbackBaseURL(secondary))
++	assert.Equal(t, "https://shop.example.net/api/user/epay/notify", paymentCallbackBaseURL(secondary)+"/api/user/epay/notify")
++
++	primary := newBaseURLRequest(t, "panel.example.com", map[string]string{"X-Forwarded-Proto": "https"})
++	assert.Equal(t, "https://panel.example.com", paymentCallbackBaseURL(primary))
++
++	// A configured callback address is an operator decision for the primary
++	// address only; it must not resurface on a secondary domain.
++	operation_setting.CustomCallbackAddress = "https://pay.example.org/"
++	assert.Equal(t, "https://pay.example.org", paymentCallbackBaseURL(primary))
++	assert.Equal(t, "https://shop.example.net", paymentCallbackBaseURL(secondary))
  }
 diff --git a/controller/secure_verification.go b/controller/secure_verification.go
 index 0626f957..1a5176e7 100644
@@ -823,10 +876,27 @@ index 00000000..3d29b018
 +	}
 +}
 diff --git a/controller/subscription_payment_epay.go b/controller/subscription_payment_epay.go
-index 3654ee6c..69b42dd1 100644
+index 3654ee6c..37f7386e 100644
 --- a/controller/subscription_payment_epay.go
 +++ b/controller/subscription_payment_epay.go
-@@ -176,7 +176,7 @@ func SubscriptionEpayReturn(c *gin.Context) {
+@@ -10,7 +10,6 @@ import (
+ 	"github.com/Calcium-Ion/go-epay/epay"
+ 	"github.com/QuantumNous/new-api/common"
+ 	"github.com/QuantumNous/new-api/model"
+-	"github.com/QuantumNous/new-api/service"
+ 	"github.com/QuantumNous/new-api/setting/operation_setting"
+ 	"github.com/gin-gonic/gin"
+ 	"github.com/samber/lo"
+@@ -63,7 +62,7 @@ func SubscriptionRequestEpay(c *gin.Context) {
+ 		}
+ 	}
+ 
+-	callBackAddress := service.GetCallbackAddress()
++	callBackAddress := paymentCallbackBaseURL(c)
+ 	returnUrl, err := url.Parse(callBackAddress + "/api/subscription/epay/return")
+ 	if err != nil {
+ 		common.ApiErrorT(c, "Callback URL configuration error")
+@@ -176,7 +175,7 @@ func SubscriptionEpayReturn(c *gin.Context) {
  	if c.Request.Method == "POST" {
  		// POST 请求：从 POST body 解析参数
  		if err := c.Request.ParseForm(); err != nil {
@@ -835,7 +905,7 @@ index 3654ee6c..69b42dd1 100644
  			return
  		}
  		params = lo.Reduce(lo.Keys(c.Request.PostForm), func(r map[string]string, t string, i int) map[string]string {
-@@ -192,29 +192,29 @@ func SubscriptionEpayReturn(c *gin.Context) {
+@@ -192,29 +191,29 @@ func SubscriptionEpayReturn(c *gin.Context) {
  	}
  
  	if len(params) == 0 {
@@ -902,14 +972,24 @@ index e287a392..97eff799 100644
  			{
  				Price:    stripe.String(priceId),
 diff --git a/controller/topup.go b/controller/topup.go
-index 3ee8125c..502c7d1b 100644
+index 3ee8125c..50ee2810 100644
 --- a/controller/topup.go
 +++ b/controller/topup.go
-@@ -313,7 +313,7 @@ func RequestEpay(c *gin.Context) {
+@@ -13,7 +13,6 @@ import (
+ 	"github.com/QuantumNous/new-api/common"
+ 	"github.com/QuantumNous/new-api/logger"
+ 	"github.com/QuantumNous/new-api/model"
+-	"github.com/QuantumNous/new-api/service"
+ 	"github.com/QuantumNous/new-api/setting"
+ 	"github.com/QuantumNous/new-api/setting/operation_setting"
+ 
+@@ -312,8 +311,8 @@ func RequestEpay(c *gin.Context) {
+ 		return
  	}
  
- 	callBackAddress := service.GetCallbackAddress()
+-	callBackAddress := service.GetCallbackAddress()
 -	returnUrl, _ := url.Parse(paymentReturnPath("/usage-logs"))
++	callBackAddress := paymentCallbackBaseURL(c)
 +	returnUrl, _ := url.Parse(requestBaseURL(c) + "/usage-logs")
  	notifyUrl, _ := url.Parse(callBackAddress + "/api/user/epay/notify")
  	tradeNo := fmt.Sprintf("%s%d", common.GetRandomString(6), time.Now().Unix())
@@ -953,18 +1033,36 @@ index 35b1bcf0..e670d049 100644
  
  	params := &stripe.CheckoutSessionParams{
 diff --git a/controller/topup_waffo.go b/controller/topup_waffo.go
-index 85a2bac8..ab91a766 100644
+index 85a2bac8..6522633c 100644
 --- a/controller/topup_waffo.go
 +++ b/controller/topup_waffo.go
-@@ -251,7 +251,7 @@ func RequestWaffoPay(c *gin.Context) {
- 	if setting.WaffoNotifyUrl != "" {
+@@ -12,7 +12,6 @@ import (
+ 	"github.com/QuantumNous/new-api/common"
+ 	"github.com/QuantumNous/new-api/logger"
+ 	"github.com/QuantumNous/new-api/model"
+-	"github.com/QuantumNous/new-api/service"
+ 	"github.com/QuantumNous/new-api/setting"
+ 	"github.com/QuantumNous/new-api/setting/operation_setting"
+ 	"github.com/gin-gonic/gin"
+@@ -246,13 +245,14 @@ func RequestWaffoPay(c *gin.Context) {
+ 		return
+ 	}
+ 
+-	callbackAddr := service.GetCallbackAddress()
++	secondary := isSecondaryDomainRequest(c)
++	callbackAddr := paymentCallbackBaseURL(c)
+ 	notifyUrl := callbackAddr + "/api/waffo/webhook"
+-	if setting.WaffoNotifyUrl != "" {
++	if setting.WaffoNotifyUrl != "" && !secondary {
  		notifyUrl = setting.WaffoNotifyUrl
  	}
 -	returnUrl := paymentReturnPath("/wallet?show_history=true")
+-	if setting.WaffoReturnUrl != "" {
 +	returnUrl := requestBaseURL(c) + "/wallet?show_history=true"
- 	if setting.WaffoReturnUrl != "" {
++	if setting.WaffoReturnUrl != "" && !secondary {
  		returnUrl = setting.WaffoReturnUrl
  	}
+ 
 diff --git a/controller/wechat.go b/controller/wechat.go
 index d3e46a0c..c5126dee 100644
 --- a/controller/wechat.go
