@@ -38,9 +38,26 @@ jobs:
         id: upstream
         env:
           INPUT_REF: ${{ inputs.ref }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           REF="${INPUT_REF:-${UPSTREAM_REF}}"
-          COMMIT=$(curl -fsSL "https://api.github.com/repos/${UPSTREAM_REPO}/commits/${REF}" | jq -r '.sha // empty')
+          # git ls-remote has no API quota, so it resolves branches and tags even
+          # when the anonymous GitHub API answers 403 on a shared runner IP.
+          # Full commit SHAs and the API path remain as fallbacks.
+          resolve() {
+            git ls-remote "https://github.com/${UPSTREAM_REPO}" "$1" 2>/dev/null | head -1 | cut -f1
+          }
+          COMMIT="$(resolve "refs/heads/${REF}")"
+          if [ -z "$COMMIT" ]; then
+            COMMIT="$(resolve "refs/tags/${REF}")"
+          fi
+          if [ -z "$COMMIT" ] && printf '%s' "$REF" | grep -Eq '^[0-9a-f]{40}$'; then
+            COMMIT="$REF"
+          fi
+          if [ -z "$COMMIT" ]; then
+            COMMIT=$(curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" \
+              "https://api.github.com/repos/${UPSTREAM_REPO}/commits/${REF}" 2>/dev/null | jq -r '.sha // empty')
+          fi
           if [ -z "$COMMIT" ]; then
             echo "Failed to resolve upstream ref: $REF"
             exit 1
