@@ -82,7 +82,7 @@ new file mode 100644
 index 000000000..564e8d544
 --- /dev/null
 +++ b/controller/channel_balance_script.go
-@@ -0,0 +1,603 @@
+@@ -0,0 +1,674 @@
 +package controller
 +
 +import (
@@ -92,6 +92,7 @@ index 000000000..564e8d544
 +	"fmt"
 +	"io"
 +	"math"
++	"net"
 +	"net/http"
 +	"net/url"
 +	"runtime/metrics"
@@ -135,6 +136,11 @@ index 000000000..564e8d544
 +//	newapi.environ.CHANNEL_IS_MULTI_KEY // "1" for multi-key channels, "0" otherwise
 +//
 +//	newapi.fetch({url, method?, headers?, body?}) // -> {status, headers, body}; http(s) only
++//
++// A fetch whose target is the channel base URL origin (scheme://host:port) is exempt
++// from the SSRF port/address policy, exactly like the relay client; any other target
++// keeps the project-wide SSRF checks.
++//
 +//	newapi.state.get()      // previous state, parsed ( {} on first run )
 +//	newapi.state.getRaw()   // previous state, raw string
 +//	newapi.state.save(obj)  // persist any JSON-serializable value ( <= 64KB )
@@ -632,23 +638,50 @@ index 000000000..564e8d544
 +		request.Header.Set(name, value)
 +	}
 +
-+	// Reuse the project-wide SSRF policy instead of a private address list: the
-+	// protected client validates the URL against the fetch setting, re-validates
-+	// every resolved address at dial time so a DNS answer cannot be swapped in
-+	// after the check, and re-checks each redirect.
-+	base := service.GetSSRFProtectedHTTPClient()
++	// A channel base URL is an operator-managed deployment target, not arbitrary
++	// user input: the relay already reaches it through GetHttpClient, which carries
++	// no SSRF filter, so a private address or a non-standard port is legitimate
++	// there. A fetch aimed at that exact origin follows the same policy; every
++	// other target -- a URL the script hardcodes, or a redirect off the channel
++	// origin -- keeps the project-wide SSRF checks, so a script still cannot probe
++	// the host's own network.
++	origin := requestOrigin(parsed)
++	exempt := origin != "" && origin == rt.channelOrigin()
++
++	var base *http.Client
++	if exempt {
++		base = service.GetHttpClient()
++	} else {
++		base = service.GetSSRFProtectedHTTPClient()
++	}
 +	if base == nil {
 +		return 0, nil, "", fmt.Errorf("http client is not initialized")
 +	}
 +	client := *base
 +	client.Timeout = balanceScriptFetchTimeout
-+	baseRedirect := base.CheckRedirect
 +	client.CheckRedirect = func(request *http.Request, via []*http.Request) error {
 +		if len(via) >= balanceScriptMaxRedirects {
 +			return fmt.Errorf("stopped after %d redirects", balanceScriptMaxRedirects)
 +		}
-+		if baseRedirect != nil {
-+			return baseRedirect(request, via)
++		next := requestOrigin(request.URL)
++		if exempt {
++			// The exemption is granted to the channel base URL only. Following a
++			// redirect elsewhere would let that trusted origin hand the request to a
++			// host the script never named, so the hop is refused instead of being
++			// re-judged.
++			if next != origin {
++				return fmt.Errorf("redirect to %s blocked: only the channel base URL %s is exempt from SSRF checks", next, origin)
++			}
++			return nil
++		}
++		// Re-judge every hop against the fetch setting: a public entry point must not
++		// be able to redirect the script into a private service.
++		if err := service.ValidateSSRFProtectedFetchURL(request.URL.String()); err != nil {
++			return fmt.Errorf("redirect to %s blocked: %v", request.URL.String(), err)
++		}
++		if next != origin {
++			// Never carry the channel credential to an origin the script did not name.
++			request.Header.Del("Authorization")
 +		}
 +		return nil
 +	}
@@ -673,6 +706,44 @@ index 000000000..564e8d544
 +	}
 +
 +	return response.StatusCode, headers, string(payload), nil
++}
++
++// channelOrigin normalizes the channel base URL to scheme://host:port, or "" when
++// the base URL is absent or not http(s). An empty origin exempts nothing.
++func (rt *balanceScriptRuntime) channelOrigin() string {
++	if rt.channel == nil {
++		return ""
++	}
++	parsed, err := url.Parse(rt.channel.GetBaseURL())
++	if err != nil {
++		return ""
++	}
++	return requestOrigin(parsed)
++}
++
++// requestOrigin normalizes a URL to scheme://host:port so an implicit default
++// port compares equal to an explicit one ("https://h" matches "https://h:443").
++func requestOrigin(parsed *url.URL) string {
++	if parsed == nil {
++		return ""
++	}
++	scheme := strings.ToLower(parsed.Scheme)
++	if scheme != "http" && scheme != "https" {
++		return ""
++	}
++	host := strings.ToLower(parsed.Hostname())
++	if host == "" {
++		return ""
++	}
++	port := parsed.Port()
++	if port == "" {
++		if scheme == "http" {
++			port = "80"
++		} else {
++			port = "443"
++		}
++	}
++	return scheme + "://" + net.JoinHostPort(host, port)
 +}
 +
 +// toString converts an exported goja value into a string without producing
