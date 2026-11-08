@@ -126,4 +126,7 @@ apply_patch <patch_name> <target_dir>
 - `schildi-next/` — SchildiChat Next（Element X Android 的 fork，Matrix 客户端）
   - patches: `01-voice-hold-to-talk`（语音录制支持暂停/续录、预览态「继续录音」、空输入框长按说话=按住录音/松手直发/上滑取消）
   - workflow: `.github/workflows/schildi-next-build.yml`
-  - 产物: `fdroidScDefaultRelease` 的 universal + 各 ABI split APK（上游 release 用 debug keystore 签名，无需 secrets）
+  - 产物: 只编 `arm64-v8a` split，APK 直接（不打包 zip）发布到固定 release tag `out/schildi-next`，
+    每次构建覆盖上一次，下载地址固定：
+    `https://github.com/lzc256/build/releases/download/out/schildi-next/app-fdroid-sc-default-arm64-v8a-release.apk`
+    （上游 release 用 debug keystore 签名，无需 secrets；装前需卸载其它渠道的 SchildiChat Next）

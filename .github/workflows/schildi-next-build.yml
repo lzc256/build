@@ -8,10 +8,6 @@ on:
       upstream_ref:
         description: 'schildichat-android-next branch/tag/commit. Leave empty to use latest main.'
         required: false
-      create_release:
-        description: 'Create GitHub release'
-        type: boolean
-        default: false
   push:
     paths:
       - 'schildi-next/**'
@@ -28,6 +24,11 @@ env:
   CI_GRADLE_ARG_PROPERTIES: --stacktrace --no-daemon --no-configuration-cache
   # SchildiChat only publishes the default variant: default app id is chat.schildi.android
   GRADLE_TASK: ':app:assembleFdroidScDefaultRelease'
+  # Only package the arm64-v8a split, that is the only ABI we distribute
+  BUILD_ABI: 'arm64-v8a'
+  APK_NAME: 'app-fdroid-sc-default-arm64-v8a-release.apk'
+  # Fixed tag so that the download URL stays stable and the APK is persisted
+  RELEASE_TAG: 'out/schildi-next'
 
 concurrency:
   group: schildi-next-${{ github.ref }}
@@ -119,37 +120,40 @@ jobs:
 
       - name: Build APKs
         working-directory: schildi-next-src
-        run: ./gradlew ${{ env.GRADLE_TASK }} ${{ env.CI_GRADLE_ARG_PROPERTIES }}
+        run: |
+          ./gradlew ${{ env.GRADLE_TASK }} \
+            -Pandroid.injected.build.abi=${{ env.BUILD_ABI }} \
+            ${{ env.CI_GRADLE_ARG_PROPERTIES }}
 
-      - name: Collect APKs
+      - name: Collect the arm64-v8a APK
         run: |
           rm -rf apks && mkdir -p apks
-          find schildi-next-src/app/build/outputs/apk -name '*.apk' -path '*release*' -exec cp {} apks/ \;
-          if ! ls apks/*.apk >/dev/null 2>&1; then
-            echo "::error::No release APK was produced"
-            find schildi-next-src/app/build/outputs -maxdepth 4 -type d || true
+          find schildi-next-src/app/build/outputs/apk -name "${{ env.APK_NAME }}" -exec cp {} apks/ \;
+          if [ ! -f "apks/${{ env.APK_NAME }}" ]; then
+            echo "::error::APK ${{ env.APK_NAME }} was not produced"
+            find schildi-next-src/app/build/outputs/apk -name '*.apk' || true
             exit 1
           fi
           ls -la apks
+          sha256sum "apks/${{ env.APK_NAME }}"
 
-      - name: Upload APKs
-        uses: actions/upload-artifact@v4
-        with:
-          name: schildi-next-fdroid-default-release
-          path: apks/*.apk
-          retention-days: 90
-          if-no-files-found: error
-
-      - name: Create release
-        if: github.event_name == 'workflow_dispatch' && inputs.create_release == true
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: schildi-next-${{ needs.check-update.outputs.upstream_sha }}
-          name: schildi-next ${{ needs.check-update.outputs.upstream_sha }}
-          files: apks/*.apk
-          generate_release_notes: true
+      - name: Publish the APK to ${{ env.RELEASE_TAG }} (overwrites the previous one)
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          UPSTREAM_SHA: ${{ needs.check-update.outputs.upstream_sha }}
+        run: |
+          # Drop the previous release (and its tag) so that the asset is always replaced
+          gh release delete "${RELEASE_TAG}" --yes --cleanup-tag --repo "${GITHUB_REPOSITORY}" || true
+          gh release create "${RELEASE_TAG}" "apks/${APK_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "SchildiChat Next (out)" \
+            --latest=false \
+            --notes "SchildiChat Next APK built from upstream \`${UPSTREAM_SHA}\` with the voice composer patches:
+          - long press an empty message box to record, release to send, slide up to cancel
+          - stop recording to get a preview with a \"continue recording\" button (also works after coming back from the background)
+          - the existing microphone button still records / stops as before
+
+          arm64-v8a split, signed with the upstream debug keystore: uninstall any other SchildiChat Next build before installing this one."
 
       - name: Commit successful build
         if: success()
