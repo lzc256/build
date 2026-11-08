@@ -153,7 +153,7 @@ jobs:
           - stop recording to get a preview with a \"continue recording\" button (also works after coming back from the background)
           - the existing microphone button still records / stops as before
 
-          arm64-v8a split, signed with the upstream debug keystore: uninstall any other SchildiChat Next build before installing this one."
+          arm64-v8a split, package \`chat.schildi.android.mod\`: installs next to the official SchildiChat Next instead of replacing it (separate data and login redirect), signed with the upstream debug keystore."
 
       - name: Commit successful build
         if: success()
