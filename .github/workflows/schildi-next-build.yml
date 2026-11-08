@@ -122,7 +122,7 @@ jobs:
         working-directory: schildi-next-src
         run: |
           ./gradlew ${{ env.GRADLE_TASK }} \
-            -Pandroid.injected.build.abi=${{ env.BUILD_ABI }} \
+            -PscBuildAbi=${{ env.BUILD_ABI }} \
             ${{ env.CI_GRADLE_ARG_PROPERTIES }}
 
       - name: Collect the arm64-v8a APK

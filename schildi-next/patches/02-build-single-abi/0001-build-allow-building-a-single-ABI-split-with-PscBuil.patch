@@ -1,0 +1,38 @@
+From 52d49382047167651278b32a8bdae2e5686940e2 Mon Sep 17 00:00:00 2001
+From: lzc256 <i@lzc256.com>
+Date: Sun, 8 Nov 2026 22:13:27 +0800
+Subject: [PATCH] build: allow building a single ABI split with -PscBuildAbi
+
+---
+ app/build.gradle.kts | 15 +++++++++++----
+ 1 file changed, 11 insertions(+), 4 deletions(-)
+
+diff --git a/app/build.gradle.kts b/app/build.gradle.kts
+index 19928e0d12..bd736f6edb 100644
+--- a/app/build.gradle.kts
++++ b/app/build.gradle.kts
+@@ -69,10 +69,17 @@ android {
+                 reset()
+ 
+                 if (!buildingAppBundle) {
+-                    // Specifies a list of ABIs that Gradle should create APKs for.
+-                    include("armeabi-v7a", "x86", "arm64-v8a", "x86_64")
+-                    // Generate a universal APK that includes all ABIs, so user who installs from CI tool can use this one by default.
+-                    isUniversalApk = true
++                    // SC: build a single ABI split, e.g. `-PscBuildAbi=arm64-v8a`, and skip the universal APK
++                    val scBuildAbi = providers.gradleProperty("scBuildAbi").orNull
++                    if (scBuildAbi != null) {
++                        include(scBuildAbi)
++                        isUniversalApk = false
++                    } else {
++                        // Specifies a list of ABIs that Gradle should create APKs for.
++                        include("armeabi-v7a", "x86", "arm64-v8a", "x86_64")
++                        // Generate a universal APK that includes all ABIs, so user who installs from CI tool can use this one by default.
++                        isUniversalApk = true
++                    }
+                 }
+             }
+         }
+-- 
+2.56.0
+
