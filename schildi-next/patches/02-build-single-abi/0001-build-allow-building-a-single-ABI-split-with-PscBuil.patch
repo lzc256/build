@@ -1,17 +1,33 @@
-From 52d49382047167651278b32a8bdae2e5686940e2 Mon Sep 17 00:00:00 2001
+From 0d43db9a10085d88f006c3772fad6e58ab718955 Mon Sep 17 00:00:00 2001
 From: lzc256 <i@lzc256.com>
 Date: Sun, 8 Nov 2026 22:13:27 +0800
 Subject: [PATCH] build: allow building a single ABI split with -PscBuildAbi
 
 ---
- app/build.gradle.kts | 15 +++++++++++----
- 1 file changed, 11 insertions(+), 4 deletions(-)
+ app/build.gradle.kts | 21 ++++++++++++++++-----
+ 1 file changed, 16 insertions(+), 5 deletions(-)
 
 diff --git a/app/build.gradle.kts b/app/build.gradle.kts
-index 19928e0d12..bd736f6edb 100644
+index 19928e0d12..eaac9d0d20 100644
 --- a/app/build.gradle.kts
 +++ b/app/build.gradle.kts
-@@ -69,10 +69,17 @@ android {
+@@ -49,9 +49,14 @@ android {
+         versionName = "0.11.8-ex_26_10_1"
+         targetSdk = Versions.TARGET_SDK
+ 
++        // SC: ndk abiFilters cannot be combined with a narrowed splits.abi filter, so skip them
++        // when building a single ABI split, they are only needed for the universal APK anyway
++        val scSingleAbi = providers.gradleProperty("scBuildAbi").orNull
+         // Keep abiFilter for the universalApk
+         ndk {
+-            abiFilters += listOf("armeabi-v7a", "x86", "arm64-v8a", "x86_64")
++            if (scSingleAbi == null) {
++                abiFilters += listOf("armeabi-v7a", "x86", "arm64-v8a", "x86_64")
++            }
+         }
+ 
+         // Ref: https://developer.android.com/studio/build/configure-apk-splits.html#configure-abi-split
+@@ -69,10 +74,16 @@ android {
                  reset()
  
                  if (!buildingAppBundle) {
@@ -20,9 +36,8 @@ index 19928e0d12..bd736f6edb 100644
 -                    // Generate a universal APK that includes all ABIs, so user who installs from CI tool can use this one by default.
 -                    isUniversalApk = true
 +                    // SC: build a single ABI split, e.g. `-PscBuildAbi=arm64-v8a`, and skip the universal APK
-+                    val scBuildAbi = providers.gradleProperty("scBuildAbi").orNull
-+                    if (scBuildAbi != null) {
-+                        include(scBuildAbi)
++                    if (scSingleAbi != null) {
++                        include(scSingleAbi)
 +                        isUniversalApk = false
 +                    } else {
 +                        // Specifies a list of ABIs that Gradle should create APKs for.
