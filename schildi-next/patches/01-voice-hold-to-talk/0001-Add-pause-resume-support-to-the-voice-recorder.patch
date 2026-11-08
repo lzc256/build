@@ -1,0 +1,264 @@
+From 7507febe7601feea7475e2a81ce18bb2ba3245cc Mon Sep 17 00:00:00 2001
+From: lzc256 <i@lzc256.com>
+Date: Sun, 8 Nov 2026 20:44:31 +0800
+Subject: [PATCH 1/3] Add pause/resume support to the voice recorder
+
+The recorder could only start and definitively stop a recording session, so
+there was no way to keep a single audio stream alive across an interruption
+(backgrounding, a preview the user wants to extend, ...).
+
+Add pauseRecord()/resumeRecord() to the VoiceRecorder API plus a matching
+VoiceRecorderState.Paused: pausing releases the microphone but keeps the
+encoder session (and therefore the output file) alive, and resuming appends
+to the same Ogg/Opus stream. The recorded duration is accumulated across the
+segments, excluding the paused time.
+---
+ .../voicerecorder/api/VoiceRecorder.kt        | 16 ++++
+ .../voicerecorder/api/VoiceRecorderState.kt   | 13 +++
+ .../impl/DefaultVoiceRecorder.kt              | 90 +++++++++++++++----
+ .../voicerecorder/test/FakeVoiceRecorder.kt   | 22 +++++
+ 4 files changed, 126 insertions(+), 15 deletions(-)
+
+diff --git a/libraries/voicerecorder/api/src/main/kotlin/io/element/android/libraries/voicerecorder/api/VoiceRecorder.kt b/libraries/voicerecorder/api/src/main/kotlin/io/element/android/libraries/voicerecorder/api/VoiceRecorder.kt
+index 3427f694b3..ed236bc9dc 100644
+--- a/libraries/voicerecorder/api/src/main/kotlin/io/element/android/libraries/voicerecorder/api/VoiceRecorder.kt
++++ b/libraries/voicerecorder/api/src/main/kotlin/io/element/android/libraries/voicerecorder/api/VoiceRecorder.kt
+@@ -24,6 +24,22 @@ interface VoiceRecorder {
+     @RequiresPermission(Manifest.permission.RECORD_AUDIO)
+     suspend fun startRecord()
+ 
++    /**
++     * Pause the current recording, keeping the recording session alive.
++     *
++     * The microphone is released while paused, so no audio is captured. Call [resumeRecord] to
++     * continue the same recording, or [stopRecord] to finalize it.
++     */
++    suspend fun pauseRecord()
++
++    /**
++     * Resume a recording which was paused with [pauseRecord].
++     *
++     * The audio is appended to the same file, and the elapsed time of the previous segments is kept.
++     */
++    @RequiresPermission(Manifest.permission.RECORD_AUDIO)
++    suspend fun resumeRecord()
++
+     /**
+      * Stop the current recording.
+      *
+diff --git a/libraries/voicerecorder/api/src/main/kotlin/io/element/android/libraries/voicerecorder/api/VoiceRecorderState.kt b/libraries/voicerecorder/api/src/main/kotlin/io/element/android/libraries/voicerecorder/api/VoiceRecorderState.kt
+index 0a6840658f..79708616dc 100644
+--- a/libraries/voicerecorder/api/src/main/kotlin/io/element/android/libraries/voicerecorder/api/VoiceRecorderState.kt
++++ b/libraries/voicerecorder/api/src/main/kotlin/io/element/android/libraries/voicerecorder/api/VoiceRecorderState.kt
+@@ -30,6 +30,19 @@ sealed interface VoiceRecorderState {
+         val levels: List<Float>,
+     ) : VoiceRecorderState
+ 
++    /**
++     * The recorder is paused: the session is still alive and can be resumed with
++     * [VoiceRecorder.resumeRecord].
++     *
++     * @property file The file the recording is written to. It is not finalized yet.
++     * @property elapsedTime The total time spent recording so far, excluding the paused time.
++     * @property waveform The waveform of the recording so far. All values are between 0 and 1.
++     */
++    data class Paused(
++        val file: File,
++        val elapsedTime: Duration,
++        val waveform: List<Float>,
++    ) : VoiceRecorderState
+     /**
+      * The recorder has finished recording.
+      *
+diff --git a/libraries/voicerecorder/impl/src/main/kotlin/io/element/android/libraries/voicerecorder/impl/DefaultVoiceRecorder.kt b/libraries/voicerecorder/impl/src/main/kotlin/io/element/android/libraries/voicerecorder/impl/DefaultVoiceRecorder.kt
+index 4823c67c6a..5d7cf93503 100644
+--- a/libraries/voicerecorder/impl/src/main/kotlin/io/element/android/libraries/voicerecorder/impl/DefaultVoiceRecorder.kt
++++ b/libraries/voicerecorder/impl/src/main/kotlin/io/element/android/libraries/voicerecorder/impl/DefaultVoiceRecorder.kt
+@@ -38,7 +38,7 @@ import kotlinx.coroutines.yield
+ import timber.log.Timber
+ import java.io.File
+ import java.util.UUID
+-import kotlin.time.Duration.Companion.milliseconds
++import kotlin.time.Duration
+ import kotlin.time.TimeSource
+ 
+ @SingleIn(RoomScope::class)
+@@ -62,6 +62,13 @@ class DefaultVoiceRecorder(
+     private var outputFile: File? = null
+     private var audioReader: AudioReader? = null
+     private var recordingJob: Job? = null
++    // Total time recorded in the previous segments of the current session
++    private var accumulatedDuration: Duration = Duration.ZERO
++    private var segmentStartedAt: TimeSource.Mark? = null
++
++    // Total time recorded so far, excluding the time spent paused
++    private val totalRecordedTime: Duration
++        get() = accumulatedDuration + (segmentStartedAt?.elapsedNow() ?: Duration.ZERO)
+ 
+     // List of Float between 0 and 1 representing the audio levels
+     private val levels: MutableList<Float> = mutableListOf()
+@@ -82,17 +89,65 @@ class DefaultVoiceRecorder(
+             .also(encoder::init)
+ 
+         levels.clear()
++        accumulatedDuration = Duration.ZERO
++
++        startCapture()
++    }
++
++    @RequiresPermission(Manifest.permission.RECORD_AUDIO)
++    override suspend fun resumeRecord() = lock.withLock {
++        if (recordingJob != null || outputFile == null) {
++            Timber.w("Voice recorder has no paused recording, ignoring this resume")
++            return@withLock
++        }
++
++        Timber.i("Voice recorder resumed recording")
++        startCapture()
++    }
++
++    override suspend fun pauseRecord() {
++        val wasRecording = recordingJob != null
++        recordingJob?.cancel()
++        recordingJob = null
++        audioReader?.stop()
++        audioReader = null
++
++        lock.withLock {
++            val file = outputFile
++            if (!wasRecording || file == null) {
++                return@withLock
++            }
++
++            Timber.i("Voice recorder paused recording")
++            accumulatedDuration += segmentStartedAt?.elapsedNow() ?: Duration.ZERO
++            segmentStartedAt = null
++
++            _state.emit(
++                VoiceRecorderState.Paused(
++                    file = file,
++                    elapsedTime = accumulatedDuration,
++                    waveform = levels.resample(100),
++                )
++            )
++        }
++    }
+ 
++    /**
++     * Capture audio into the current encoder session, appending to whatever was recorded before.
++     *
++     * Must be called with [lock] held.
++     */
++    private fun startCapture() {
++        segmentStartedAt = timeSource.markNow()
+         val audioRecorder = audioReaderFactory.create(config, dispatchers).also { audioReader = it }
+ 
+         recordingJob = voiceCoroutineScope.launch {
+-            val startedAt = timeSource.markNow()
+             audioRecorder.record { audio ->
+                 yield()
+ 
+-                val elapsedTime = startedAt.elapsedNow()
++                val recordedTime = totalRecordedTime
+ 
+-                if (elapsedTime > VoiceMessageConfig.maxVoiceMessageDuration) {
++                if (recordedTime > VoiceMessageConfig.maxVoiceMessageDuration) {
+                     Timber.w("Voice message time limit reached")
+                     stopRecord(false)
+                     return@record
+@@ -104,13 +159,13 @@ class DefaultVoiceRecorder(
+ 
+                         lock.withLock {
+                             levels.add(audioLevel)
+-                            _state.emit(VoiceRecorderState.Recording(elapsedTime, levels.toList()))
++                            _state.emit(VoiceRecorderState.Recording(recordedTime, levels.toList()))
+                         }
+                         encoder.encode(audio.buffer, audio.readSize)
+                     }
+                     is Audio.Error -> {
+                         Timber.e("Voice message error: code=${audio.audioRecordErrorCode}")
+-                        _state.emit(VoiceRecorderState.Recording(elapsedTime, listOf()))
++                        _state.emit(VoiceRecorderState.Recording(recordedTime, listOf()))
+                     }
+                 }
+             }
+@@ -135,6 +190,14 @@ class DefaultVoiceRecorder(
+         encoder.release()
+ 
+         lock.withLock {
++            val duration = when (val previous = state.value) {
++                is VoiceRecorderState.Recording -> previous.elapsedTime
++                is VoiceRecorderState.Paused -> previous.elapsedTime
++                else -> accumulatedDuration
++            }
++            accumulatedDuration = Duration.ZERO
++            segmentStartedAt = null
++
+             if (cancelled) {
+                 deleteRecording()
+                 levels.clear()
+@@ -143,15 +206,12 @@ class DefaultVoiceRecorder(
+             _state.emit(
+                 when (val file = outputFile) {
+                     null -> VoiceRecorderState.Idle
+-                    else -> {
+-                        val duration = (state.value as? VoiceRecorderState.Recording)?.elapsedTime
+-                        VoiceRecorderState.Finished(
+-                            file = file,
+-                            mimeType = fileConfig.mimeType,
+-                            waveform = levels.resample(100),
+-                            duration = duration ?: 0.milliseconds
+-                        )
+-                    }
++                    else -> VoiceRecorderState.Finished(
++                        file = file,
++                        mimeType = fileConfig.mimeType,
++                        waveform = levels.resample(100),
++                        duration = duration,
++                    )
+                 }
+             )
+         }
+diff --git a/libraries/voicerecorder/test/src/main/kotlin/io/element/android/libraries/voicerecorder/test/FakeVoiceRecorder.kt b/libraries/voicerecorder/test/src/main/kotlin/io/element/android/libraries/voicerecorder/test/FakeVoiceRecorder.kt
+index b735bb9fa5..2c1fb3050a 100644
+--- a/libraries/voicerecorder/test/src/main/kotlin/io/element/android/libraries/voicerecorder/test/FakeVoiceRecorder.kt
++++ b/libraries/voicerecorder/test/src/main/kotlin/io/element/android/libraries/voicerecorder/test/FakeVoiceRecorder.kt
+@@ -37,6 +37,7 @@ class FakeVoiceRecorder(
+     private var currentRecording: File? = null
+     private var lastRecordingId = 0
+     private var activeRecordingId = 0
++    private var isPaused = false
+ 
+     override suspend fun startRecord() {
+         startRecordResult()
+@@ -53,6 +54,27 @@ class FakeVoiceRecorder(
+         }
+     }
+ 
++    override suspend fun pauseRecord() {
++        val file = currentRecording ?: return
++        isPaused = true
++        activeRecordingId = 0
++        _state.emit(
++            VoiceRecorderState.Paused(
++                file = file,
++                elapsedTime = recordingDuration,
++                waveform = waveform,
++            )
++        )
++    }
++
++    override suspend fun resumeRecord() {
++        if (!isPaused) return
++        isPaused = false
++        val recordingId = ++lastRecordingId
++        activeRecordingId = recordingId
++        _state.emit(VoiceRecorderState.Recording(recordingDuration, levels))
++    }
++
+     override suspend fun stopRecord(cancelled: Boolean) {
+         stopRecordResult(cancelled)
+         activeRecordingId = 0
+-- 
+2.56.0
+

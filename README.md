@@ -123,3 +123,7 @@ apply_patch <patch_name> <target_dir>
   - patches: `01-trigger-rime-sync`（AIDL 暴露 triggerRimeSync）、`02-plugin-sync-module`（fcitx5-sync 同步插件模块）
   - workflow: `.github/workflows/fcitx5-android-build.yml`
   - secrets: `SIGN_KEY_BASE64` / `FCITX5_ANDROID_KEYSTORE_PASSWORD` / `FCITX5_ANDROID_KEY_ALIAS`
+- `schildi-next/` — SchildiChat Next（Element X Android 的 fork，Matrix 客户端）
+  - patches: `01-voice-hold-to-talk`（语音录制支持暂停/续录、预览态「继续录音」、空输入框长按说话=按住录音/松手直发/上滑取消）
+  - workflow: `.github/workflows/schildi-next-build.yml`
+  - 产物: `fdroidScDefaultRelease` 的 universal + 各 ABI split APK（上游 release 用 debug keystore 签名，无需 secrets）

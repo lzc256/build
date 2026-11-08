@@ -47,6 +47,7 @@ git -C project-src diff
 | `stealthpanda-build.yml` | `we-be/stealthpanda` | 二进制 |
 | `netbird-build.yml` | `netbirdio/netbird` | `netbird-anet-linux-arm64` |
 | `firefly-docker.yml` | `firefly-iii/firefly-iii` | Docker 镜像 |
+| `schildi-next-build.yml` | `SchildiChat/schildichat-android-next` | APK（`fdroidScDefaultRelease`） |
 | `other-build.yml` | 模板 | — |
 
 ### zeroclaw 构建参数

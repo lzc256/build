@@ -1,0 +1,400 @@
+From d76a2dd32f081d524b08e23eeadd67ea4468ee27 Mon Sep 17 00:00:00 2001
+From: lzc256 <i@lzc256.com>
+Date: Sun, 8 Nov 2026 20:49:27 +0800
+Subject: [PATCH 2/3] Add a continue recording button to the voice message
+ composer
+
+Stopping a recording used to finalize it: the user had to either send the
+voice message or record it again from scratch.
+
+Now stopping the recording only pauses it, keeping the recording session (and
+therefore the audio file) alive, and the preview shows a continue button to the
+left of the send button which resumes the very same audio stream. The preview
+duration and waveform keep growing across the segments, and sending finalizes
+the recording first so the sent file is a single Ogg/Opus voice message.
+
+Pausing on ON_PAUSE means the recording can also be continued after coming back
+from the background. Deleting or sending finalizes the session, and leaving the
+screen (ON_DESTROY) discards it.
+---
+ .../DefaultVoiceMessageComposerPresenter.kt   | 114 +++++++++++++-----
+ .../libraries/textcomposer/TextComposer.kt    |  16 +++
+ .../VoiceMessageContinueRecordingButton.kt    |  55 +++++++++
+ .../model/VoiceMessageRecorderEvent.kt        |  14 +--
+ .../textcomposer/model/VoiceMessageState.kt   |   2 +
+ schildi/lib/src/main/res/values/strings.xml   |   4 +
+ 6 files changed, 168 insertions(+), 37 deletions(-)
+ create mode 100644 libraries/textcomposer/impl/src/main/kotlin/io/element/android/libraries/textcomposer/components/VoiceMessageContinueRecordingButton.kt
+
+diff --git a/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/voicemessages/composer/DefaultVoiceMessageComposerPresenter.kt b/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/voicemessages/composer/DefaultVoiceMessageComposerPresenter.kt
+index ca207757b9..69a960eb32 100644
+--- a/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/voicemessages/composer/DefaultVoiceMessageComposerPresenter.kt
++++ b/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/voicemessages/composer/DefaultVoiceMessageComposerPresenter.kt
+@@ -50,6 +50,7 @@ import io.element.android.services.analytics.api.AnalyticsService
+ import kotlinx.collections.immutable.ImmutableList
+ import kotlinx.collections.immutable.toImmutableList
+ import kotlinx.coroutines.CoroutineScope
++import kotlinx.coroutines.flow.first
+ import kotlinx.coroutines.launch
+ import timber.log.Timber
+ import java.io.File
+@@ -89,9 +90,12 @@ class DefaultVoiceMessageComposerPresenter(
+         var showSendFailureDialog by remember { mutableStateOf(false) }
+ 
+         LaunchedEffect(recorderState) {
+-            val recording = recorderState as? VoiceRecorderState.Finished
+-                ?: return@LaunchedEffect
+-            player.setMedia(recording.file.path)
++            val file = when (val state = recorderState) {
++                is VoiceRecorderState.Finished -> state.file
++                is VoiceRecorderState.Paused -> state.file
++                else -> return@LaunchedEffect
++            }
++            player.setMedia(file.path)
+         }
+ 
+         LaunchedEffect(permissionState.permissionGranted) {
+@@ -106,7 +110,7 @@ class DefaultVoiceMessageComposerPresenter(
+         fun handleLifecycleEvent(event: Lifecycle.Event) {
+             when (event) {
+                 Lifecycle.Event.ON_PAUSE -> {
+-                    sessionCoroutineScope.finishRecording()
++                    sessionCoroutineScope.pauseRecording()
+                     player.pause()
+                 }
+                 Lifecycle.Event.ON_DESTROY -> {
+@@ -134,7 +138,11 @@ class DefaultVoiceMessageComposerPresenter(
+                 }
+                 VoiceMessageRecorderEvent.Stop -> {
+                     Timber.v("Voice message stop button pressed")
+-                    localCoroutineScope.finishRecording()
++                    localCoroutineScope.pauseRecording()
++                }
++                VoiceMessageRecorderEvent.Resume -> {
++                    Timber.v("Voice message continue recording button pressed")
++                    localCoroutineScope.resumeRecording()
+                 }
+                 VoiceMessageRecorderEvent.Cancel -> {
+                     Timber.v("Voice message cancel button tapped")
+@@ -154,13 +162,6 @@ class DefaultVoiceMessageComposerPresenter(
+         }
+ 
+         fun sendVoiceMessage(inReplyToEventId: EventId?) {
+-            val finishedState = recorderState as? VoiceRecorderState.Finished
+-            if (finishedState == null) {
+-                val exception = VoiceMessageException.FileException("No file to send")
+-                analyticsService.trackError(exception)
+-                Timber.e(exception)
+-                return
+-            }
+             if (isSending) {
+                 return
+             }
+@@ -168,14 +169,21 @@ class DefaultVoiceMessageComposerPresenter(
+             player.pause()
+             analyticsService.captureComposerEvent()
+             sessionCoroutineScope.launch {
+-                val result = sendMessage(
+-                    file = finishedState.file,
+-                    mimeType = finishedState.mimeType,
+-                    waveform = finishedState.waveform,
+-                    inReplyToEventId = inReplyToEventId,
+-                )
+-                if (result.isFailure) {
+-                    showSendFailureDialog = true
++                val finishedState = finalizeRecording()
++                if (finishedState == null) {
++                    val exception = VoiceMessageException.FileException("No file to send")
++                    analyticsService.trackError(exception)
++                    Timber.e(exception)
++                } else {
++                    val result = sendMessage(
++                        file = finishedState.file,
++                        mimeType = finishedState.mimeType,
++                        waveform = finishedState.waveform,
++                        inReplyToEventId = inReplyToEventId,
++                    )
++                    if (result.isFailure) {
++                        showSendFailureDialog = true
++                    }
+                 }
+             }.invokeOnCompletion {
+                 isSending = false
+@@ -196,7 +204,8 @@ class DefaultVoiceMessageComposerPresenter(
+                 }
+                 VoiceMessageComposerEvent.DeleteVoiceMessage -> {
+                     player.pause()
+-                    localCoroutineScope.deleteRecording()
++                    // The recording session may still be alive (paused), so stop it and delete the file
++                    localCoroutineScope.cancelRecording()
+                 }
+                 VoiceMessageComposerEvent.DismissPermissionsRationale -> {
+                     permissionState.eventSink(PermissionsEvent.CloseDialog)
+@@ -220,10 +229,11 @@ class DefaultVoiceMessageComposerPresenter(
+                         .takeLast(128)
+                         .toImmutableList(),
+                 )
+-                is VoiceRecorderState.Finished ->
++                is VoiceRecorderState.Finished,
++                is VoiceRecorderState.Paused ->
+                     previewState(
+                         playerState = playerState,
+-                        recorderState = recorderState,
++                        recorderState = state,
+                         isSending = isSending
+                     )
+                 else -> VoiceMessageState.Idle
+@@ -243,9 +253,20 @@ class DefaultVoiceMessageComposerPresenter(
+     ): VoiceMessageState {
+         val showCursor by remember(playerState.isStopped, isSending) { derivedStateOf { !playerState.isStopped && !isSending } }
+         val playerTime by remember(playerState, recorderState) { derivedStateOf { displayTime(playerState, recorderState) } }
+-        val waveform by remember(recorderState) { derivedStateOf { recorderState.finishedWaveform() } }
++        val waveform by remember(recorderState) {
++            derivedStateOf {
++                when (recorderState) {
++                    is VoiceRecorderState.Paused -> recorderState.waveform.toImmutableList()
++                    else -> recorderState.finishedWaveform()
++                }
++            }
++        }
+ 
+-        val recorderDuration = (recorderState as VoiceRecorderState.Finished).duration
++        val recorderDuration = when (recorderState) {
++            is VoiceRecorderState.Paused -> recorderState.elapsedTime
++            is VoiceRecorderState.Finished -> recorderState.duration
++            else -> 0.milliseconds
++        }
+         val duration = playerState.durationMs?.milliseconds ?: recorderDuration
+ 
+         return VoiceMessageState.Preview(
+@@ -256,6 +277,8 @@ class DefaultVoiceMessageComposerPresenter(
+             time = playerTime,
+             duration = duration,
+             waveform = waveform,
++            // The user can keep talking as long as the recording session was not finalized
++            canResume = recorderState is VoiceRecorderState.Paused && !isSending,
+         )
+     }
+ 
+@@ -279,13 +302,44 @@ class DefaultVoiceMessageComposerPresenter(
+         audioFocus.releaseAudioFocus()
+     }
+ 
+-    private fun CoroutineScope.cancelRecording() = launch {
+-        voiceRecorder.stopRecord(cancelled = true)
++    private fun CoroutineScope.pauseRecording() = launch {
++        voiceRecorder.pauseRecord()
+         audioFocus.releaseAudioFocus()
+     }
+ 
+-    private fun CoroutineScope.deleteRecording() = launch {
+-        voiceRecorder.deleteRecording()
++    private fun CoroutineScope.resumeRecording() = launch {
++        try {
++            audioFocus.requestAudioFocus(AudioFocusRequester.RecordVoiceMessage) {
++                // something else grabbed focus (phone call, etc) - finish gracefully
++                // so the user keeps their partial recording
++                sessionCoroutineScope.finishRecording()
++            }
++            voiceRecorder.resumeRecord()
++        } catch (e: SecurityException) {
++            audioFocus.releaseAudioFocus()
++            Timber.e(e, "Voice message error")
++            analyticsService.trackError(VoiceMessageException.PermissionMissing("Expected permission to record but none", e))
++        }
++    }
++
++    /**
++     * Stop the recording if it is still alive and return the finalized recording, ready to be sent.
++     */
++    private suspend fun finalizeRecording(): VoiceRecorderState.Finished? {
++        when (voiceRecorder.state.value) {
++            is VoiceRecorderState.Recording, is VoiceRecorderState.Paused -> {
++                voiceRecorder.stopRecord()
++                audioFocus.releaseAudioFocus()
++            }
++            else -> Unit
++        }
++        val state = voiceRecorder.state.first { it is VoiceRecorderState.Finished || it is VoiceRecorderState.Idle }
++        return state as? VoiceRecorderState.Finished
++    }
++
++    private fun CoroutineScope.cancelRecording() = launch {
++        voiceRecorder.stopRecord(cancelled = true)
++        audioFocus.releaseAudioFocus()
+     }
+ 
+     private suspend fun sendMessage(
+@@ -341,6 +395,8 @@ private fun displayTime(
+         playerState.currentPosition.milliseconds
+     recording is VoiceRecorderState.Finished ->
+         recording.duration
++    recording is VoiceRecorderState.Paused ->
++        recording.elapsedTime
+     else ->
+         0.milliseconds
+ }
+diff --git a/libraries/textcomposer/impl/src/main/kotlin/io/element/android/libraries/textcomposer/TextComposer.kt b/libraries/textcomposer/impl/src/main/kotlin/io/element/android/libraries/textcomposer/TextComposer.kt
+index bdd90ab7c7..a18288f4c4 100644
+--- a/libraries/textcomposer/impl/src/main/kotlin/io/element/android/libraries/textcomposer/TextComposer.kt
++++ b/libraries/textcomposer/impl/src/main/kotlin/io/element/android/libraries/textcomposer/TextComposer.kt
+@@ -84,6 +84,7 @@ import io.element.android.libraries.testtags.TestTags
+ import io.element.android.libraries.testtags.testTag
+ import io.element.android.libraries.textcomposer.components.SendButtonIcon
+ import io.element.android.libraries.textcomposer.components.TextFormatting
++import io.element.android.libraries.textcomposer.components.VoiceMessageContinueRecordingButton
+ import io.element.android.libraries.textcomposer.components.VoiceMessageDeleteButtonIcon
+ import io.element.android.libraries.textcomposer.components.VoiceMessagePreview
+ import io.element.android.libraries.textcomposer.components.VoiceMessageRecorderButtonIcon
+@@ -416,6 +417,11 @@ fun TextComposer(
+             onDeleteVoiceMessage = onDeleteVoiceMessage,
+             onVoiceRecorderEvent = onVoiceRecorderEvent,
+             onResetComposerMode = onResetComposerMode,
++            onResumeVoiceRecording = if (voiceMessageState is VoiceMessageState.Preview && voiceMessageState.canResume) {
++                { onVoiceRecorderEvent(VoiceMessageRecorderEvent.Resume) }
++            } else {
++                null
++            },
+         )
+     }
+ 
+@@ -465,6 +471,8 @@ private fun StandardLayout(
+     onAddAttachment: () -> Unit,
+     onDeleteVoiceMessage: () -> Unit,
+     onVoiceRecorderEvent: (VoiceMessageRecorderEvent) -> Unit,
++    // SC: keep talking after the recording was stopped but not sent yet, null when not available
++    onResumeVoiceRecording: (() -> Unit)?,
+     onResetComposerMode: () -> Unit,
+     modifier: Modifier = Modifier,
+ ) {
+@@ -545,6 +553,14 @@ private fun StandardLayout(
+                     movableVoiceRecording()
+                 }
+             }
++            if (onResumeVoiceRecording != null) {
++                VoiceMessageContinueRecordingButton(
++                    modifier = Modifier
++                        .padding(top = 5.dp, bottom = 5.dp)
++                        .size(48.dp),
++                    onClick = onResumeVoiceRecording,
++                )
++            }
+             // To avoid loosing keyboard focus, the IconButton has to be defined here and has to be always enabled.
+             val endButtonContentDescription = stringResource(endButtonParams.endButtonContentDescriptionResId)
+             IconButton(
+diff --git a/libraries/textcomposer/impl/src/main/kotlin/io/element/android/libraries/textcomposer/components/VoiceMessageContinueRecordingButton.kt b/libraries/textcomposer/impl/src/main/kotlin/io/element/android/libraries/textcomposer/components/VoiceMessageContinueRecordingButton.kt
+new file mode 100644
+index 0000000000..c00ebdc161
+--- /dev/null
++++ b/libraries/textcomposer/impl/src/main/kotlin/io/element/android/libraries/textcomposer/components/VoiceMessageContinueRecordingButton.kt
+@@ -0,0 +1,55 @@
++/*
++ * Copyright (c) 2025 Element Creations Ltd.
++ * Copyright 2023-2025 New Vector Ltd.
++ *
++ * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Element-Commercial.
++ * Please see LICENSE files in the repository root for full details.
++ */
++
++package io.element.android.libraries.textcomposer.components
++
++import androidx.compose.foundation.layout.size
++import androidx.compose.runtime.Composable
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.res.stringResource
++import androidx.compose.ui.semantics.clearAndSetSemantics
++import androidx.compose.ui.semantics.contentDescription
++import androidx.compose.ui.semantics.onClick
++import androidx.compose.ui.unit.dp
++import io.element.android.compound.theme.ElementTheme
++import io.element.android.compound.tokens.generated.CompoundIcons
++import io.element.android.libraries.designsystem.preview.ElementPreview
++import io.element.android.libraries.designsystem.preview.PreviewsDayNight
++import io.element.android.libraries.designsystem.theme.components.Icon
++import io.element.android.libraries.designsystem.theme.components.IconButton
++
++/**
++ * SC: button used to keep talking after the voice message recording was stopped but not sent yet.
++ */
++@Composable
++internal fun VoiceMessageContinueRecordingButton(
++    onClick: () -> Unit,
++    modifier: Modifier = Modifier,
++) {
++    val contentDescription = stringResource(chat.schildi.lib.R.string.sc_voice_continue_recording)
++    IconButton(
++        modifier = modifier.clearAndSetSemantics {
++            this.contentDescription = contentDescription
++            onClick(null, null)
++        },
++        onClick = onClick,
++    ) {
++        Icon(
++            modifier = Modifier.size(24.dp),
++            imageVector = CompoundIcons.MicOnSolid(),
++            contentDescription = null,
++            tint = ElementTheme.colors.iconSecondary,
++        )
++    }
++}
++
++@PreviewsDayNight
++@Composable
++internal fun VoiceMessageContinueRecordingButtonPreview() = ElementPreview {
++    VoiceMessageContinueRecordingButton(onClick = {})
++}
+diff --git a/libraries/textcomposer/impl/src/main/kotlin/io/element/android/libraries/textcomposer/model/VoiceMessageRecorderEvent.kt b/libraries/textcomposer/impl/src/main/kotlin/io/element/android/libraries/textcomposer/model/VoiceMessageRecorderEvent.kt
+index ae78501bb8..632cb23249 100644
+--- a/libraries/textcomposer/impl/src/main/kotlin/io/element/android/libraries/textcomposer/model/VoiceMessageRecorderEvent.kt
++++ b/libraries/textcomposer/impl/src/main/kotlin/io/element/android/libraries/textcomposer/model/VoiceMessageRecorderEvent.kt
+@@ -1,15 +1,13 @@
+-/*
+- * Copyright (c) 2025 Element Creations Ltd.
+- * Copyright 2023-2025 New Vector Ltd.
+- *
+- * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Element-Commercial.
+- * Please see LICENSE files in the repository root for full details.
+- */
+-
+ package io.element.android.libraries.textcomposer.model
+ 
+ sealed interface VoiceMessageRecorderEvent {
+     data object Start : VoiceMessageRecorderEvent
++
++    /** Pause the current recording, keeping the session alive so it can be continued. */
+     data object Stop : VoiceMessageRecorderEvent
++
++    /** Continue a recording which was paused with [Stop]. */
++    data object Resume : VoiceMessageRecorderEvent
++
+     data object Cancel : VoiceMessageRecorderEvent
+ }
+diff --git a/libraries/textcomposer/impl/src/main/kotlin/io/element/android/libraries/textcomposer/model/VoiceMessageState.kt b/libraries/textcomposer/impl/src/main/kotlin/io/element/android/libraries/textcomposer/model/VoiceMessageState.kt
+index de8c85d3a6..90fad0abad 100644
+--- a/libraries/textcomposer/impl/src/main/kotlin/io/element/android/libraries/textcomposer/model/VoiceMessageState.kt
++++ b/libraries/textcomposer/impl/src/main/kotlin/io/element/android/libraries/textcomposer/model/VoiceMessageState.kt
+@@ -25,6 +25,8 @@ sealed interface VoiceMessageState {
+         val duration: Duration,
+         // Values are between 0 and 1
+         val waveform: ImmutableList<Float>,
++        // True when the recording session is still alive: the user can keep talking before sending
++        val canResume: Boolean = false,
+     ) : VoiceMessageState
+ 
+     data class Recording(
+diff --git a/schildi/lib/src/main/res/values/strings.xml b/schildi/lib/src/main/res/values/strings.xml
+index 7f343c9b56..67f5787512 100644
+--- a/schildi/lib/src/main/res/values/strings.xml
++++ b/schildi/lib/src/main/res/values/strings.xml
+@@ -231,4 +231,8 @@
+     <string name="sc_notification_lookup_failure_summary">Failed to look up message for notification</string>
+     <string name="sc_bg_notification_channel">Background service</string>
+     <string name="sc_push_failure_notification_channel">Notification failures</string>
++    <string name="sc_voice_continue_recording">Continue recording</string>
++    <string name="sc_voice_too_short">Too short, hold to record</string>
++    <string name="sc_voice_slide_up_to_cancel">Slide up to cancel</string>
++    <string name="sc_voice_release_to_cancel">Release to cancel</string>
+ </resources>
+-- 
+2.56.0
+

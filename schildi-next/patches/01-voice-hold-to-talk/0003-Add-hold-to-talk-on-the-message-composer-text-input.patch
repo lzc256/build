@@ -1,0 +1,468 @@
+From b5875b93fa36f9d128490b66c42aed3e93efc0b0 Mon Sep 17 00:00:00 2001
+From: lzc256 <i@lzc256.com>
+Date: Sun, 8 Nov 2026 20:54:15 +0800
+Subject: [PATCH 3/3] Add hold to talk on the message composer text input
+
+Long pressing the text input of an empty composer now records a voice message:
+the haptic feedback announces the recording, releasing the finger sends the
+audio right away (without the preview step), and sliding the finger up by 60dp
+switches to a cancel state (hinted with a pill) so that releasing discards the
+recording. Recordings shorter than a second are considered accidental and are
+discarded with a hint.
+
+The gesture is implemented as a transparent overlay on top of the text input,
+so it works for both the rich text and the legacy markdown editors, and it is
+only composed while the composer is empty: as soon as some text is typed the
+overlay is removed and long pressing behaves natively again. The gesture is
+also disabled in edit, attachment and caption modes, when the voice permission
+is not granted, and when the SC_HOLD_TO_TALK preference is turned off.
+---
+ .../composer/VoiceMessageComposerEvent.kt     |   6 +
+ .../preview/AttachmentsPreviewView.kt         |   1 +
+ .../messagecomposer/MessageComposerView.kt    |   7 +
+ .../DefaultVoiceMessageComposerPresenter.kt   |   8 +
+ .../libraries/textcomposer/TextComposer.kt    |  52 +++++
+ .../components/VoiceHoldGestureOverlay.kt     | 186 ++++++++++++++++++
+ .../textcomposer/TextComposerEndButtonTest.kt |   1 +
+ .../chat/schildi/lib/preferences/ScPrefs.kt   |   2 +
+ schildi/lib/src/main/res/values/strings.xml   |   2 +
+ 9 files changed, 265 insertions(+)
+ create mode 100644 libraries/textcomposer/impl/src/main/kotlin/io/element/android/libraries/textcomposer/components/VoiceHoldGestureOverlay.kt
+
+diff --git a/features/messages/api/src/main/kotlin/io/element/android/features/messages/api/timeline/voicemessages/composer/VoiceMessageComposerEvent.kt b/features/messages/api/src/main/kotlin/io/element/android/features/messages/api/timeline/voicemessages/composer/VoiceMessageComposerEvent.kt
+index ef5fe93d08..d39179e400 100644
+--- a/features/messages/api/src/main/kotlin/io/element/android/features/messages/api/timeline/voicemessages/composer/VoiceMessageComposerEvent.kt
++++ b/features/messages/api/src/main/kotlin/io/element/android/features/messages/api/timeline/voicemessages/composer/VoiceMessageComposerEvent.kt
+@@ -20,6 +20,12 @@ sealed interface VoiceMessageComposerEvent {
+         val playerEvent: VoiceMessagePlayerEvent,
+     ) : VoiceMessageComposerEvent
+     data object SendVoiceMessage : VoiceMessageComposerEvent
++
++    /**
++     * SC: stop the recording if it is still alive and send it right away, without showing the
++     * preview first (used by the hold to talk gesture).
++     */
++    data object StopAndSendVoiceMessage : VoiceMessageComposerEvent
+     data object DeleteVoiceMessage : VoiceMessageComposerEvent
+     data object AcceptPermissionRationale : VoiceMessageComposerEvent
+     data object DismissPermissionsRationale : VoiceMessageComposerEvent
+diff --git a/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/attachments/preview/AttachmentsPreviewView.kt b/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/attachments/preview/AttachmentsPreviewView.kt
+index 0f9ca3d7c1..775b9d068d 100644
+--- a/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/attachments/preview/AttachmentsPreviewView.kt
++++ b/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/attachments/preview/AttachmentsPreviewView.kt
+@@ -538,6 +538,7 @@ private fun AttachmentsPreviewBottomActions(
+         onVoiceRecorderEvent = {},
+         onVoicePlayerEvent = {},
+         onSendVoiceMessage = {},
++        onSendVoiceMessageNow = {},
+         onDeleteVoiceMessage = {},
+         onReceiveSuggestion = {},
+         resolveMentionDisplay = { _, _ -> TextDisplay.Plain },
+diff --git a/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/messagecomposer/MessageComposerView.kt b/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/messagecomposer/MessageComposerView.kt
+index 93cacf0494..3641bb3627 100644
+--- a/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/messagecomposer/MessageComposerView.kt
++++ b/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/messagecomposer/MessageComposerView.kt
+@@ -91,6 +91,12 @@ internal fun MessageComposerView(
+         state.eventSink(MessageComposerEvent.CloseSpecialMode)
+     }
+ 
++    // SC: hold to talk - the recording is stopped and sent in one go, without the preview step
++    val onSendVoiceMessageNow = {
++        voiceMessageState.eventSink(VoiceMessageComposerEvent.StopAndSendVoiceMessage)
++        state.eventSink(MessageComposerEvent.CloseSpecialMode)
++    }
++
+     val onDeleteVoiceMessage = {
+         voiceMessageState.eventSink(VoiceMessageComposerEvent.DeleteVoiceMessage)
+     }
+@@ -114,6 +120,7 @@ internal fun MessageComposerView(
+         onVoiceRecorderEvent = onVoiceRecorderEvent,
+         onVoicePlayerEvent = onVoicePlayerEvent,
+         onSendVoiceMessage = onSendVoiceMessage,
++        onSendVoiceMessageNow = onSendVoiceMessageNow,
+         onDeleteVoiceMessage = onDeleteVoiceMessage,
+         onReceiveSuggestion = ::onSuggestionReceived,
+         resolveMentionDisplay = state.resolveMentionDisplay,
+diff --git a/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/voicemessages/composer/DefaultVoiceMessageComposerPresenter.kt b/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/voicemessages/composer/DefaultVoiceMessageComposerPresenter.kt
+index 69a960eb32..4269539e7e 100644
+--- a/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/voicemessages/composer/DefaultVoiceMessageComposerPresenter.kt
++++ b/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/voicemessages/composer/DefaultVoiceMessageComposerPresenter.kt
+@@ -202,6 +202,14 @@ class DefaultVoiceMessageComposerPresenter(
+                         sendVoiceMessage(inReplyToEventId)
+                     }
+                 }
++                VoiceMessageComposerEvent.StopAndSendVoiceMessage -> {
++                    // Capture reply info eagerly before any coroutine dispatch, since CloseSpecialMode
++                    // may reset composerMode before the coroutine runs.
++                    val inReplyToEventId = (messageComposerContext.composerMode as? MessageComposerMode.Reply)?.eventId
++                    localCoroutineScope.launch {
++                        sendVoiceMessage(inReplyToEventId)
++                    }
++                }
+                 VoiceMessageComposerEvent.DeleteVoiceMessage -> {
+                     player.pause()
+                     // The recording session may still be alive (paused), so stop it and delete the file
+diff --git a/libraries/textcomposer/impl/src/main/kotlin/io/element/android/libraries/textcomposer/TextComposer.kt b/libraries/textcomposer/impl/src/main/kotlin/io/element/android/libraries/textcomposer/TextComposer.kt
+index a18288f4c4..3221127cb5 100644
+--- a/libraries/textcomposer/impl/src/main/kotlin/io/element/android/libraries/textcomposer/TextComposer.kt
++++ b/libraries/textcomposer/impl/src/main/kotlin/io/element/android/libraries/textcomposer/TextComposer.kt
+@@ -8,6 +8,8 @@
+ 
+ package io.element.android.libraries.textcomposer
+ 
++import android.Manifest
++import android.content.pm.PackageManager
+ import android.content.res.Configuration
+ import android.net.Uri
+ import androidx.compose.foundation.background
+@@ -42,6 +44,7 @@ import androidx.compose.ui.Alignment
+ import androidx.compose.ui.Modifier
+ import androidx.compose.ui.draw.clip
+ import androidx.compose.ui.hapticfeedback.HapticFeedbackType
++import androidx.compose.ui.platform.LocalContext
+ import androidx.compose.ui.platform.LocalDensity
+ import androidx.compose.ui.platform.LocalHapticFeedback
+ import androidx.compose.ui.platform.LocalView
+@@ -55,6 +58,7 @@ import androidx.compose.ui.tooling.preview.Preview
+ import androidx.compose.ui.tooling.preview.PreviewParameter
+ import androidx.compose.ui.unit.Density
+ import androidx.compose.ui.unit.dp
++import androidx.core.content.ContextCompat
+ import chat.schildi.lib.preferences.ScPrefs
+ import chat.schildi.lib.preferences.value
+ import io.element.android.compound.theme.ElementTheme
+@@ -84,6 +88,7 @@ import io.element.android.libraries.testtags.TestTags
+ import io.element.android.libraries.testtags.testTag
+ import io.element.android.libraries.textcomposer.components.SendButtonIcon
+ import io.element.android.libraries.textcomposer.components.TextFormatting
++import io.element.android.libraries.textcomposer.components.VoiceHoldGestureOverlay
+ import io.element.android.libraries.textcomposer.components.VoiceMessageContinueRecordingButton
+ import io.element.android.libraries.textcomposer.components.VoiceMessageDeleteButtonIcon
+ import io.element.android.libraries.textcomposer.components.VoiceMessagePreview
+@@ -125,6 +130,8 @@ fun TextComposer(
+     onVoiceRecorderEvent: (VoiceMessageRecorderEvent) -> Unit,
+     onVoicePlayerEvent: (VoiceMessagePlayerEvent) -> Unit,
+     onSendVoiceMessage: () -> Unit,
++    // SC: send the voice message as soon as the user releases the finger (hold to talk)
++    onSendVoiceMessageNow: () -> Unit,
+     onDeleteVoiceMessage: () -> Unit,
+     onError: (Throwable) -> Unit,
+     onTyping: (Boolean) -> Unit,
+@@ -166,6 +173,42 @@ fun TextComposer(
+     }
+     val canSendTextMessage = markdown.isNotBlank() || composerMode is MessageComposerMode.Attachment
+ 
++    // SC: hold to talk - only when the composer is empty and not in a special mode
++    val focusScope = rememberCoroutineScope()
++    val localView = LocalView.current
++    val holdToTalkEnabled = ScPrefs.SC_HOLD_TO_TALK.value() &&
++        !showTextFormatting &&
++        !composerMode.isEditing &&
++        composerMode != MessageComposerMode.Attachment &&
++        composerMode !is MessageComposerMode.EditCaption
++    val voiceHoldOverlay: (@Composable () -> Unit)? = if (holdToTalkEnabled && !canSendTextMessage) {
++        @Composable {
++            val context = LocalContext.current
++            VoiceHoldGestureOverlay(
++                // A recording started with the voice message button must not be taken over
++                canStartRecording = voiceMessageState is VoiceMessageState.Idle,
++                canRecordAudio = {
++                    ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
++                },
++                onTap = {
++                    focusScope.launch {
++                        state.requestFocus()
++                        localView.showKeyboard()
++                    }
++                },
++                onStartRecording = {
++                    onVoiceRecorderEvent(VoiceMessageRecorderEvent.Start)
++                },
++                onSendVoiceMessage = onSendVoiceMessageNow,
++                onCancelRecording = {
++                    onVoiceRecorderEvent(VoiceMessageRecorderEvent.Cancel)
++                },
++            )
++        }
++    } else {
++        null
++    }
++
+     val textInput: @Composable () -> Unit = when (state) {
+         is TextEditorState.Rich -> {
+             val coroutineScope = rememberCoroutineScope()
+@@ -422,6 +465,7 @@ fun TextComposer(
+             } else {
+                 null
+             },
++            voiceHoldOverlay = voiceHoldOverlay,
+         )
+     }
+ 
+@@ -473,6 +517,8 @@ private fun StandardLayout(
+     onVoiceRecorderEvent: (VoiceMessageRecorderEvent) -> Unit,
+     // SC: keep talking after the recording was stopped but not sent yet, null when not available
+     onResumeVoiceRecording: (() -> Unit)?,
++    // SC: hold to talk gesture activated on top of the text input, null when not available
++    voiceHoldOverlay: (@Composable () -> Unit)?,
+     onResetComposerMode: () -> Unit,
+     modifier: Modifier = Modifier,
+ ) {
+@@ -552,6 +598,11 @@ private fun StandardLayout(
+                 } else {
+                     movableVoiceRecording()
+                 }
++                if (voiceHoldOverlay != null && (voiceMessageState is VoiceMessageState.Idle || voiceMessageState is VoiceMessageState.Recording)) {
++                    Box(modifier = Modifier.matchParentSize()) {
++                        voiceHoldOverlay()
++                    }
++                }
+             }
+             if (onResumeVoiceRecording != null) {
+                 VoiceMessageContinueRecordingButton(
+@@ -1096,6 +1147,7 @@ private fun ATextComposer(
+         onVoiceRecorderEvent = {},
+         onVoicePlayerEvent = {},
+         onSendVoiceMessage = {},
++        onSendVoiceMessageNow = {},
+         onDeleteVoiceMessage = {},
+         onError = {},
+         onTyping = {},
+diff --git a/libraries/textcomposer/impl/src/main/kotlin/io/element/android/libraries/textcomposer/components/VoiceHoldGestureOverlay.kt b/libraries/textcomposer/impl/src/main/kotlin/io/element/android/libraries/textcomposer/components/VoiceHoldGestureOverlay.kt
+new file mode 100644
+index 0000000000..f324d185d8
+--- /dev/null
++++ b/libraries/textcomposer/impl/src/main/kotlin/io/element/android/libraries/textcomposer/components/VoiceHoldGestureOverlay.kt
+@@ -0,0 +1,186 @@
++/*
++ * Copyright (c) 2025 Element Creations Ltd.
++ * Copyright 2023-2025 New Vector Ltd.
++ *
++ * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Element-Commercial.
++ * Please see LICENSE files in the repository root for full details.
++ */
++
++package io.element.android.libraries.textcomposer.components
++
++import androidx.compose.foundation.background
++import androidx.compose.foundation.combinedClickable
++import androidx.compose.foundation.gestures.awaitEachGesture
++import androidx.compose.foundation.gestures.awaitFirstDown
++import androidx.compose.foundation.interaction.MutableInteractionSource
++import androidx.compose.foundation.layout.Arrangement
++import androidx.compose.foundation.layout.Box
++import androidx.compose.foundation.layout.Row
++import androidx.compose.foundation.layout.padding
++import androidx.compose.foundation.layout.size
++import androidx.compose.foundation.shape.RoundedCornerShape
++import androidx.compose.runtime.Composable
++import androidx.compose.runtime.getValue
++import androidx.compose.runtime.mutableStateOf
++import androidx.compose.runtime.remember
++import androidx.compose.runtime.rememberUpdatedState
++import androidx.compose.runtime.setValue
++import androidx.compose.ui.Alignment
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.hapticfeedback.HapticFeedbackType
++import androidx.compose.ui.input.pointer.pointerInput
++import androidx.compose.ui.platform.LocalContext
++import androidx.compose.ui.platform.LocalDensity
++import androidx.compose.ui.platform.LocalHapticFeedback
++import androidx.compose.ui.res.stringResource
++import androidx.compose.ui.unit.dp
++import io.element.android.compound.theme.ElementTheme
++import io.element.android.compound.tokens.generated.CompoundIcons
++import io.element.android.libraries.androidutils.system.toast
++import io.element.android.libraries.designsystem.theme.components.Icon
++import io.element.android.libraries.designsystem.theme.components.Text
++import kotlin.time.Duration
++import kotlin.time.Duration.Companion.seconds
++import kotlin.time.TimeSource
++
++// SC: distance to slide up before the recording gets cancelled
++private val VoiceHoldCancelThreshold = 60.dp
++
++// SC: recordings shorter than this are considered as an accidental long press
++private val MinVoiceHoldDuration = 1.seconds
++
++/**
++ * SC: transparent overlay drawn on top of the message composer text input, implementing the
++ * "hold to talk" gesture for an empty composer: a long press starts a voice message recording, an
++ * upward slide cancels it, and releasing the finger sends it right away.
++ *
++ * A short press focuses the text input as usual, so the overlay is only ever used when the text
++ * input is empty: as soon as some text is typed the overlay is removed and the text input behaves
++ * natively again.
++ */
++@Composable
++internal fun VoiceHoldGestureOverlay(
++    canStartRecording: Boolean,
++    canRecordAudio: () -> Boolean,
++    onTap: () -> Unit,
++    onStartRecording: () -> Unit,
++    onSendVoiceMessage: () -> Unit,
++    onCancelRecording: () -> Unit,
++    modifier: Modifier = Modifier,
++) {
++    val context = LocalContext.current
++    val hapticFeedback = LocalHapticFeedback.current
++    val density = LocalDensity.current
++    val cancelThresholdPx = with(density) { VoiceHoldCancelThreshold.toPx() }
++
++    // The callbacks are read through a gesture which outlives recompositions
++    val currentCanStartRecording by rememberUpdatedState(canStartRecording)
++    val currentCanRecordAudio by rememberUpdatedState(canRecordAudio)
++    val currentOnTap by rememberUpdatedState(onTap)
++    val currentOnStartRecording by rememberUpdatedState(onStartRecording)
++    val currentOnSendVoiceMessage by rememberUpdatedState(onSendVoiceMessage)
++    val currentOnCancelRecording by rememberUpdatedState(onCancelRecording)
++
++    // Shared between the two pointer input modifiers below, which both see the same gesture
++    val gestureState = remember { HoldToTalkGestureState() }
++    var isCancelPending by remember { mutableStateOf(false) }
++
++    fun resetGesture() {
++        gestureState.isRecording = false
++        gestureState.startedAt = null
++        isCancelPending = false
++    }
++
++    Box(
++        modifier = modifier
++            // Observes the whole gesture, without ever consuming it: the long press delay is
++            // handled by combinedClickable below
++            .pointerInput(Unit) {
++                awaitEachGesture {
++                    val down = awaitFirstDown(requireUnconsumed = false)
++                    var cancelPending = false
++                    try {
++                        while (true) {
++                            val event = awaitPointerEvent()
++                            if (event.changes.none { it.pressed }) break
++                            if (gestureState.isRecording) {
++                                val change = event.changes.firstOrNull { it.id == down.id } ?: break
++                                val pending = change.position.y - down.position.y < -cancelThresholdPx
++                                if (pending != cancelPending) {
++                                    cancelPending = pending
++                                    isCancelPending = pending
++                                    hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
++                                }
++                            }
++                        }
++                        if (gestureState.isRecording) {
++                            val duration = gestureState.startedAt?.elapsedNow() ?: Duration.ZERO
++                            resetGesture()
++                            when {
++                                cancelPending -> currentOnCancelRecording()
++                                duration < MinVoiceHoldDuration -> {
++                                    currentOnCancelRecording()
++                                    context.toast(chat.schildi.lib.R.string.sc_voice_too_short)
++                                }
++                                else -> currentOnSendVoiceMessage()
++                            }
++                        }
++                    } finally {
++                        // The gesture was interrupted (pointer cancelled), do not keep recording
++                        if (gestureState.isRecording) {
++                            resetGesture()
++                            currentOnCancelRecording()
++                        }
++                    }
++                }
++            }
++            .combinedClickable(
++                interactionSource = remember { MutableInteractionSource() },
++                indication = null,
++                onLongClick = {
++                    if (currentCanStartRecording && currentCanRecordAudio()) {
++                        gestureState.isRecording = true
++                        gestureState.startedAt = TimeSource.Monotonic.markNow()
++                        hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
++                        currentOnStartRecording()
++                    } else {
++                        // Without the permission we cannot record: fall back to a regular tap
++                        currentOnTap()
++                    }
++                },
++                onClick = { currentOnTap() },
++            ),
++    ) {
++        if (isCancelPending) {
++            Row(
++                modifier = Modifier
++                    .align(Alignment.TopCenter)
++                    .padding(top = 4.dp)
++                    .background(
++                        color = ElementTheme.colors.bgCriticalPrimary,
++                        shape = RoundedCornerShape(4.dp),
++                    )
++                    .padding(horizontal = 8.dp, vertical = 2.dp),
++                horizontalArrangement = Arrangement.spacedBy(4.dp),
++                verticalAlignment = Alignment.CenterVertically,
++            ) {
++                Icon(
++                    modifier = Modifier.size(16.dp),
++                    imageVector = CompoundIcons.ChevronUp(),
++                    contentDescription = null,
++                    tint = ElementTheme.colors.iconOnSolidPrimary,
++                )
++                Text(
++                    text = stringResource(chat.schildi.lib.R.string.sc_voice_release_to_cancel),
++                    style = ElementTheme.typography.fontBodyXsMedium,
++                    color = ElementTheme.colors.iconOnSolidPrimary,
++                )
++            }
++        }
++    }
++}
++
++private class HoldToTalkGestureState {
++    var isRecording: Boolean = false
++    var startedAt: TimeSource.Mark? = null
++}
+diff --git a/libraries/textcomposer/impl/src/test/kotlin/io/element/android/libraries/textcomposer/TextComposerEndButtonTest.kt b/libraries/textcomposer/impl/src/test/kotlin/io/element/android/libraries/textcomposer/TextComposerEndButtonTest.kt
+index c979e8c909..faf4f0b859 100644
+--- a/libraries/textcomposer/impl/src/test/kotlin/io/element/android/libraries/textcomposer/TextComposerEndButtonTest.kt
++++ b/libraries/textcomposer/impl/src/test/kotlin/io/element/android/libraries/textcomposer/TextComposerEndButtonTest.kt
+@@ -72,6 +72,7 @@ class TextComposerEndButtonTest : RobolectricTest() {
+                 onVoiceRecorderEvent = {},
+                 onVoicePlayerEvent = {},
+                 onSendVoiceMessage = {},
++                onSendVoiceMessageNow = {},
+                 onDeleteVoiceMessage = {},
+                 onError = {},
+                 onTyping = {},
+diff --git a/schildi/lib/src/main/kotlin/chat/schildi/lib/preferences/ScPrefs.kt b/schildi/lib/src/main/kotlin/chat/schildi/lib/preferences/ScPrefs.kt
+index fb49bd0c74..3c51ab8442 100644
+--- a/schildi/lib/src/main/kotlin/chat/schildi/lib/preferences/ScPrefs.kt
++++ b/schildi/lib/src/main/kotlin/chat/schildi/lib/preferences/ScPrefs.kt
+@@ -31,6 +31,7 @@ object ScPrefs {
+ 
+     // General behavior
+     val FAST_TRANSITIONS = ScBoolPref("FAST_TRANSITIONS", true, R.string.sc_pref_fast_transitions_title, R.string.sc_pref_fast_transitions_summary, upstreamChoice = false)
++    val SC_HOLD_TO_TALK = ScBoolPref("SC_HOLD_TO_TALK", true, R.string.sc_pref_hold_to_talk_title, R.string.sc_pref_hold_to_talk_summary)
+     val NOTIFICATION_ONLY_ALERT_ONCE = ScBoolPref("NOTIFICATION_ONLY_ALERT_ONCE", false, R.string.sc_pref_notification_only_alert_once_title, R.string.sc_pref_notification_only_alert_once_summary, upstreamChoice = false)
+     //val SHOW_SYNCING_INDICATOR = ScBoolPref("SHOW_SYNCING_INDICATOR", true, R.string.sc_pref_syncing_indicator_title, R.string.sc_pref_syncing_indicator_summary, upstreamChoice = true, authorsChoice = true)
+     val DEBOUNCE_OFFLINE_STATE = ScBoolPref("DEBOUNCE_OFFLINE_STATE", true, R.string.sc_pref_debounce_offline_state_title, R.string.sc_pref_debounce_offline_state_summary, authorsChoice = null, upstreamChoice = false)
+@@ -167,6 +168,7 @@ object ScPrefs {
+             )),
+             ScPrefCategory(R.string.sc_pref_category_general_behaviour, null, listOf(
+                 FAST_TRANSITIONS,
++                SC_HOLD_TO_TALK,
+             )),
+         )),
+         ScPrefScreen(R.string.sc_pref_category_chat_overview, null, listOf(
+diff --git a/schildi/lib/src/main/res/values/strings.xml b/schildi/lib/src/main/res/values/strings.xml
+index 67f5787512..d662c4311a 100644
+--- a/schildi/lib/src/main/res/values/strings.xml
++++ b/schildi/lib/src/main/res/values/strings.xml
+@@ -235,4 +235,6 @@
+     <string name="sc_voice_too_short">Too short, hold to record</string>
+     <string name="sc_voice_slide_up_to_cancel">Slide up to cancel</string>
+     <string name="sc_voice_release_to_cancel">Release to cancel</string>
++    <string name="sc_pref_hold_to_talk_title">Hold to talk</string>
++    <string name="sc_pref_hold_to_talk_summary">Long press an empty message box to record a voice message: release to send it, slide up to cancel</string>
+ </resources>
+-- 
+2.56.0
+

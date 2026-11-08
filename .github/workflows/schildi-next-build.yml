@@ -1,0 +1,158 @@
+name: SchildiChat Next - Build (voice composer patches)
+
+on:
+  schedule:
+    - cron: '26 18 */5 * *'  # Every 5 days at 02:26 Beijing time (18:26 UTC)
+  workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: 'schildichat-android-next branch/tag/commit. Leave empty to use latest main.'
+        required: false
+      create_release:
+        description: 'Create GitHub release'
+        type: boolean
+        default: false
+  push:
+    paths:
+      - 'schildi-next/**'
+      - '.github/workflows/schildi-next-build.yml'
+      - 'scripts/common.sh'
+
+env:
+  UPSTREAM_REPO: SchildiChat/schildichat-android-next
+  UPSTREAM_REF: main
+  # Same as the upstream CI, minus the configuration cache (not needed for a one-shot build)
+  GRADLE_OPTS: >-
+    -Dorg.gradle.jvmargs=-Xmx8g -XX:MaxMetaspaceSize=512m -Dfile.encoding=UTF-8
+    -XX:+HeapDumpOnOutOfMemoryError -XX:+UseG1GC -Dkotlin.daemon.jvm.options=-Xmx4g
+  CI_GRADLE_ARG_PROPERTIES: --stacktrace --no-daemon --no-configuration-cache
+  # SchildiChat only publishes the default variant: default app id is chat.schildi.android
+  GRADLE_TASK: ':app:assembleFdroidScDefaultRelease'
+
+concurrency:
+  group: schildi-next-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check-update:
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.check.outputs.should_build }}
+      cache_key: ${{ steps.check.outputs.cache_key }}
+      upstream_sha: ${{ steps.resolve.outputs.upstream_sha }}
+    steps:
+      - name: Checkout framework
+        uses: actions/checkout@v4
+
+      - name: Resolve upstream commit
+        id: resolve
+        run: |
+          REF="${{ github.event.inputs.upstream_ref || env.UPSTREAM_REF }}"
+          if [[ "$REF" =~ ^[0-9a-f]{40}$ ]]; then
+            SHA="$REF"
+          else
+            SHA=$(git ls-remote "https://github.com/${UPSTREAM_REPO}.git" "$REF" | cut -f1 | head -n1)
+            if [ -z "$SHA" ]; then
+              # Not a branch, so it may be a tag
+              SHA=$(git ls-remote "https://github.com/${UPSTREAM_REPO}.git" "refs/tags/$REF^{}" | cut -f1 | head -n1)
+            fi
+          fi
+          if [ -z "$SHA" ]; then
+            echo "::error::Failed to resolve upstream ref '$REF'"
+            exit 1
+          fi
+          echo "upstream_sha=$SHA" >> $GITHUB_OUTPUT
+          echo "Upstream ref $REF resolved to $SHA"
+
+      - name: Check if build needed
+        id: check
+        uses: ./.github/workflows/utils/check-update
+        with:
+          cache_key: schildi-next-v1-${{ steps.resolve.outputs.upstream_sha }}-${{ github.sha }}
+          skip_cache: ${{ github.event_name == 'workflow_dispatch' }}
+
+  build:
+    needs: check-update
+    if: needs.check-update.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout patch framework
+        uses: actions/checkout@v4
+
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: true
+          android: false
+          dotnet: true
+          haskell: true
+          large-packages: false
+          docker-images: true
+          swap-storage: false
+
+      - name: Clone upstream
+        run: |
+          git clone --filter=blob:none --no-checkout \
+            "https://github.com/${UPSTREAM_REPO}.git" schildi-next-src
+          cd schildi-next-src
+          git checkout "${{ needs.check-update.outputs.upstream_sha }}"
+
+      - name: Apply patches
+        run: |
+          source scripts/common.sh
+          apply_all_patches schildi-next schildi-next-src
+
+      - name: Show patched files
+        run: git -C schildi-next-src status --short
+
+      - name: Setup JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build APKs
+        working-directory: schildi-next-src
+        run: ./gradlew ${{ env.GRADLE_TASK }} ${{ env.CI_GRADLE_ARG_PROPERTIES }}
+
+      - name: Collect APKs
+        run: |
+          rm -rf apks && mkdir -p apks
+          find schildi-next-src/app/build/outputs/apk -name '*.apk' -path '*release*' -exec cp {} apks/ \;
+          if ! ls apks/*.apk >/dev/null 2>&1; then
+            echo "::error::No release APK was produced"
+            find schildi-next-src/app/build/outputs -maxdepth 4 -type d || true
+            exit 1
+          fi
+          ls -la apks
+
+      - name: Upload APKs
+        uses: actions/upload-artifact@v4
+        with:
+          name: schildi-next-fdroid-default-release
+          path: apks/*.apk
+          retention-days: 90
+          if-no-files-found: error
+
+      - name: Create release
+        if: github.event_name == 'workflow_dispatch' && inputs.create_release == true
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: schildi-next-${{ needs.check-update.outputs.upstream_sha }}
+          name: schildi-next ${{ needs.check-update.outputs.upstream_sha }}
+          files: apks/*.apk
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Commit successful build
+        if: success()
+        uses: ./.github/workflows/utils/commit-successful-update
+        with:
+          cache_key: schildi-next-v1-${{ needs.check-update.outputs.upstream_sha }}-${{ github.sha }}
