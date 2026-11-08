@@ -137,6 +137,16 @@ jobs:
           ls -la apks
           sha256sum "apks/${{ env.APK_NAME }}"
 
+      - name: Verify the APK
+        run: |
+          BUILD_TOOLS=$(ls -d "${ANDROID_SDK_ROOT:-$ANDROID_HOME}"/build-tools/* | sort -V | tail -1)
+          BADGING=$("$BUILD_TOOLS/aapt2" dump badging "apks/${APK_NAME}" | grep -E '^(package|application-label|native-code|targetSdkVersion):')
+          echo "$BADGING"
+          echo "$BADGING" | grep -q "name='chat.schildi.android.mod'" \
+            || { echo "::error::unexpected package id"; exit 1; }
+          echo "$BADGING" | grep -q "native-code: 'arm64-v8a'" \
+            || { echo "::error::unexpected native code"; exit 1; }
+
       - name: Publish the APK to ${{ env.RELEASE_TAG }} (overwrites the previous one)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
