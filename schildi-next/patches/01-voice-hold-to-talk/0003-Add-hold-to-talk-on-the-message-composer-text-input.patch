@@ -1,4 +1,4 @@
-From b5875b93fa36f9d128490b66c42aed3e93efc0b0 Mon Sep 17 00:00:00 2001
+From 62f9a4f6417b7edd150065e5672d18d55b093e10 Mon Sep 17 00:00:00 2001
 From: lzc256 <i@lzc256.com>
 Date: Sun, 8 Nov 2026 20:54:15 +0800
 Subject: [PATCH 3/3] Add hold to talk on the message composer text input
@@ -22,11 +22,11 @@ is not granted, and when the SC_HOLD_TO_TALK preference is turned off.
  .../messagecomposer/MessageComposerView.kt    |   7 +
  .../DefaultVoiceMessageComposerPresenter.kt   |   8 +
  .../libraries/textcomposer/TextComposer.kt    |  52 +++++
- .../components/VoiceHoldGestureOverlay.kt     | 186 ++++++++++++++++++
+ .../components/VoiceHoldGestureOverlay.kt     | 187 ++++++++++++++++++
  .../textcomposer/TextComposerEndButtonTest.kt |   1 +
  .../chat/schildi/lib/preferences/ScPrefs.kt   |   2 +
  schildi/lib/src/main/res/values/strings.xml   |   2 +
- 9 files changed, 265 insertions(+)
+ 9 files changed, 266 insertions(+)
  create mode 100644 libraries/textcomposer/impl/src/main/kotlin/io/element/android/libraries/textcomposer/components/VoiceHoldGestureOverlay.kt
 
 diff --git a/features/messages/api/src/main/kotlin/io/element/android/features/messages/api/timeline/voicemessages/composer/VoiceMessageComposerEvent.kt b/features/messages/api/src/main/kotlin/io/element/android/features/messages/api/timeline/voicemessages/composer/VoiceMessageComposerEvent.kt
@@ -230,10 +230,10 @@ index a18288f4c4..3221127cb5 100644
          onTyping = {},
 diff --git a/libraries/textcomposer/impl/src/main/kotlin/io/element/android/libraries/textcomposer/components/VoiceHoldGestureOverlay.kt b/libraries/textcomposer/impl/src/main/kotlin/io/element/android/libraries/textcomposer/components/VoiceHoldGestureOverlay.kt
 new file mode 100644
-index 0000000000..f324d185d8
+index 0000000000..9eeff7b769
 --- /dev/null
 +++ b/libraries/textcomposer/impl/src/main/kotlin/io/element/android/libraries/textcomposer/components/VoiceHoldGestureOverlay.kt
-@@ -0,0 +1,186 @@
+@@ -0,0 +1,187 @@
 +/*
 + * Copyright (c) 2025 Element Creations Ltd.
 + * Copyright 2023-2025 New Vector Ltd.
@@ -277,6 +277,7 @@ index 0000000000..f324d185d8
 +import io.element.android.libraries.designsystem.theme.components.Text
 +import kotlin.time.Duration
 +import kotlin.time.Duration.Companion.seconds
++import kotlin.time.TimeMark
 +import kotlin.time.TimeSource
 +
 +// SC: distance to slide up before the recording gets cancelled
@@ -418,7 +419,7 @@ index 0000000000..f324d185d8
 +
 +private class HoldToTalkGestureState {
 +    var isRecording: Boolean = false
-+    var startedAt: TimeSource.Mark? = null
++    var startedAt: TimeMark? = null
 +}
 diff --git a/libraries/textcomposer/impl/src/test/kotlin/io/element/android/libraries/textcomposer/TextComposerEndButtonTest.kt b/libraries/textcomposer/impl/src/test/kotlin/io/element/android/libraries/textcomposer/TextComposerEndButtonTest.kt
 index c979e8c909..faf4f0b859 100644
