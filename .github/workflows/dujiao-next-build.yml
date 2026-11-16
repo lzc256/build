@@ -1,0 +1,175 @@
+name: Dujiao-Next - Custom Build
+
+on:
+  schedule:
+    - cron: '23 19 * * *'  # Check once daily at 03:23 Beijing time (19:23 UTC)
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Upstream branch, tag, or commit (default: main)'
+        required: false
+        default: ''
+        type: string
+  push:
+    paths:
+      - 'dujiao-next/**'
+      - '.github/workflows/dujiao-next-build.yml'
+      - 'scripts/common.sh'
+
+env:
+  REGISTRY: ghcr.io
+  UPSTREAM_REPO: dujiao-next/dujiao-next
+  UPSTREAM_REF: main
+
+jobs:
+  check-update:
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.check.outputs.should_build }}
+      cache_key: ${{ steps.check.outputs.cache_key }}
+      commit: ${{ steps.upstream.outputs.commit }}
+      short_commit: ${{ steps.upstream.outputs.short_commit }}
+      ref: ${{ steps.upstream.outputs.ref }}
+    steps:
+      - name: Checkout framework
+        uses: actions/checkout@v4
+
+      - name: Resolve upstream commit
+        id: upstream
+        env:
+          INPUT_REF: ${{ inputs.ref }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          REF="${INPUT_REF:-${UPSTREAM_REF}}"
+          # git ls-remote has no API quota, so it resolves branches and tags even
+          # when the anonymous GitHub API answers 403 on a shared runner IP.
+          resolve() {
+            git ls-remote "https://github.com/${UPSTREAM_REPO}" "$1" 2>/dev/null | head -1 | cut -f1
+          }
+          COMMIT="$(resolve "refs/heads/${REF}")"
+          if [ -z "$COMMIT" ]; then
+            COMMIT="$(resolve "refs/tags/${REF}")"
+          fi
+          if [ -z "$COMMIT" ] && printf '%s' "$REF" | grep -Eq '^[0-9a-f]{40}$'; then
+            COMMIT="$REF"
+          fi
+          if [ -z "$COMMIT" ]; then
+            COMMIT=$(curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" \
+              "https://api.github.com/repos/${UPSTREAM_REPO}/commits/${REF}" 2>/dev/null | jq -r '.sha // empty')
+          fi
+          if [ -z "$COMMIT" ]; then
+            echo "Failed to resolve upstream ref: $REF"
+            exit 1
+          fi
+          SHORT_COMMIT="${COMMIT:0:7}"
+          echo "ref=$REF" >> "$GITHUB_OUTPUT"
+          echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
+          echo "short_commit=$SHORT_COMMIT" >> "$GITHUB_OUTPUT"
+          echo "Upstream ref: $REF"
+          echo "Upstream commit: $COMMIT"
+
+      - name: Check if build needed
+        id: check
+        uses: ./.github/workflows/utils/check-update
+        with:
+          cache_key: dujiaonext-${{ steps.upstream.outputs.commit }}-${{ github.sha }}
+
+  build:
+    needs: check-update
+    if: needs.check-update.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout patch framework
+        uses: actions/checkout@v4
+
+      - name: Clone dujiao-next upstream
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.UPSTREAM_REPO }}
+          path: dujiao-next-src
+          ref: ${{ needs.check-update.outputs.commit }}
+          # 补丁脚本基于锚点匹配，本身不依赖 git 历史；这里保留完整历史只是为了
+          # 在需要时能用 git diff 查看上游改动，不影响补丁应用。
+          fetch-depth: 0
+
+      - name: Remove ads (backend module + admin dashboard widgets)
+        run: |
+          source scripts/common.sh
+          apply_patch remove-ads dujiao-next-src
+
+      - name: Apply loop card secret patch (one secret delivered N times)
+        run: |
+          source scripts/common.sh
+          apply_patch loop-card-secret dujiao-next-src
+
+      - name: Verify patches applied
+        run: |
+          echo "=== Patch verification ==="
+          git -C dujiao-next-src status --porcelain
+          set -e
+          # remove-ads: 后端模块与前端组件必须彻底消失，装配/路由/权限不得残留引用
+          test ! -d dujiao-next-src/internal/modules/adproxy
+          test ! -f dujiao-next-src/frontend/admin/src/components/admin/DashboardAd.vue
+          test ! -f dujiao-next-src/internal/architecture/adproxy_handler_structure_test.go
+          if grep -rIl "adproxy\|AdProxy\|DashboardAd" dujiao-next-src/internal dujiao-next-src/frontend/admin/src; then
+            echo "remove-ads: dangling ad references found"; exit 1
+          fi
+          echo "remove-ads: clean"
+          # loop-card-secret: 前缀、领域判定、两条链路、库存展示、预警、前端
+          grep -q 'LoopSecretPrefix = "__loop__:"' dujiao-next-src/internal/modules/cardsecret/domain/secret.go
+          grep -q 'func IsLoopSecret' dujiao-next-src/internal/modules/cardsecret/domain/secret.go
+          grep -q 'func FirstLoopSecret' dujiao-next-src/internal/modules/cardsecret/domain/secret.go
+          grep -q 'validateLoopSecrets := func' dujiao-next-src/internal/modules/cardsecret/application/import.go
+          grep -q 'cardsecretdomain.FirstLoopSecret(rows)' dujiao-next-src/internal/modules/order/application/order_service.go
+          grep -q 'cardsecretdomain.FirstLoopSecret(selected)' dujiao-next-src/internal/modules/fulfillment/application/service.go
+          grep -q 'resolveLoopSecretSKUs' dujiao-next-src/internal/modules/catalog/product/application/stock.go
+          grep -q 'hasLoopSKU' dujiao-next-src/internal/modules/catalog/product/transport/http/public_stock.go
+          grep -q 'detectLoopSecretSKUs' dujiao-next-src/internal/modules/dashboard/infrastructure/gormstore/inventory.go
+          grep -q 'if (autoStock < 0) return null' dujiao-next-src/frontend/user/src/composables/useCart.ts
+          echo "loop-card-secret: clean"
+          echo "=== diff stat ==="
+          git -C dujiao-next-src diff --stat | tail -5
+
+      - name: Login to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build and Push
+        uses: docker/build-push-action@v6
+        with:
+          context: dujiao-next-src
+          push: true
+          provenance: false
+          tags: |
+            ${{ env.REGISTRY }}/${{ github.repository }}:dujiao-next
+            ${{ env.REGISTRY }}/${{ github.repository }}:dujiao-next-${{ needs.check-update.outputs.short_commit }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Commit successful build
+        if: success()
+        uses: ./.github/workflows/utils/commit-successful-update
+        with:
+          cache_key: ${{ needs.check-update.outputs.cache_key }}
+
+      - name: Summary
+        run: |
+          {
+          echo "## Dujiao-Next Build Summary"
+          echo "| Item | Value |"
+          echo "|------|-------|"
+          echo "| Upstream Ref | \`${{ needs.check-update.outputs.ref }}\` |"
+          echo "| Upstream Commit | \`${{ needs.check-update.outputs.commit }}\` |"
+          echo "| Patches | \`remove-ads\`, \`loop-card-secret\` |"
+          echo "| Image (latest) | \`${{ env.REGISTRY }}/${{ github.repository }}:dujiao-next\` |"
+          echo "| Image (commit) | \`${{ env.REGISTRY }}/${{ github.repository }}:dujiao-next-${{ needs.check-update.outputs.short_commit }}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"

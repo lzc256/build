@@ -48,6 +48,7 @@ git -C project-src diff
 | `netbird-build.yml` | `netbirdio/netbird` | `netbird-anet-linux-arm64` |
 | `firefly-docker.yml` | `firefly-iii/firefly-iii` | Docker 镜像 |
 | `schildi-next-build.yml` | `SchildiChat/schildichat-android-next` | APK（`fdroidScDefaultRelease`） |
+| `dujiao-next-build.yml` | `dujiao-next/dujiao-next` | Docker 镜像（`dujiao-next` / `dujiao-next-<short>`） |
 | `other-build.yml` | 模板 | — |
 
 ### zeroclaw 构建参数
