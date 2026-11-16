@@ -131,6 +131,12 @@ jobs:
              -lt "$(grep -n 'cardsecretdomain.FirstLoopSecret(selected)' dujiao-next-src/internal/modules/fulfillment/application/service.go | head -1 | cut -d: -f1)" \
              || { echo 'loop check must come after available-row fill'; exit 1; }
           grep -q 'func TestLoopSecretDeliversContentWithoutPrefix(' dujiao-next-src/internal/modules/fulfillment/integrationtest/application/service_test.go
+          # 导出守卫: 导出会把卡密标 used，循环规格必须排除在外
+          grep -q 'excludeLoopSecrets := func' dujiao-next-src/internal/modules/cardsecret/application/export.go
+          grep -q 'func TestLoopSecretIsNotExportable(' dujiao-next-src/internal/modules/cardsecret/integrationtest/service_test.go
+          # 后台列表: -1 必须显示为「库存不限」，不能渲染成 -1/-1 或红色售罄徽章
+          grep -q "if (total < 0) {" dujiao-next-src/frontend/admin/src/views/admin/Products.vue
+          grep -q "if (available < 0) {" dujiao-next-src/frontend/admin/src/views/admin/Products.vue
           grep -q 'resolveLoopSecretSKUs' dujiao-next-src/internal/modules/catalog/product/application/stock.go
           grep -q 'hasLoopSKU' dujiao-next-src/internal/modules/catalog/product/transport/http/public_stock.go
           grep -q 'detectLoopSecretSKUs' dujiao-next-src/internal/modules/dashboard/infrastructure/gormstore/inventory.go

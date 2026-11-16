@@ -256,9 +256,29 @@ if finder, ok := counter.(loopSecretFinder); ok { ... }
 - 消费端处理负数：`useCart.ts`、`useCheckout.ts` 的 auto 分支补 2 行
 - `utils/publicStock.ts` 已有 `autoStock < 0 → null`，**不用改**
 
-### 5.9 后台（`frontend/admin`）
+### 5.9 后台商品列表（`frontend/admin/src/views/admin/Products.vue`）
 
-**零改动**（本仓库自用，运营直接写前缀）。
+录入侧零改动（本仓库自用，运营直接写前缀）。但**展示侧必须改 2 处**，
+否则循环规格在商品列表里会显示成售罄：
+
+| 位置 | 原本 | 问题 |
+|---|---|---|
+| `formatAutoStockSummary` | 直接拼 `auto_stock_total` | 循环规格是 `-1`，渲染成「库存 -1/-1 · 锁定 0 · 已售 0」 |
+| `autoStockBadgeClass` | `available <= 0` → 红色 | `-1` 落进 `<= 0`，被标成**售罄红徽章** |
+
+两处都补 `-1` 分支，与隔壁 manual 分支（`formatManualStockSummary` /
+`manualStockBadgeClass` 已有 `total === -1 → 库存不限`）的写法完全对齐。
+改完循环规格显示「**库存不限**」+ 绿色徽章。
+
+### 5.10 导出守卫（`cardsecret/application/export.go`）
+
+后台「导出可用卡密」会把导出的行批量改成 `used`（或用 `DeleteAfterExport` 直接删）。
+对循环规格是致命的：那条唯一的卡密一旦不再是 `available`，可用数就不是 1，
+不再进入库存探测候选集 —— 后台立刻显示 `0/0 · 锁定 0 · 已售 1`、买家端显示售罄，
+**和 §5.4 那个判定顺序 bug 的表现一模一样**。
+
+因此 `ExportAvailableCardSecrets` 在取到行之后、数量校验之前就把循环卡密过滤掉
+（`excludeLoopSecrets`，同样写成本地闭包）：循环卡密不可导出，一条都不会被标记。
 
 ---
 
@@ -268,7 +288,7 @@ if finder, ok := counter.(loopSecretFinder); ok { ... }
 |---|---|
 | 手工改库把循环卡密塞进有大量普通卡密的规格 | `available ≠ 1` → 不显示"不限"，按普通卡密发（不会有脏数据） |
 | 一个规格被绕过校验塞了 ≥2 条循环卡密 | 发货取 id 最小的那条；展示不显示"不限" |
-| 循环卡密的 `status` 被改成 reserved/used | 立即失效，商品显示真实库存 |
+| 循环卡密的 `status` 被改成 reserved/used | 立即失效，商品显示真实库存（后台 `0/0 · 锁定 0 · 已售 1`）。已被 §5.4/§5.10 堵住，只有手工改库才会发生；恢复见 §7.1 |
 | 人工发货商品 | **完全不受影响**（`CreateManual` 完全不碰 `card_secrets`） |
 | 订单取消/超时释放 | 只回滚 `reserved`，循环卡密从未被占用，无影响 |
 
@@ -311,6 +331,9 @@ WHERE substr(secret, 1, 9) = '__loop__:'
 顺带说明：这些订单的 `fulfillment.payload` 里存的是带前缀的内容
 （当时漏了剥离），已经交付给买家的那一行不追改；后续发货会是干净内容。
 
+注意区分两种"不见了"：本节是 `status` 被改成 `used`（卡密还在、但不算可用）；
+如果是 `deleted_at` 被软删除，见 §10.3。两者都会让后台显示 `0/0 · 已售 1` 式的数字。
+
 ---
 
 ## 8. 补丁脚本结构
@@ -326,6 +349,7 @@ WHERE substr(secret, 1, 9) = '__loop__:'
 | `005-frontend-user.sh` | 用户端保留并消费 `-1` |
 | `006-tests.sh` | 领域单测 + 导入不变量集成测试 |
 | `007-stock-tests.sh` | 库存聚合单测（含候选集断言） |
+| `008-admin-and-export-guard.sh` | 后台列表 `-1` → 「库存不限」+ 绿徽章；导出排除循环卡密；导出守卫测试 |
 
 所有脚本都是**幂等脚本**（锚点匹配 + 已存在则跳过 + 结尾断言），不是 `.patch` 文件：
 上游改了周围代码时，锚点仍在就能继续套用；真的改动到锚点本身时，
@@ -349,9 +373,11 @@ WHERE substr(secret, 1, 9) = '__loop__:'
    连发三单，断言每单 `payload` 等于裸内容重复 quantity 次（无 `__loop__:` 前缀）、
    且三单之后卡密仍为 `available` 且未绑定订单；
    `TestNormalSKUStillRequiresEnoughStock` —— 普通规格库存不足仍然报错（无回归）
-4. 待人工验收（需要真实容器）：C 端商品页/购物车/结算页不显示"仅剩 1 件"、不限购；
-   后台预警列表不出现循环规格
-5. CI：`.github/workflows/dujiao-next-build.yml`
+4. 后台展示与导出守卫（`cardsecret/integrationtest`）：
+   `TestLoopSecretIsNotExportable` —— 导出循环卡密被拒绝，且卡密仍是 `available`
+5. 待人工验收（需要真实容器）：C 端商品页/购物车/结算页不显示"仅剩 1 件"、不限购；
+   后台商品列表显示「库存不限」、预警列表不出现循环规格
+6. CI：`.github/workflows/dujiao-next-build.yml`
    按 `remove-ads` → `loop-card-secret` 顺序套补丁，断言关键改动全部落地后再
    Docker 构建（含 admin/user 前端 `vue-tsc` + `vite build`），推
    `ghcr.io/<repo>:dujiao-next` 与 `:dujiao-next-<short>`。
