@@ -355,3 +355,90 @@ WHERE substr(secret, 1, 9) = '__loop__:'
    按 `remove-ads` → `loop-card-secret` 顺序套补丁，断言关键改动全部落地后再
    Docker 构建（含 admin/user 前端 `vue-tsc` + `vite build`），推
    `ghcr.io/<repo>:dujiao-next` 与 `:dujiao-next-<short>`。
+
+## 10. 运维：删除、恢复与磁盘空间回收
+
+### 10.1 后台“删除”是软删除
+
+`BatchDeleteByIDs` 只写 `deleted_at`，不 DELETE：
+
+```go
+result := r.db.Model(&cardsecretdomain.Secret{}).
+    Where("id IN ? AND deleted_at IS NULL", ids).
+    Updates(map[string]interface{}{"deleted_at": now, "updated_at": now})
+```
+
+全仓库没有硬删除路径，也没有清理软删行的定时任务，所以**行会永久留在表里**。
+这些行对应用完全不可见（所有 `card_secrets` 查询都带 `deleted_at IS NULL`），
+但会一直占文件体积，且 SQLite 的 `DELETE` 也只把页放进 freelist，不 `VACUUM` 不会还盘。
+
+一个容易踩的点：`Secret.DeletedAt` 是 **`*time.Time`**，不是 `gorm.DeletedAt`，
+GORM 不会自动加过滤条件 —— 任何新写的查询都必须自己带 `deleted_at IS NULL`。
+
+`card_secrets` 只有指向 `card_secret_batches` 的外键（它是子表），**没有任何表引用它**；
+订单交付内容存在 `fulfillments.payload` 文本里，所以清理历史行不影响历史订单。
+
+### 10.2 回收空间：`scripts/reclaim-card-secrets.sh`
+
+```bash
+# 只统计，不改动
+./reclaim-card-secrets.sh /app/db/dujiao.db --dry-run
+
+# 清理全部已软删除行（先备份再 VACUUM）
+./reclaim-card-secrets.sh /app/db/dujiao.db
+
+# 只清理 30 天前删除的，自动化场景免交互
+./reclaim-card-secrets.sh /app/db/dujiao.db --days 30 --force
+```
+
+要求：`sqlite3` CLI ≥ 3.27（`VACUUM INTO`）。上游运行时镜像是
+`alpine:latest` + `ca-certificates` + `tzdata`，**镜像里没有 sqlite3**，所以别指望
+`docker exec` 能直接跑：
+
+```bash
+# A. 数据库是 bind mount（DB 在宿主机上）：停容器，直接在宿主机跑
+docker compose stop dujiao-next
+./dujiao-next/scripts/reclaim-card-secrets.sh ./data/db/dujiao.db
+docker compose start dujiao-next
+
+# B. 数据库在 named volume 里：拷出来处理，再拷回去
+docker compose stop dujiao-next
+docker cp dujiao-next:/app/db/dujiao.db ./dujiao.db
+./dujiao-next/scripts/reclaim-card-secrets.sh ./dujiao.db
+docker cp ./dujiao.db dujiao-next:/app/db/dujiao.db
+docker compose start dujiao-next
+```
+
+VACUUM 需要独占访问，**必须停应用**；容器默认时区是 UTC，所以容器里写入的
+`deleted_at` 是 `+00:00`，宿主机上手工写的可能是 `+08:00` —— 脚本的 `julianday`
+比较对两种格式都正确。
+
+脚本流程：`VACUUM INTO` 一致性备份 → 分批 `DELETE`（默认 5000 行/事务）→
+`wal_checkpoint(TRUNCATE)` → `VACUUM`（空间不足时自动改走 `VACUUM INTO` + 原子替换）
+→ `quick_check` / `foreign_key_check` 校验。
+
+实测（SQLite，20 万行卡密，其中 12 万行已软删除）：
+
+| 指标 | 结果 |
+|---|---|
+| 文件大小 | 56.6 MB → **20.2 MB**（回收 36.4 MB） |
+| 耗时 | 2.1 s（删除 + VACUUM + 校验） |
+| 存活行 | 80,000 行全部保留 |
+| `--no-vacuum` | 行已删但文件仍 56.6 MB（证明必须 VACUUM） |
+
+**时区陷阱（脚本已处理）**：GORM 写 `deleted_at` 用的是显式 `time.Now()`（本地时区），
+存成 `2026-11-15 14:53:13.549729+08:00`；而同一张表里 `created_at` 由 `NowFunc` 写成
+`...+00:00`。SQLite 的 `datetime('now')` 是 UTC，**直接比字符串会在时区边界上错几小时**。
+脚本改用 `julianday(deleted_at) < julianday('now','-N days')` 做精确比较，
+并保留一个 `deleted_at < datetime('now','-N days','+1 day')` 的粗边界让索引仍可用。
+实测：字符串比较会漏掉「30 天 + 4 小时前」删除的行，`julianday` 版本正确。
+
+### 10.3 恢复被删的循环卡密
+
+```sql
+UPDATE card_secrets SET deleted_at = NULL
+WHERE product_id = ? AND sku_id = ?
+  AND substr(secret, 1, 9) = '__loop__:';
+```
+
+（若已跑过回收脚本把行物理删除，就只能重新导入。**所以回收前务必留备份**。）
