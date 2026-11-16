@@ -6,10 +6,11 @@ DESCRIPTION="\
 1. frontend/admin/src/views/admin/Products.vue
    库存聚合对循环规格返回 -1（沿用「负数 = 不限」既有约定），但这个页面的
    auto 分支没有处理负数:
-   - formatAutoStockSummary 会渲染成「库存 -1/-1 · 锁定 0 · 已售 0」
-   - autoStockBadgeClass 的 available <= 0 会把 -1 判成红色售罄徽章
-   两处都补 -1 分支，与隔壁 manual 分支（formatManualStockSummary /
-   manualStockBadgeClass）的既有写法完全对齐。
+   注意这里有个坑: 这两个函数用的是 toSafeInt，而 toSafeInt 的实现是
+   Math.max(Math.floor(num), 0) —— 会把 -1 夹成 0。所以「补一个 total < 0
+   的分支」是无效的死代码，必须先换成上游为 manual 分支准备的 toSafeStockTotal
+   （它特意 if (integer === -1) return -1），-1 才能活着走到判断里。
+   若不换，-1 被夹成 0，页面显示「库存 0/0」并配红色售罄徽章。
 
 2. internal/modules/cardsecret/application/export.go
    后台「导出可用卡密」会把导出的行批量改成 used。对循环规格这是灾难:
@@ -46,6 +47,7 @@ if ! grep -q 'if (total < 0) {' "$PRODUCTS_VUE"; then
     return t('admin.products.stock.unlimited')
   }
 EOF
+    # 先把 total 的读取换成保留 -1 的 toSafeStockTotal，再插判断分支
     BLOCK_FILE="$BLOCK" perl -0pi -e '
 BEGIN {
 	local $/;
@@ -56,7 +58,8 @@ BEGIN {
 my $anchor = "const formatAutoStockSummary = (product: AdminProduct) => {\n  const total = toSafeInt(product?.auto_stock_total)\n";
 my $pos = index($_, $anchor);
 die "formatAutoStockSummary anchor not found\n" if $pos < 0;
-substr($_, $pos + length($anchor), 0) = $block;
+my $fixed = "const formatAutoStockSummary = (product: AdminProduct) => {\n  const total = toSafeStockTotal(product?.auto_stock_total)\n";
+substr($_, $pos, length($anchor)) = $fixed . $block;
 ' "$PRODUCTS_VUE"
     rm -f "$BLOCK"
 fi
@@ -83,13 +86,16 @@ die "autoStockBadgeClass not found\n" if $start < 0;
 my $anchor = "  const available = toSafeInt(product?.auto_stock_available)\n";
 my $pos = index($_, $anchor, $start);
 die "available anchor not found after autoStockBadgeClass\n" if $pos < 0;
-substr($_, $pos + length($anchor), 0) = $block;
+my $fixed = "  const available = toSafeStockTotal(product?.auto_stock_available)\n";
+substr($_, $pos, length($anchor)) = $fixed . $block;
 ' "$PRODUCTS_VUE"
     rm -f "$BLOCK"
 fi
 
 grep -q 'if (total < 0) {' "$PRODUCTS_VUE" || die "auto stock unlimited branch not added"
 grep -q 'if (available < 0) {' "$PRODUCTS_VUE" || die "auto stock badge negative branch not added"
+grep -q 'toSafeStockTotal(product?.auto_stock_total)' "$PRODUCTS_VUE" || die "auto total must use toSafeStockTotal (toSafeInt clamps -1 to 0)"
+grep -q 'toSafeStockTotal(product?.auto_stock_available)' "$PRODUCTS_VUE" || die "auto available must use toSafeStockTotal (toSafeInt clamps -1 to 0)"
 [ "$(grep -c 'admin.products.stock.unlimited' "$PRODUCTS_VUE")" -ge 2 ] || die "unlimited label not reused"
 
 # ---------------------------------------------------------------------------

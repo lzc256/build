@@ -263,12 +263,28 @@ if finder, ok := counter.(loopSecretFinder); ok { ... }
 
 | 位置 | 原本 | 问题 |
 |---|---|---|
-| `formatAutoStockSummary` | 直接拼 `auto_stock_total` | 循环规格是 `-1`，渲染成「库存 -1/-1 · 锁定 0 · 已售 0」 |
+| `formatAutoStockSummary` | 用 `toSafeInt` 读 `auto_stock_total` | 循环规格是 `-1` |
 | `autoStockBadgeClass` | `available <= 0` → 红色 | `-1` 落进 `<= 0`，被标成**售罄红徽章** |
 
-两处都补 `-1` 分支，与隔壁 manual 分支（`formatManualStockSummary` /
-`manualStockBadgeClass` 已有 `total === -1 → 库存不限`）的写法完全对齐。
-改完循环规格显示「**库存不限**」+ 绿色徽章。
+⚠️ **这里有一个把补丁写废的坑，第一版就踩了：**
+
+`toSafeInt` 的实现是 `Math.max(Math.floor(num), 0)` —— **它把 -1 夹成 0**。
+所以「在函数里补一句 `if (total < 0)`」是**永远不成立的死代码**：
+后端明明返回了 `-1`（买家端已经正确显示「库存无限」），管理端却渲染成
+`库存 0/0 · 锁定 0 · 已售 0`，徽章还因为 `available <= 0` 变成红色。
+
+正确做法是先把读取函数换成上游为 manual 分支准备的 `toSafeStockTotal`
+（它特意 `if (integer === -1) return -1`），`-1` 才能活着走到判断里：
+
+| 场景 | 修复前 | 修复后 |
+|---|---|---|
+| 循环卡密（后端返回 -1） | `库存 0/0` + 红徽章 | **`库存不限`** + 绿徽章 |
+| 普通库存 5 | `库存 5/5` + 绿徽章 | `库存 5/5` + 绿徽章（不变） |
+| 已售罄 0 | `库存 0/0` + 红徽章 | `库存 0/0` + 红徽章（不变） |
+
+（上表是用 node 复刻两个函数实测出来的，不是推断。）
+
+CI 里额外加了一条反向断言：**一旦有人把 `auto_stock_total` 改回 `toSafeInt` 读取就报错**。
 
 ### 5.10 导出守卫（`cardsecret/application/export.go`）
 

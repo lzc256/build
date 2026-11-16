@@ -137,6 +137,12 @@ jobs:
           # 后台列表: -1 必须显示为「库存不限」，不能渲染成 -1/-1 或红色售罄徽章
           grep -q "if (total < 0) {" dujiao-next-src/frontend/admin/src/views/admin/Products.vue
           grep -q "if (available < 0) {" dujiao-next-src/frontend/admin/src/views/admin/Products.vue
+          # toSafeInt 会把 -1 夹成 0（Math.max(...,0)），必须用保留 -1 的 toSafeStockTotal
+          grep -q "toSafeStockTotal(product?.auto_stock_total)" dujiao-next-src/frontend/admin/src/views/admin/Products.vue
+          grep -q "toSafeStockTotal(product?.auto_stock_available)" dujiao-next-src/frontend/admin/src/views/admin/Products.vue
+          if grep -q "toSafeInt(product?.auto_stock_total)" dujiao-next-src/frontend/admin/src/views/admin/Products.vue; then
+            echo "admin auto stock must not read total through toSafeInt (clamps -1 to 0)"; exit 1
+          fi
           grep -q 'resolveLoopSecretSKUs' dujiao-next-src/internal/modules/catalog/product/application/stock.go
           grep -q 'hasLoopSKU' dujiao-next-src/internal/modules/catalog/product/transport/http/public_stock.go
           grep -q 'detectLoopSecretSKUs' dujiao-next-src/internal/modules/dashboard/infrastructure/gormstore/inventory.go
