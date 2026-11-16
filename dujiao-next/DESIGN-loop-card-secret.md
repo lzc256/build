@@ -410,12 +410,55 @@ GORM 不会自动加过滤条件 —— 任何新写的查询都必须自己带 
 # 只统计，不改动
 ./reclaim-card-secrets.sh /app/db/dujiao.db --dry-run
 
-# 清理全部已软删除行（先备份再 VACUUM）
+# 清理未发货的已删除行（默认行为，先备份再 VACUUM）
 ./reclaim-card-secrets.sh /app/db/dujiao.db
 
 # 只清理 30 天前删除的，自动化场景免交互
 ./reclaim-card-secrets.sh /app/db/dujiao.db --days 30 --force
 ```
+### 10.2.1 已发货的卡密能不能删？
+
+**能删，但默认不删。** 脚本按状态把已删除行分成三类：
+
+| 状态 | 判定条件 | 默认 | 删掉的后果 |
+|---|---|---|---|
+| 未发货 | `status='available'` 且 `order_id`/`reserved_at`/`used_at` 全为 NULL | **清理** | 无。这行从来没发给过任何人 |
+| 已发货 | `status='used'` | **保留**，需 `--include-shipped` | 丢失「哪条卡密发给了哪个订单」的唯一凭据 |
+| 待发货 | `status='reserved'` | **永不清理** | 在途订单发货时找不到行 → 订单卡住发不出货 |
+
+已发货行删掉的**具体影响**（都查证过）：
+
+1. **买家不受影响**。交付内容是 `fulfillments.payload` 文本快照，与 `card_secrets` 行脱钩。
+2. **订单页不受影响**。订单详情展示 fulfillment，不 join `card_secrets`；`ListFilter` 也没有
+   `OrderID` 字段，后台本来就没有「按订单查卡密」的入口。
+3. **退款/取消不受影响**。`ReleaseByOrder` 只回滚 `status='reserved'`，`used` 从不回滚。
+4. **库存不受影响**。`available` 计数只统计 `available` 行。
+5. **受影响的是后台数字**：`CountByProduct` 的 `used`/`total`、
+   `CountByBatchIDs` 的批次「已用」都直接数 `card_secrets`，
+   删掉 used 行后这些数字会小于真实订单数，历史批次详情看起来"少发了"。
+6. **追溯能力丢失且不可恢复**：想知道某个历史订单当时发的是哪一条卡密，
+   只能反查 `card_secrets.order_id`。删了就没有第二处记录了。
+
+所以脚本默认走安全模式；确实要压空间时才 `--include-shipped`：
+
+```bash
+# 只清理未发货的已删除行（推荐，默认）
+./reclaim-card-secrets.sh /app/db/dujiao.db
+
+# 连已发货的已删除行一起清（会永久丢失订单↔卡密的追溯关系）
+./reclaim-card-secrets.sh /app/db/dujiao.db --include-shipped
+```
+
+实测（混合样本：2 条未发货 + 2 条已发货 + 1 条待发货，均已软删除）：
+
+| 调用 | 删除 | 保留 |
+|---|---|---|
+| 默认 | 2 条未发货 | 2 条已发货 + 1 条待发货 + 2 条存活 |
+| `--include-shipped` | 4 条（未发货 + 已发货） | 1 条待发货 + 2 条存活 |
+
+⚠️ 如果看到 `待发货 (reserved): N` 的警告，说明有卡密被删掉了但仍在**在途订单**手里占用着
+（例如运营在订单未发货时就批量删了卡密）。这些行脚本不会动，需要人工确认那些订单是否
+还要发货 —— 强行删会让订单永远发不出货。
 
 要求：`sqlite3` CLI ≥ 3.27（`VACUUM INTO`）。上游运行时镜像是
 `alpine:latest` + `ca-certificates` + `tzdata`，**镜像里没有 sqlite3**，所以别指望

@@ -7,6 +7,11 @@
 # （所有查询都带 deleted_at IS NULL），但会一直占着文件体积。
 # SQLite 的 DELETE 也只把页放进 freelist，文件不会变小，必须 VACUUM 才真正还盘。
 #
+# 默认只清理「未发货」的已删除行（status=available 且无 order_id/reserved_at/used_at）。
+# 已发货（status=used）的行默认保留：它们是「哪条卡密发给了哪个订单」的唯一凭据，
+# 删掉不可恢复，且会让后台的「已用/总数」与真实订单数对不上。
+# 待发货（status=reserved）的行永远不删 —— 删了会让在途订单发不出货。
+#
 # 用法：
 #   ./reclaim-card-secrets.sh <db-path> [选项]
 #
@@ -14,10 +19,12 @@
 #   -b, --batch N       每批删除行数（默认 5000，控制单次事务与 WAL 增量）
 #   -o, --out DIR       备份目录（默认与数据库同级的 ./reclaim-backup-<时间戳>）
 #   -f, --force         跳过交互确认（自动化用）
-#       --dry-run       只统计，不做任何修改
-#       --no-backup     跳过备份（不推荐）
-#       --vacuum-only   只做 VACUUM，不删除任何行
-#       --no-vacuum     只删除不 VACUUM（空间不会立即回收）
+#       --include-shipped  同时清理已发货(status=used)的已删除行（不可恢复追溯关系）
+#       --all              同 --include-shipped，但仍不会删 reserved
+#       --dry-run          只统计，不做任何修改
+#       --no-backup        跳过备份（不推荐）
+#       --vacuum-only      只做 VACUUM，不删除任何行
+#       --no-vacuum        只删除不 VACUUM（空间不会立即回收）
 #   -h, --help          显示帮助
 #
 # 退出码：0 成功；1 参数/环境错误；2 备份失败；3 删除失败；4 VACUUM/校验失败。
@@ -28,7 +35,7 @@
 #   * 备份用 `VACUUM INTO` 生成一致性快照，应用运行时也安全。
 #   * card_secrets 只有指向 card_secret_batches 的外键（它是子表），
 #     没有任何表引用它；订单交付内容存在 fulfillments.payload 文本里，
-#     因此删除历史行不影响历史订单展示。
+#     所以删除历史行不影响买家已收到的内容。
 #   * 时间比较：GORM 把 deleted_at 写成带时区偏移的本地时间
 #     （如 2026-11-15 14:53:13.549729+08:00），而 SQLite 的 datetime('now')
 #     是 UTC。直接比字符串会在时区边界上错 8 小时，所以用 julianday() 做精确
@@ -52,6 +59,7 @@ DRY_RUN=0
 NO_BACKUP=0
 VACUUM_ONLY=0
 NO_VACUUM=0
+INCLUDE_SHIPPED=0
 DB=""
 
 while [ $# -gt 0 ]; do
@@ -61,6 +69,7 @@ while [ $# -gt 0 ]; do
         -b|--batch) BATCH="${2:?--batch 需要参数}"; shift 2 ;;
         -o|--out) OUT_DIR="${2:?--out 需要参数}"; shift 2 ;;
         -f|--force) FORCE=1; shift ;;
+        --include-shipped|--all) INCLUDE_SHIPPED=1; shift ;;
         --dry-run) DRY_RUN=1; shift ;;
         --no-backup) NO_BACKUP=1; shift ;;
         --vacuum-only) VACUUM_ONLY=1; shift ;;
@@ -110,25 +119,60 @@ info "journal:  $JOURNAL    page_size: $PAGE_SIZE"
 info "文件大小: $(human "$(file_size "$DB_ABS")")"
 
 # --- 统计 -------------------------------------------------------------------
-# 精确条件：julianday 会把带偏移的时间正规化成 UTC 再比，避免 8 小时误差
+# 时间条件：julianday 会把带偏移的时间正规化成 UTC 再比，避免时区误差；
+# 前面的粗边界让 idx_card_secrets_deleted_at 仍能被用上。
 if [ "$DAYS" -gt 0 ]; then
-    COARSE="deleted_at < datetime('now','-$DAYS days','+1 day') AND julianday(deleted_at) < julianday('now','-$DAYS days')"
+    TIME_COND="deleted_at < datetime('now','-$DAYS days','+1 day') AND julianday(deleted_at) < julianday('now','-$DAYS days')"
 else
-    COARSE="1=1"
+    TIME_COND="1=1"
 fi
-TARGET="$(q "SELECT COUNT(*) FROM card_secrets WHERE deleted_at IS NOT NULL AND $COARSE;" | tr -d '\r')"
+
+# 未发货 = 可用、且没有任何“已分配/已发货”的痕迹
+UNSHIPPED="status = 'available' AND order_id IS NULL AND reserved_at IS NULL AND used_at IS NULL"
+if [ "$INCLUDE_SHIPPED" -eq 1 ]; then
+    # 仍然排除 reserved：那是在途订单已占用的行，删了会让订单发不出货
+    TARGET_COND="status <> 'reserved'"
+else
+    TARGET_COND="$UNSHIPPED"
+fi
+
+CNT="SELECT COUNT(*) FROM card_secrets WHERE deleted_at IS NOT NULL AND $TIME_COND"
 TOTAL="$(q 'SELECT COUNT(*) FROM card_secrets;' | tr -d '\r')"
 DELETED="$(q 'SELECT COUNT(*) FROM card_secrets WHERE deleted_at IS NOT NULL;' | tr -d '\r')"
 LIVE="$(q 'SELECT COUNT(*) FROM card_secrets WHERE deleted_at IS NULL;' | tr -d '\r')"
+UNSHIPPED_N="$(q "$CNT AND $UNSHIPPED;" | tr -d '\r')"
+RESERVED_N="$(q "$CNT AND status = 'reserved';" | tr -d '\r')"
+USED_N="$(q "$CNT AND status = 'used' AND order_id IS NOT NULL;" | tr -d '\r')"
+TARGET="$(q "$CNT AND $TARGET_COND;" | tr -d '\r')"
 PAGES="$(q 'PRAGMA page_count;' | tr -d '\r')"
 FREE_PAGES="$(q 'PRAGMA freelist_count;' | tr -d '\r')"
 
 info ""
 info "card_secrets 总行数:      $TOTAL"
-info "  已软删除(全部):        $DELETED"
-info "  本次待清理(>${DAYS}天): $TARGET"
 info "  存活行(保留):          $LIVE"
+info "  已软删除:              $DELETED   （其中 >${DAYS}天: 见下）"
+info ""
+info "已删除行按发货状态拆分（>${DAYS}天）:"
+info "  未发货 (available):    $UNSHIPPED_N   ← 默认清理"
+info "  已发货 (used):         $USED_N   ← 默认保留，--include-shipped 才清理"
+info "  待发货 (reserved):     $RESERVED_N   ← 永不清理（在途订单已占用）"
+info ""
+if [ "$INCLUDE_SHIPPED" -eq 1 ]; then
+    info "本次将清理:              $TARGET 行（含已发货，保留待发货）"
+else
+    info "本次将清理:              $TARGET 行（仅未发货）"
+    [ "$USED_N" -gt 0 ] && info "  另有 $USED_N 行已发货的已删除记录被保留（可用 --include-shipped 一并清理）"
+fi
 info "页数: $PAGES  空闲页: $FREE_PAGES ($(human $(( FREE_PAGES * PAGE_SIZE ))))"
+
+if [ "$USED_N" -gt 0 ] && [ "$INCLUDE_SHIPPED" -eq 1 ]; then
+    warn "将删除 $USED_N 行已发货卡密：卡密→订单的追溯关系会永久丢失（订单侧的"
+    warn "fulfillments.payload 仍在，所以买家看到的内容不受影响）。"
+fi
+if [ "$RESERVED_N" -gt 0 ]; then
+    warn "$RESERVED_N 行待发货卡密已被软删除但属于在途订单，已跳过；请先确认这些"
+    warn "订单是否已发货，否则强行删除会导致订单无法交付。"
+fi
 
 # 顺带统计其他表的软删除残留，只报告不动手
 for t in card_secret_batches orders order_items fulfillments; do
@@ -172,7 +216,7 @@ if [ "$VACUUM_ONLY" -eq 0 ]; then
 BEGIN IMMEDIATE;
 DELETE FROM card_secrets WHERE id IN (
     SELECT id FROM card_secrets
-    WHERE deleted_at IS NOT NULL AND $COARSE
+    WHERE deleted_at IS NOT NULL AND $TIME_COND AND $TARGET_COND
     ORDER BY id
     LIMIT $BATCH
 );
@@ -235,7 +279,7 @@ CHECK="$(q 'PRAGMA quick_check;' | tr -d '\r' | head -1)"
 FK="$(q 'PRAGMA foreign_key_check;' | tr -d '\r')"
 [ -z "$FK" ] || warn "外键检查发现不一致: $FK"
 
-info "剩余 card_secrets: $(q 'SELECT COUNT(*) FROM card_secrets;' | tr -d '\r') 行（存活 $(q 'SELECT COUNT(*) FROM card_secrets WHERE deleted_at IS NULL;' | tr -d '\r') 行）"
+info "剩余 card_secrets: $(q 'SELECT COUNT(*) FROM card_secrets;' | tr -d '\r') 行（存活 $(q 'SELECT COUNT(*) FROM card_secrets WHERE deleted_at IS NULL;' | tr -d '\r') 行，已删除 $(q 'SELECT COUNT(*) FROM card_secrets WHERE deleted_at IS NOT NULL;' | tr -d '\r') 行）"
 info "文件大小: $(human "$(file_size "$DB_ABS")")"
 [ -n "$BACKUP" ] && info "备份保留在: $BACKUP"
 info "完成。"
