@@ -189,6 +189,28 @@ WHERE status='available' AND deleted_at IS NULL
 - 把该内容重复 `quantity` 次写进 `payload`
 - **不把该行放进 `ids`**，因此不会 `MarkUsed`
 
+⚠️ **这里的代码顺序是唯一不能动的细节**，而且第一版写错过一次：
+
+```
+① selected = 已占用行(reserved)          ← 循环规格下单时不占用，所以此刻是空的
+② 若不够，从可用行补齐                    ← 循环卡密在这一步才会出现
+③ 判定 FirstLoopSecret(selected)  ← 必须在这里
+④ 库存不足判定
+```
+
+第一版把 ③ 放在了 ② 之前，结果**永远命中不到**，整单退化成普通分支。
+两个症状，一个根因：
+
+| 下单数量 | 症状 |
+|---|---|
+| 1 | 不报错，但 `payload` 里带着 `__loop__:` 前缀（买家直接看到标记）；同时那条唯一的卡密被 `MarkUsed`，可用数归 0，**下一单显示"已售罄"** |
+| ≥2 | 直接报 `card secret insufficient`（1 条凑不够 quantity） |
+
+教训：这个 bug 只有把「下单 → 发货 → 再下单 → 再发货」串起来才测得出来。
+当时只测了领域函数、导入不变量和库存聚合，恰好跳过了这条主链路，所以漏了。
+现在 `fulfillment/integrationtest` 里有 `TestLoopSecretDeliversContentWithoutPrefix`
+按 `quantity ∈ {1, 3, 1}` 连发三单，锁定 payload 无前缀 + 卡密始终 available。
+
 ### 5.5 库存展示（`catalog/product/application/stock.go`）
 
 `CountStockByProductIDs`（**SQL 不改**）返回后：
@@ -266,6 +288,29 @@ WHERE substr(secret, 1, 9) = '__loop__:';
 
 已产生订单的 `fulfillment.payload` 已落库，回滚不影响历史交付。
 
+### 7.1 修复「判定顺序」bug 之前已发出的数据
+
+早期版本（判定放在补齐可用行之前）在 `quantity = 1` 时会把那条卡密 `MarkUsed`，
+线上表现为「卖过一次就打上已售罄」。升级到修复版之后卡密**不会自动复活**，
+需要手工把它们放回可用（`order_id` / `used_at` 一并清空）：
+
+```sql
+-- 先确认影响范围（应当只包含真的被消耗掉的循环卡密）
+SELECT id, product_id, sku_id, status, order_id, used_at
+FROM card_secrets
+WHERE substr(secret, 1, 9) = '__loop__:'
+  AND status <> 'available';
+
+-- 需要时再执行恢复
+UPDATE card_secrets
+SET status = 'available', order_id = NULL, used_at = NULL, updated_at = CURRENT_TIMESTAMP
+WHERE substr(secret, 1, 9) = '__loop__:'
+  AND status <> 'available';
+```
+
+顺带说明：这些订单的 `fulfillment.payload` 里存的是带前缀的内容
+（当时漏了剥离），已经交付给买家的那一行不追改；后续发货会是干净内容。
+
 ---
 
 ## 8. 补丁脚本结构
@@ -299,9 +344,14 @@ WHERE substr(secret, 1, 9) = '__loop__:';
      10 万库存规格不进候选集（断言探测请求里的候选只有那条 `available == 1` 的规格）；
      候选集为空时一条查询都不发；探测失败时降级不报错；
      "恰好剩 1 条"的普通规格不会被误判
-3. 待人工验收（需要真实容器）：循环规格下单 → 发货 → 查收 `payload`；
-   C 端商品页/购物车/结算页不显示"仅剩 1 件"、不限购；后台预警列表不出现循环规格
-4. CI：`.github/workflows/dujiao-next-build.yml`
+3. 端到端回归（`fulfillment/integrationtest`）：
+   `TestLoopSecretDeliversContentWithoutPrefix` —— 同一循环规格按 `quantity ∈ {1,3,1}`
+   连发三单，断言每单 `payload` 等于裸内容重复 quantity 次（无 `__loop__:` 前缀）、
+   且三单之后卡密仍为 `available` 且未绑定订单；
+   `TestNormalSKUStillRequiresEnoughStock` —— 普通规格库存不足仍然报错（无回归）
+4. 待人工验收（需要真实容器）：C 端商品页/购物车/结算页不显示"仅剩 1 件"、不限购；
+   后台预警列表不出现循环规格
+5. CI：`.github/workflows/dujiao-next-build.yml`
    按 `remove-ads` → `loop-card-secret` 顺序套补丁，断言关键改动全部落地后再
    Docker 构建（含 admin/user 前端 `vue-tsc` + `vite build`），推
    `ghcr.io/<repo>:dujiao-next` 与 `:dujiao-next-<short>`。

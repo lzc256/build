@@ -1,6 +1,12 @@
 #!/bin/bash
 DESCRIPTION="\
 循环卡密（一密多发）第三步: 下单与发货链路。
+- order/application: 取回的行里命中循环卡密 → 跳过库存校验、不 Reserve。
+- fulfillment/application: 命中循环卡密 → 内容重复 quantity 次、不进 ids（不 MarkUsed）。
+  ⚠️ 判定必须在「从可用行补齐」之后: 循环规格下单时不占用卡密行，判定放早了
+  永远命中不到，会退化成普通分支 —— quantity=1 时交付内容带 __loop__: 前缀并且
+  把那条唯一卡密标成已用（下一单直接"已售罄"），quantity>=2 时报库存不足。
+  已中招的库需要把被消耗的循环卡密放回 available（见设计文档 §7.1）。
 - cardsecret/domain: 新增 FirstLoopSecret(secrets) —— 按调用方顺序返回第一条循环卡密。
   下单和发货两个模块共用它，避免各自实现前缀判断。
 - order/application: auto 履约下单取回 <=quantity 行后，只要命中循环卡密
@@ -77,8 +83,39 @@ if ! grep -q 'cardsecretdomain.FirstLoopSecret(selected)' "$FULFILL"; then
     # secretLines 提前到 item 循环之前声明
     perl -0pi -e 's#\t\tvar secrets \[\]cardsecretdomain\.Secret\n#\t\tvar secrets []cardsecretdomain.Secret\n\t\tsecretLines := make([]string, 0, len(order.Items))\n#' "$FULFILL"
 
-    # 命中循环卡密的分支（放在库存不足判定之前）
-    perl -0pi -e 's#\t\t\tif len\(selected\) < item\.Quantity \{\n#\t\t\t// 循环发货规格: 整单重复发放同一内容，且不进入 ids（不标记已用）。\n\t\t\tif loopSecret := cardsecretdomain.FirstLoopSecret(selected); loopSecret != nil {\n\t\t\t\tcontent := cardsecretdomain.LoopSecretContent(loopSecret.Secret)\n\t\t\t\tfor i := 0; i < item.Quantity; i++ {\n\t\t\t\t\tsecretLines = append(secretLines, content)\n\t\t\t\t}\n\t\t\t\tcontinue\n\t\t\t}\n\t\t\tif len(selected) < item.Quantity {\n#' "$FULFILL"
+    # 命中循环卡密的分支：放在「补齐可用行」之后、「库存不足判定」之前。
+    # 顺序绝对不能颠倒 —— 循环规格下单时不占用任何卡密行（见 order_service），
+    # 所以 selected 里一开始根本没有它，必须先从可用行补齐才判定得到。
+    # 放早了会退化成普通分支：交付内容带 __loop__: 前缀，并且把那条唯一的卡密
+    # MarkUsed 掉，可用数归 0，下一单直接"已售罄"。
+    TMPLOOPBLOCK="$(mktemp)"
+    cat > "$TMPLOOPBLOCK" <<'EOF'
+			// 循环发货规格: 整单重复发放同一内容，且不进入 ids（不标记已用）。
+			if loopSecret := cardsecretdomain.FirstLoopSecret(selected); loopSecret != nil {
+				content := cardsecretdomain.LoopSecretContent(loopSecret.Secret)
+				for i := 0; i < item.Quantity; i++ {
+					secretLines = append(secretLines, content)
+				}
+				continue
+			}
+EOF
+    # 用 index 精确落到第二个 `if len(selected) < item.Quantity {`（库存不足判定），
+    # 避免 perl 替换只命中第一处（补齐可用行）而留下这个 bug。
+    FULFILL_BLOCK="$TMPLOOPBLOCK" perl -0pi -e '
+BEGIN {
+	local $/;
+	open my $fh, "<", $ENV{FULFILL_BLOCK} or die "open block: $!";
+	$block = <$fh>;
+	close $fh;
+}
+my $needle = "\t\t\tif len(selected) < item.Quantity {\n";
+my $pos = index($_, $needle);
+die "fill block not found in service.go\n" if $pos < 0;
+$pos = index($_, $needle, $pos + 1);
+die "insufficient-check block not found in service.go\n" if $pos < 0;
+substr($_, $pos, 0) = $block;
+' "$FULFILL"
+    rm -f "$TMPLOOPBLOCK"
 
     # 普通卡密逐条进入交付内容
     perl -0pi -e 's#\t\t\tsecrets = append\(secrets, selected\.\.\.\)\n#\t\t\tsecrets = append(secrets, selected...)\n\t\t\tfor _, secret := range selected {\n\t\t\t\tsecretLines = append(secretLines, secret.Secret)\n\t\t\t}\n#' "$FULFILL"

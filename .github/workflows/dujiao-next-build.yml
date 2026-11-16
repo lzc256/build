@@ -125,6 +125,12 @@ jobs:
           grep -q 'validateLoopSecrets := func' dujiao-next-src/internal/modules/cardsecret/application/import.go
           grep -q 'cardsecretdomain.FirstLoopSecret(rows)' dujiao-next-src/internal/modules/order/application/order_service.go
           grep -q 'cardsecretdomain.FirstLoopSecret(selected)' dujiao-next-src/internal/modules/fulfillment/application/service.go
+          # 循环判定必须在「从可用行补齐」之后，否则循环规格永远命中不到:
+          # 下单不占用卡密行，判定放早了就退化成普通分支（交付内容带前缀 + 卡密被标已用）
+          test "$(grep -n 'if len(selected) < item.Quantity {' dujiao-next-src/internal/modules/fulfillment/application/service.go | head -1 | cut -d: -f1)" \
+             -lt "$(grep -n 'cardsecretdomain.FirstLoopSecret(selected)' dujiao-next-src/internal/modules/fulfillment/application/service.go | head -1 | cut -d: -f1)" \
+             || { echo 'loop check must come after available-row fill'; exit 1; }
+          grep -q 'func TestLoopSecretDeliversContentWithoutPrefix(' dujiao-next-src/internal/modules/fulfillment/integrationtest/application/service_test.go
           grep -q 'resolveLoopSecretSKUs' dujiao-next-src/internal/modules/catalog/product/application/stock.go
           grep -q 'hasLoopSKU' dujiao-next-src/internal/modules/catalog/product/transport/http/public_stock.go
           grep -q 'detectLoopSecretSKUs' dujiao-next-src/internal/modules/dashboard/infrastructure/gormstore/inventory.go
