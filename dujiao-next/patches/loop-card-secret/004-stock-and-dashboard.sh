@@ -150,6 +150,9 @@ if ! grep -q 'detectLoopSecretSKUs' "$INVENTORY"; then
 
     # collectAutoInventoryAlertRows: 新参数 + 早退
     perl -0pi -e 's#func collectAutoInventoryAlertRows\(product productdomain\.Product, availableMap map\[uint\]int64, lowStockThreshold int64\) \[\]dashboard\.InventoryAlertRow \{\n\tresult := make\(\[\]dashboard\.InventoryAlertRow, 0\)\n#func collectAutoInventoryAlertRows(product productdomain.Product, availableMap map[uint]int64, lowStockThreshold int64, loopSKUs map[loopSKUKey]struct{}) []dashboard.InventoryAlertRow {\n\tresult := make([]dashboard.InventoryAlertRow, 0)\n\t// 循环发货规格不参与库存预警：其可用数量恒为 1，会稳定误报“低库存”。\n\tif productHasLoopSKU(loopSKUs, product.ID) {\n\t\treturn result\n\t}\n#' "$INVENTORY"
+# 探测复用 cardsecret 的 store，需要两个新 import（contract 类型 + store 实现）
+    grep -q 'cardsecret/infrastructure/gormstore"' "$INVENTORY" || \
+        perl -0pi -e 's#(cardsecretdomain "github\.com/dujiao-next/internal/modules/cardsecret/domain"\n)#cardsecretcontract "github.com/dujiao-next/internal/modules/cardsecret/contract"\n\tcardsecretdomain "github.com/dujiao-next/internal/modules/cardsecret/domain"\n\tcardsecretgormstore "github.com/dujiao-next/internal/modules/cardsecret/infrastructure/gormstore"\n#' "$INVENTORY"
 
     cat >> "$INVENTORY" <<'EOF'
 
@@ -159,29 +162,24 @@ type loopSKUKey struct {
 	skuID     uint
 }
 
-const (
-	loopSecretProbeBatch = 200
-	loopSecretProbeLimit = 1000
-)
+const loopSecretProbeLimit = 1000
 
 // detectLoopSecretSKUs 只在“可用数量为 1”的候选规格里探测循环发货规格。
 // 循环规格的可用数量恒为 1（见 cardsecret 导入校验），所以高库存规格永远
 // 不会被探测，探测成本只与候选数量相关，与库存总量无关。
 //
-// 注意：本函数与 catalog 的 resolveLoopSecretSKUs
-// （catalog/product/application/stock.go）是同一套逻辑的两份实现，分批探测的
-// SQL 也与 cardsecret 的 FindLoopSecretSKUs 重复。这是刻意的：dashboard 与
-// catalog 各自只依赖 cardsecret 的 domain/contract，不互相引入
-// infrastructure，避免模块间耦合。改这里的候选条件（available == 1）、
-// 批大小或上限时，三处必须同步修改。
+// 探测复用 cardsecret 的 FindLoopSecretSKUs，不在这里重写一份 SQL：
+// order 的 gormstore/transaction.go 也是这么跨模块取 store 的。若各自复制，
+// 前缀匹配、deleted_at 过滤、分批大小这些细节会慢慢漂移，而这类漂移不报错，
+// 只会让预警数字和商品列表对不上。
 func (r *Store) detectLoopSecretSKUs(availableMap map[uint]map[uint]int64) map[loopSKUKey]struct{} {
-	candidates := make([]loopSKUKey, 0)
+	candidates := make([]cardsecretcontract.LoopSKU, 0)
 	for productID, skuMap := range availableMap {
 		for skuID, total := range skuMap {
 			if skuID == 0 || total != 1 {
 				continue
 			}
-			candidates = append(candidates, loopSKUKey{productID: productID, skuID: skuID})
+			candidates = append(candidates, cardsecretcontract.LoopSKU{ProductID: productID, SKUID: skuID})
 		}
 	}
 	if len(candidates) == 0 {
@@ -190,36 +188,14 @@ func (r *Store) detectLoopSecretSKUs(availableMap map[uint]map[uint]int64) map[l
 	if len(candidates) > loopSecretProbeLimit {
 		candidates = candidates[:loopSecretProbeLimit]
 	}
-	result := make(map[loopSKUKey]struct{}, len(candidates))
-	type loopRow struct {
-		ProductID uint `gorm:"column:product_id"`
-		SKUID     uint `gorm:"column:sku_id"`
+	found, err := cardsecretgormstore.New(r.db).FindLoopSecretSKUs(candidates)
+	if err != nil {
+		// 探测失败时降级为“不识别”，不影响预警本身
+		return nil
 	}
-	for start := 0; start < len(candidates); start += loopSecretProbeBatch {
-		end := start + loopSecretProbeBatch
-		if end > len(candidates) {
-			end = len(candidates)
-		}
-		conds := make([]string, 0, end-start)
-		args := make([]any, 0, (end-start)*2)
-		for _, candidate := range candidates[start:end] {
-			conds = append(conds, "(product_id = ? AND sku_id = ?)")
-			args = append(args, candidate.productID, candidate.skuID)
-		}
-		var rows []loopRow
-		if err := r.db.Model(&cardsecretdomain.Secret{}).
-			Select("product_id, sku_id").
-			Where("status = ? AND deleted_at IS NULL", cardsecretdomain.StatusAvailable).
-			Where("substr(secret, 1, ?) = ?", len(cardsecretdomain.LoopSecretPrefix), cardsecretdomain.LoopSecretPrefix).
-			Where("("+strings.Join(conds, " OR ")+")", args...).
-			Group("product_id, sku_id").
-			Scan(&rows).Error; err != nil {
-			// 探测失败时降级为“不识别”，不影响预警本身
-			return result
-		}
-		for _, row := range rows {
-			result[loopSKUKey{productID: row.ProductID, skuID: row.SKUID}] = struct{}{}
-		}
+	result := make(map[loopSKUKey]struct{}, len(found))
+	for _, item := range found {
+		result[loopSKUKey{productID: item.ProductID, skuID: item.SKUID}] = struct{}{}
 	}
 	return result
 }
@@ -238,6 +214,13 @@ fi
 grep -q 'detectLoopSecretSKUs' "$INVENTORY" || die "dashboard probe not inserted"
 grep -q 'productHasLoopSKU(loopSKUs, productID)' "$INVENTORY" || die "dashboard product alert guard missing"
 grep -q 'loopSKUs map\[loopSKUKey\]struct{}' "$INVENTORY" || die "collectAutoInventoryAlertRows signature not updated"
+grep -q 'cardsecretgormstore.New(r.db).FindLoopSecretSKUs' "$INVENTORY" || die "dashboard must reuse cardsecret store instead of duplicating probe SQL"
+if grep -q 'substr(secret, 1, ?)' "$INVENTORY"; then
+    die "dashboard must not keep its own loop-secret SQL (it drifts from cardsecret store)"
+fi
+if grep -q 'loopSecretProbeBatch' "$INVENTORY"; then
+    die "loopSecretProbeBatch should be gone (batching lives in cardsecret store)"
+fi
 
 command -v gofmt >/dev/null 2>&1 && gofmt -w "$STOCK" "$PUBLIC" "$INVENTORY"
 

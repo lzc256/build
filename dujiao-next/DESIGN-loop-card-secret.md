@@ -286,12 +286,22 @@ if finder, ok := counter.(loopSecretFinder); ok { ... }
 
 CI 里额外加了一条反向断言：**一旦有人把 `auto_stock_total` 改回 `toSafeInt` 读取就报错**。
 
-**一处刻意的重复**：`detectLoopSecretSKUs`（dashboard）与 `resolveLoopSecretSKUs`
-（catalog）是同一套候选集逻辑的两份实现，分批探测 SQL 也与 cardsecret 的
-`FindLoopSecretSKUs` 重复。没有合并是因为 dashboard 与 catalog 都只依赖
-cardsecret 的 `domain`/`contract`，互不引入 `infrastructure`；要共享就得改
-`dashboardgormstore.New` 的签名注入 finder（牵动 bootstrap 与 postgres 集成测试），
-为预警路径的 40 行代码不值得。两处注释都标注了"改候选条件/批大小/上限时三处同步"。
+**探测复用，候选集各算一份**：
+
+- `detectLoopSecretSKUs`（dashboard）**不再自带 SQL**，直接调
+  `cardsecretgormstore.New(r.db).FindLoopSecretSKUs(...)`。这是仓库既有写法：
+  `order/infrastructure/gormstore/transaction.go` 也是跨模块取
+  `cardsecretgormstore`/`walletgormstore`。架构测试只禁止 infrastructure 依赖
+  transport/bootstrap，不禁止依赖其他模块的 infrastructure。
+  好处是前缀匹配、`deleted_at` 过滤、分批大小只有一处定义。
+- `detectLoopSecretSKUs`（dashboard）与 `resolveLoopSecretSKUs`（catalog）的
+  **候选集筛选**仍是两份实现，因为入参形状不同：catalog 拿到
+  `map[商品]map[规格]map[状态]数量`（能精确取 `available`），dashboard 只有
+  `map[商品]map[规格]数量`。这层差异是真实的，不强行抽象。
+
+（最初这三处是各自复制 SQL 的，评审时发现 dashboard 那份少了排序、出错时还
+保留部分批次结果 —— 已经不一致了，且这类漂移不报错，只会让预警数字和商品
+列表对不上，所以改成复用。）
 
 ### 5.10 导出守卫（`cardsecret/application/export.go`）
 
@@ -421,7 +431,7 @@ WHERE substr(secret, 1, 9) = '__loop__:'
 | `004-stock-and-dashboard.sh` | 库存置 `-1`、商品级汇总、后台预警跳过（两条 SQL 不动） |
 | `005-frontend-user.sh` | 用户端保留并消费 `-1` |
 | `006-tests.sh` | 领域单测 + 导入不变量集成测试 |
-| `007-stock-tests.sh` | 库存聚合单测（含候选集断言） |
+| `007-stock-tests.sh` | 库存聚合单测（含候选集断言）+ 后台预警跳过循环规格 |
 | `008-admin-and-export-guard.sh` | 后台列表 `-1` → 「库存不限」+ 绿徽章；导出排除循环卡密；导出守卫测试 |
 | `009-replace-stock-test.sh` | 「普通库存全部删除后换成循环卡密」迁移路径的回归测试 |
 
@@ -447,7 +457,13 @@ WHERE substr(secret, 1, 9) = '__loop__:'
    连发三单，断言每单 `payload` 等于裸内容重复 quantity 次（无 `__loop__:` 前缀）、
    且三单之后卡密仍为 `available` 且未绑定订单；
    `TestNormalSKUStillRequiresEnoughStock` —— 普通规格库存不足仍然报错（无回归）
-4. 后台展示与导出守卫（`cardsecret/integrationtest`）：
+4. 后台预警与库存统计（`dashboard/infrastructure/gormstore/inventory_test.go`）：
+   `TestGetInventoryAlertItemsSkipsLoopSecretSKUs` —— 循环规格不进低库存预警，
+   同时断言普通低库存商品照常报警（确认跳过逻辑没有误伤）
+   `TestGetStockStatsSkipsLoopSecretSKUs` —— 商品级/规格级统计都不把循环规格
+   算成低库存或售罄。这两条覆盖的是此前完全没有测试的路径
+
+5. 后台展示与导出守卫（`cardsecret/integrationtest`）：
    `TestLoopSecretIsNotExportable` —— 导出循环卡密被拒绝，且卡密仍是 `available`
    `TestPlainStockCanBeReplacedByLoopSecret` —— 普通卡密全部软删除后可导入循环卡密，
    且可用数量回到 1（该用例同时覆盖了"普通规格直接导入循环卡密被拒绝"这一方向）

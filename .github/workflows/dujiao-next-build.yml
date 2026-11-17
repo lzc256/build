@@ -146,6 +146,13 @@ jobs:
           grep -q 'resolveLoopSecretSKUs' dujiao-next-src/internal/modules/catalog/product/application/stock.go
           grep -q 'hasLoopSKU' dujiao-next-src/internal/modules/catalog/product/transport/http/public_stock.go
           grep -q 'detectLoopSecretSKUs' dujiao-next-src/internal/modules/dashboard/infrastructure/gormstore/inventory.go
+          # 预警探测复用 cardsecret 的 store，不得自己再抄一份 substr 查询（会各自漂移）
+          grep -q 'cardsecretgormstore.New(r.db).FindLoopSecretSKUs' dujiao-next-src/internal/modules/dashboard/infrastructure/gormstore/inventory.go
+          if grep -q 'substr(secret, 1, ?)' dujiao-next-src/internal/modules/dashboard/infrastructure/gormstore/inventory.go; then
+            echo "dashboard must not duplicate loop-secret SQL"; exit 1
+          fi
+          grep -q 'func TestGetInventoryAlertItemsSkipsLoopSecretSKUs(' dujiao-next-src/internal/modules/dashboard/infrastructure/gormstore/inventory_test.go
+          grep -q 'func TestGetStockStatsSkipsLoopSecretSKUs(' dujiao-next-src/internal/modules/dashboard/infrastructure/gormstore/inventory_test.go
           grep -q 'if (autoStock < 0) return null' dujiao-next-src/frontend/user/src/composables/useCart.ts
           echo "loop-card-secret: clean"
           echo "=== diff stat ==="
