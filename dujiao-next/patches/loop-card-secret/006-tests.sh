@@ -8,7 +8,8 @@ DESCRIPTION="\
     用既有 sqlite 内存库夹具验证导入期不变量:
     1. 循环卡密导入成功且该规格可用数量恒为 1
     2. 同一规格第二条循环卡密被拒（ErrLoopSecretDuplicate）
-    3. 循环与普通不得并存（ErrLoopSecretMixed，两个方向各测一次）
+    3. 循环规格不允许再导入普通卡密（ErrLoopSecretMixed；另一个方向"普通规格
+       导入循环卡密"由 009 的 TestPlainStockCanBeReplacedByLoopSecret 覆盖）
     4. 只有前缀没有内容的循环卡密被拒（ErrInvalid）
 这些测试直接锁定下单/展示链路依赖的核心不变量。"
 
@@ -133,15 +134,22 @@ func newLoopSecretTestService(t *testing.T, db *gorm.DB) (*productdomain.Product
 	return product, sku, svc
 }
 
+// countAvailableCardSecrets 返回该规格的可用数量，走生产聚合
+// CountStockByProductIDs（带 deleted_at IS NULL），与页面展示的数字同源。
+// 不要图省事改成裸 db.Model(...).Count()：那样统计会把已软删除的行也算进去，
+// 「后台删除后导入循环卡密」这类场景会得到偏大的数字。
 func countAvailableCardSecrets(t *testing.T, db *gorm.DB, productID, skuID uint) int64 {
 	t.Helper()
-	var total int64
-	if err := db.Model(&cardsecretdomain.Secret{}).
-		Where("product_id = ? AND sku_id = ? AND status = ?", productID, skuID, cardsecretdomain.StatusAvailable).
-		Count(&total).Error; err != nil {
+	rows, err := cardsecretgormstore.New(db).CountStockByProductIDs([]uint{productID})
+	if err != nil {
 		t.Fatalf("count available card secrets failed: %v", err)
 	}
-	return total
+	for _, row := range rows {
+		if row.SKUID == skuID && row.Status == cardsecretdomain.StatusAvailable {
+			return row.Total
+		}
+	}
+	return 0
 }
 
 // TestLoopSecretImportInvariants 锁定下单/展示链路依赖的核心不变量：
@@ -196,31 +204,6 @@ func TestLoopSecretImportInvariants(t *testing.T) {
 	}
 }
 
-// TestLoopSecretRejectsUpgradeFromNormalStock 普通卡密规格不允许改造成循环规格。
-func TestLoopSecretRejectsUpgradeFromNormalStock(t *testing.T) {
-	db := setupCardSecretServiceTestDB(t)
-	product, sku, svc := newLoopSecretTestService(t, db)
-
-	if _, created, err := svc.CreateCardSecretBatch(CreateCardSecretBatchInput{
-		ProductID: product.ID,
-		Secrets:   []string{"PLAIN-0001", "PLAIN-0002"},
-		Source:    constants.CardSecretSourceManual,
-		AdminID:   1,
-	}); err != nil || created != 2 {
-		t.Fatalf("create plain card secrets want created=2 err=nil got created=%d err=%v", created, err)
-	}
-	if _, _, err := svc.CreateCardSecretBatch(CreateCardSecretBatchInput{
-		ProductID: product.ID,
-		Secrets:   []string{cardsecretdomain.LoopSecretPrefix + "LOOP-CARD-0001"},
-		Source:    constants.CardSecretSourceManual,
-		AdminID:   1,
-	}); err != cardsecretapp.ErrLoopSecretMixed {
-		t.Fatalf("loop card secret on stocked sku want %v got %v", cardsecretapp.ErrLoopSecretMixed, err)
-	}
-	if got := countAvailableCardSecrets(t, db, product.ID, sku.ID); got != 2 {
-		t.Fatalf("plain stock must stay 2 got %d", got)
-	}
-}
 
 // TestLoopSecretRequiresContent 只有前缀的循环卡密会交付空串，必须被拒。
 func TestLoopSecretRequiresContent(t *testing.T) {

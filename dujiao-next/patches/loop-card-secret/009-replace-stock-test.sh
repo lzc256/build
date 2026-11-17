@@ -12,9 +12,8 @@ DESCRIPTION="\
 CountStockByProductIDs 都带 deleted_at IS NULL，软删除的行既不算库存、
 也不会挡住循环导入。
 
-测试里刻意单独写了一个走生产聚合路径的 realAvailable helper，而不是复用
-既有的 countAvailableCardSecrets —— 后者统计时不带 deleted_at 过滤，
-在本场景下会得出 available=6 的错误数字（它只在无软删除行的用例里安全）。"
+复用 006 里的 countAvailableCardSecrets（它走生产聚合 CountStockByProductIDs，
+带 deleted_at IS NULL），所以这里断言出的数字和页面展示完全同源。"
 
 set -euo pipefail
 
@@ -29,23 +28,6 @@ INTEGRATION_TEST="$T/internal/modules/cardsecret/integrationtest/service_test.go
 
 if ! grep -q 'func TestPlainStockCanBeReplacedByLoopSecret(' "$INTEGRATION_TEST"; then
     cat >> "$INTEGRATION_TEST" <<'EOF'
-
-// realAvailable 走生产聚合路径（CountStockByProductIDs，带 deleted_at IS NULL），
-// 与页面展示的可用数量完全一致。不要换成 countAvailableCardSecrets：
-// 那个 helper 统计时不过滤软删除，在有已删除行的场景会报出偏大的数字。
-func realAvailable(t *testing.T, db *gorm.DB, productID, skuID uint) int64 {
-	t.Helper()
-	rows, err := cardsecretgormstore.New(db).CountStockByProductIDs([]uint{productID})
-	if err != nil {
-		t.Fatalf("CountStockByProductIDs: %v", err)
-	}
-	for _, row := range rows {
-		if row.SKUID == skuID && row.Status == cardsecretdomain.StatusAvailable {
-			return row.Total
-		}
-	}
-	return 0
-}
 
 // TestPlainStockCanBeReplacedByLoopSecret 锁定运营最常见的迁移路径:
 // 原本贴了很多行普通卡密 → 后台全部删除 → 改导入一条循环卡密。
@@ -67,7 +49,7 @@ func TestPlainStockCanBeReplacedByLoopSecret(t *testing.T) {
 	if err != nil {
 		t.Fatalf("import plain secrets failed: %v", err)
 	}
-	if got := realAvailable(t, db, product.ID, sku.ID); got != 5 {
+	if got := countAvailableCardSecrets(t, db, product.ID, sku.ID); got != 5 {
 		t.Fatalf("plain available want 5 got %d", got)
 	}
 
@@ -99,7 +81,7 @@ func TestPlainStockCanBeReplacedByLoopSecret(t *testing.T) {
 		t.Fatalf("deleted want %d got %d", len(ids), deleted)
 	}
 	// 软删除后库存必须归零（说明聚合没有把已删除行算进去）
-	if got := realAvailable(t, db, product.ID, sku.ID); got != 0 {
+	if got := countAvailableCardSecrets(t, db, product.ID, sku.ID); got != 0 {
 		t.Fatalf("available after delete want 0 got %d", got)
 	}
 
@@ -113,7 +95,7 @@ func TestPlainStockCanBeReplacedByLoopSecret(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("loop import after deleting plain stock should succeed, got %v", err)
 	}
-	if got := realAvailable(t, db, product.ID, sku.ID); got != 1 {
+	if got := countAvailableCardSecrets(t, db, product.ID, sku.ID); got != 1 {
 		t.Fatalf("loop available want 1 got %d", got)
 	}
 }
@@ -122,7 +104,10 @@ fi
 
 grep -q 'func TestPlainStockCanBeReplacedByLoopSecret(' "$INTEGRATION_TEST" || die "replace-stock test not appended"
 [ "$(grep -c 'func TestPlainStockCanBeReplacedByLoopSecret(' "$INTEGRATION_TEST")" = "1" ] || die "replace-stock test appended more than once"
-grep -q 'func realAvailable(' "$INTEGRATION_TEST" || die "realAvailable helper not appended"
+grep -q 'func countAvailableCardSecrets(' "$INTEGRATION_TEST" || die "countAvailableCardSecrets helper missing (006 should have added it)"
+if grep -q 'func realAvailable(' "$INTEGRATION_TEST"; then
+    die "realAvailable duplicates countAvailableCardSecrets; use the single helper"
+fi
 
 command -v gofmt >/dev/null 2>&1 && gofmt -w "$INTEGRATION_TEST"
 

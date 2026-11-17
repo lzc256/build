@@ -67,6 +67,10 @@ type loopSecretFinder interface {
 
 // resolveLoopSecretSKUs 在“可用数量为 1”的候选规格中探测循环发货规格。
 //
+// 同一套逻辑还有一份实现在 dashboard（inventory.go 的 detectLoopSecretSKUs），
+// 探测 SQL 又与 cardsecret 的 FindLoopSecretSKUs 重复。这是刻意的模块边界取舍：
+// 改候选条件（available == 1）、批大小或上限时三处必须同步。
+//
 // 候选集恒小：循环规格的可用数量必然是 1（导入校验保证每规格最多一条循环卡密，
 // 且不与普通卡密并存），因此普通的高库存规格永远不参与探测，成本与库存量无关。
 // 探测失败时静默降级为“不识别”，不影响商品展示。
@@ -163,6 +167,13 @@ const (
 // detectLoopSecretSKUs 只在“可用数量为 1”的候选规格里探测循环发货规格。
 // 循环规格的可用数量恒为 1（见 cardsecret 导入校验），所以高库存规格永远
 // 不会被探测，探测成本只与候选数量相关，与库存总量无关。
+//
+// 注意：本函数与 catalog 的 resolveLoopSecretSKUs
+// （catalog/product/application/stock.go）是同一套逻辑的两份实现，分批探测的
+// SQL 也与 cardsecret 的 FindLoopSecretSKUs 重复。这是刻意的：dashboard 与
+// catalog 各自只依赖 cardsecret 的 domain/contract，不互相引入
+// infrastructure，避免模块间耦合。改这里的候选条件（available == 1）、
+// 批大小或上限时，三处必须同步修改。
 func (r *Store) detectLoopSecretSKUs(availableMap map[uint]map[uint]int64) map[loopSKUKey]struct{} {
 	candidates := make([]loopSKUKey, 0)
 	for productID, skuMap := range availableMap {

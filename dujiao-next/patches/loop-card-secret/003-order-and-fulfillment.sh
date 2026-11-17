@@ -66,15 +66,17 @@ if ! grep -q 'cardsecretdomain.FirstLoopSecret(rows)' "$ORDER"; then
     grep -q 'modules/cardsecret/domain"' "$ORDER" || \
         perl -0pi -e 's#(\taffiliatedomain "github\.com/dujiao-next/internal/modules/affiliate/domain"\n)#$1\tcardsecretdomain "github.com/dujiao-next/internal/modules/cardsecret/domain"\n#' "$ORDER"
 
-    # 库存不足判定跳过循环规格（只改这一行，不重排既有代码）
-    perl -0pi -e 's#\t\t\t\tif len\(rows\) < plan\.Item\.Quantity \{\n#\t\t\t\t// 循环发货规格: 取回的行里只要命中循环卡密，就整单重复发放该内容，\n\t\t\t\t// 不占用任何卡密行（否则该卡密被标记 reserved/used 后无法再次发货）。\n\t\t\t\tif len(rows) < plan.Item.Quantity && cardsecretdomain.FirstLoopSecret(rows) == nil {\n#' "$ORDER"
+    # 循环判定只算一次（查一次切片即可，避免两次调用重复扫描同一批行）
+    perl -0pi -e 's#\t\t\t\tif len\(rows\) < plan\.Item\.Quantity \{\n#\t\t\t\t// 循环发货规格: 取回的行里只要命中循环卡密，就整单重复发放该内容，\n\t\t\t\t// 不占用任何卡密行（否则该卡密被标记 reserved/used 后无法再次发货）。\n\t\t\t\tloopSecret := cardsecretdomain.FirstLoopSecret(rows)\n\t\t\t\tif len(rows) < plan.Item.Quantity && loopSecret == nil {\n#' "$ORDER"
 
     # 不把循环卡密行加入待占用列表（Reserve 收到空列表时返回 0，后续校验自然通过）
-    perl -0pi -e 's#\t\t\t\tids := make\(\[\]uint, 0, len\(rows\)\)\n\t\t\t\tfor _, row := range rows \{\n\t\t\t\t\tids = append\(ids, row\.ID\)\n\t\t\t\t\}\n#\t\t\t\tids := make([]uint, 0, len(rows))\n\t\t\t\tif cardsecretdomain.FirstLoopSecret(rows) == nil {\n\t\t\t\t\tfor _, row := range rows {\n\t\t\t\t\t\tids = append(ids, row.ID)\n\t\t\t\t\t}\n\t\t\t\t}\n#' "$ORDER"
+    perl -0pi -e 's#\t\t\t\tids := make\(\[\]uint, 0, len\(rows\)\)\n\t\t\t\tfor _, row := range rows \{\n\t\t\t\t\tids = append\(ids, row\.ID\)\n\t\t\t\t\}\n#\t\t\t\tids := make([]uint, 0, len(rows))\n\t\t\t\tif loopSecret == nil {\n\t\t\t\t\tfor _, row := range rows {\n\t\t\t\t\t\tids = append(ids, row.ID)\n\t\t\t\t\t}\n\t\t\t\t}\n#' "$ORDER"
 fi
 
 grep -q 'modules/cardsecret/domain"' "$ORDER" || die "cardsecretdomain import missing in order_service"
-[ "$(grep -c 'cardsecretdomain.FirstLoopSecret(rows)' "$ORDER")" = "2" ] || die "order guard not applied to both spots"
+[ "$(grep -c 'cardsecretdomain.FirstLoopSecret(rows)' "$ORDER")" = "1" ] || die "loop detection must be computed exactly once per order item"
+[ "$(grep -c 'if loopSecret == nil {' "$ORDER")" = "1" ] || die "loopSecret reuse missing"
+grep -q 'if len(rows) < plan.Item.Quantity && loopSecret == nil {' "$ORDER" || die "insufficient-stock guard must reuse loopSecret"
 
 # ---------------------------------------------------------------------------
 # 3. 发货：循环规格重复内容且不标记已用

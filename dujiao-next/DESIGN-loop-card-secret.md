@@ -286,6 +286,13 @@ if finder, ok := counter.(loopSecretFinder); ok { ... }
 
 CI 里额外加了一条反向断言：**一旦有人把 `auto_stock_total` 改回 `toSafeInt` 读取就报错**。
 
+**一处刻意的重复**：`detectLoopSecretSKUs`（dashboard）与 `resolveLoopSecretSKUs`
+（catalog）是同一套候选集逻辑的两份实现，分批探测 SQL 也与 cardsecret 的
+`FindLoopSecretSKUs` 重复。没有合并是因为 dashboard 与 catalog 都只依赖
+cardsecret 的 `domain`/`contract`，互不引入 `infrastructure`；要共享就得改
+`dashboardgormstore.New` 的签名注入 finder（牵动 bootstrap 与 postgres 集成测试），
+为预警路径的 40 行代码不值得。两处注释都标注了"改候选条件/批大小/上限时三处同步"。
+
 ### 5.10 导出守卫（`cardsecret/application/export.go`）
 
 后台「导出可用卡密」会把导出的行批量改成 `used`（或用 `DeleteAfterExport` 直接删）。
@@ -396,9 +403,9 @@ WHERE substr(secret, 1, 9) = '__loop__:'
 `CountStockByProductIDs` **都带 `deleted_at IS NULL`**，软删除的行既不算库存、
 也不会挡住循环导入。
 
-⚠️ 一个容易误判的地方：既有测试 helper `countAvailableCardSecrets` 统计时
-**不带** `deleted_at` 过滤，在有已删除行的场景会报出偏大的数字（实测会得到 6）。
-新加的测试改用走生产聚合路径的 `realAvailable`，与页面展示的数字一致。
+测试断言用的 `countAvailableCardSecrets` 走**生产聚合** `CountStockByProductIDs`
+（带 `deleted_at IS NULL`），与页面展示的数字同源 —— 所以它抓得住"某人把
+`deleted_at` 过滤删掉"这类回归（已验证：删掉过滤后该用例精确失败）。
 
 ---
 
@@ -443,7 +450,7 @@ WHERE substr(secret, 1, 9) = '__loop__:'
 4. 后台展示与导出守卫（`cardsecret/integrationtest`）：
    `TestLoopSecretIsNotExportable` —— 导出循环卡密被拒绝，且卡密仍是 `available`
    `TestPlainStockCanBeReplacedByLoopSecret` —— 普通卡密全部软删除后可导入循环卡密，
-   且可用数量回到 1（用生产聚合 `CountStockByProductIDs` 断言，不过滤软删除的旧 helper 不参与）
+   且可用数量回到 1（该用例同时覆盖了"普通规格直接导入循环卡密被拒绝"这一方向）
 5. 待人工验收（需要真实容器）：C 端商品页/购物车/结算页不显示"仅剩 1 件"、不限购；
    后台商品列表显示「库存不限」、预警列表不出现循环规格
 6. CI：`.github/workflows/dujiao-next-build.yml`
