@@ -480,27 +480,44 @@ GORM 不会自动加过滤条件 —— 任何新写的查询都必须自己带 
 `card_secrets` 只有指向 `card_secret_batches` 的外键（它是子表），**没有任何表引用它**；
 订单交付内容存在 `fulfillments.payload` 文本里，所以清理历史行不影响历史订单。
 
-### 10.2 回收空间：`scripts/reclaim-card-secrets.sh`
+### 10.2 回收空间：`scripts/purge-dangling-card-secrets.sh`
 
 ```bash
-# 只统计，不改动
-./reclaim-card-secrets.sh /app/db/dujiao.db --dry-run
-
-# 清理未发货的已删除行（默认行为，先备份再 VACUUM）
-./reclaim-card-secrets.sh /app/db/dujiao.db
-
-# 只清理 30 天前删除的，自动化场景免交互
-./reclaim-card-secrets.sh /app/db/dujiao.db --days 30 --force
+./purge-dangling-card-secrets.sh /app/db/dujiao.db
 ```
-### 10.2.1 已发货的卡密能不能删？
 
-**能删，但默认不删。** 脚本按状态把已删除行分成三类：
+一条命令，交互式：预览 → 确认 → 备份 → 删除 → VACUUM。
 
-| 状态 | 判定条件 | 默认 | 删掉的后果 |
+```
+将删除：
+ 1. CARD-SECRET-00000002-PADDING-0123456789A...
+ 2. CARD-SECRET-00000003-PADDING-0123456789A...
+  ...
+共 120000 行（dujiao.db 当前  57M）
+确认？[y/N] y
+已备份: ./dujiao.db.20261117-112541.bak（ 53M）
+完成:  20M，剩余 80000 行
+```
+
+- **预览**：前 10 条 + 总行数，超过 10 条显示 `...`；0 行时直接退出，不打扰
+- **备份**：`VACUUM INTO` 导出到**当前目录** `<name>.db.<时间戳>.bak`
+  （`name` 为去掉 `.db` 的文件名）。用 `VACUUM INTO` 而不是 `cp`，是因为 WAL
+  模式下未 checkpoint 的提交还留在 `-wal` 里，`cp` 会得到残缺副本；
+  实测插入后不 checkpoint 直接跑，备份里能查到该行
+- **删除**：一条 `DELETE`，**只删未发货的已删除行**（见 §10.2.1）
+- **VACUUM**：紧跟一条 `VACUUM` 真正还盘
+
+备份在 `DELETE` 之前且 `set -e`，备份失败即中止，不会出现"删了但没备份"。
+
+### 10.2.1 为什么只删未发货，已发货的删了会怎样
+
+脚本按状态把已删除行分成三类，只有第一类会被清理：
+
+| 状态 | 判定条件 | 处理 | 删掉的后果 |
 |---|---|---|---|
 | 未发货 | `status='available'` 且 `order_id`/`reserved_at`/`used_at` 全为 NULL | **清理** | 无。这行从来没发给过任何人 |
-| 已发货 | `status='used'` | **保留**，需 `--include-shipped` | 丢失「哪条卡密发给了哪个订单」的唯一凭据 |
-| 待发货 | `status='reserved'` | **永不清理** | 在途订单发货时找不到行 → 订单卡住发不出货 |
+| 已发货 | `status='used'` | 保留 | 丢失「哪条卡密发给了哪个订单」的唯一凭据，不可恢复 |
+| 待发货 | `status='reserved'` | 保留 | 在途订单已占用，删了发货时找不到行 → 订单卡住发不出货 |
 
 已发货行删掉的**具体影响**（都查证过）：
 
@@ -515,26 +532,11 @@ GORM 不会自动加过滤条件 —— 任何新写的查询都必须自己带 
 6. **追溯能力丢失且不可恢复**：想知道某个历史订单当时发的是哪一条卡密，
    只能反查 `card_secrets.order_id`。删了就没有第二处记录了。
 
-所以脚本默认走安全模式；确实要压空间时才 `--include-shipped`：
+因为 5 和 6 不可逆，脚本固化只删未发货，不提供开关。空间压不下来时，
+正确做法是先在后台把不再需要的批次整体处理掉，而不是回头删已发货的追溯凭据。
 
-```bash
-# 只清理未发货的已删除行（推荐，默认）
-./reclaim-card-secrets.sh /app/db/dujiao.db
-
-# 连已发货的已删除行一起清（会永久丢失订单↔卡密的追溯关系）
-./reclaim-card-secrets.sh /app/db/dujiao.db --include-shipped
-```
-
-实测（混合样本：2 条未发货 + 2 条已发货 + 1 条待发货，均已软删除）：
-
-| 调用 | 删除 | 保留 |
-|---|---|---|
-| 默认 | 2 条未发货 | 2 条已发货 + 1 条待发货 + 2 条存活 |
-| `--include-shipped` | 4 条（未发货 + 已发货） | 1 条待发货 + 2 条存活 |
-
-⚠️ 如果看到 `待发货 (reserved): N` 的警告，说明有卡密被删掉了但仍在**在途订单**手里占用着
-（例如运营在订单未发货时就批量删了卡密）。这些行脚本不会动，需要人工确认那些订单是否
-还要发货 —— 强行删会让订单永远发不出货。
+⚠️ 若存在**待发货但已软删除**的行，说明有卡密在订单未发货时就被批量删了。
+脚本不会动这些行（订单还要用它发货），需要人工确认那些订单是否继续履约。
 
 要求：`sqlite3` CLI ≥ 3.27（`VACUUM INTO`）。上游运行时镜像是
 `alpine:latest` + `ca-certificates` + `tzdata`，**镜像里没有 sqlite3**，所以别指望
@@ -543,20 +545,20 @@ GORM 不会自动加过滤条件 —— 任何新写的查询都必须自己带 
 ```bash
 # A. 数据库是 bind mount（DB 在宿主机上）：停容器，直接在宿主机跑
 docker compose stop dujiao-next
-./dujiao-next/scripts/reclaim-card-secrets.sh ./data/db/dujiao.db
+./dujiao-next/scripts/purge-dangling-card-secrets.sh ./data/db/dujiao.db
 docker compose start dujiao-next
 
 # B. 数据库在 named volume 里：拷出来处理，再拷回去
 docker compose stop dujiao-next
 docker cp dujiao-next:/app/db/dujiao.db ./dujiao.db
-./dujiao-next/scripts/reclaim-card-secrets.sh ./dujiao.db
+./dujiao-next/scripts/purge-dangling-card-secrets.sh ./dujiao.db
 docker cp ./dujiao.db dujiao-next:/app/db/dujiao.db
 docker compose start dujiao-next
 ```
 
-VACUUM 需要独占访问，**必须停应用**；容器默认时区是 UTC，所以容器里写入的
-`deleted_at` 是 `+00:00`，宿主机上手工写的可能是 `+08:00` —— 脚本的 `julianday`
-比较对两种格式都正确。
+VACUUM 需要独占访问，**必须先停应用**。应用持写锁时脚本会在 `DELETE` 就失败
+（一行未改，安全）；但若应用仍持读事务，`-wal` 不会立即 checkpoint，脚本打印的
+"完成"大小会偏大，要等应用自己 checkpoint 后才真正缩下来。
 
 脚本流程：`VACUUM INTO` 一致性备份 → 分批 `DELETE`（默认 5000 行/事务）→
 `wal_checkpoint(TRUNCATE)` → `VACUUM`（空间不足时自动改走 `VACUUM INTO` + 原子替换）
