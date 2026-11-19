@@ -1169,7 +1169,7 @@ index d044a45d8..ed9a44af4 100644
      request: 'idle',
      other: 'idle',
 diff --git a/web/src/features/channels/lib/channel-form.ts b/web/src/features/channels/lib/channel-form.ts
-index 906d915b9..03793c83a 100644
+index 906d915b9..23c5a3326 100644
 --- a/web/src/features/channels/lib/channel-form.ts
 +++ b/web/src/features/channels/lib/channel-form.ts
 @@ -304,6 +304,7 @@ export const channelFormSchema = z
@@ -1212,18 +1212,20 @@ index 906d915b9..03793c83a 100644
    }
  }
  
-@@ -895,6 +900,11 @@ function buildSettingsJSON(formData: ChannelFormValues): string {
-     settingsObj.plugin_config = formData.plugin_config
-   } else {
+@@ -897,6 +902,13 @@ function buildSettingsJSON(formData: ChannelFormValues): string {
      delete settingsObj.plugin_config
+   }
+ 
 +  // Custom balance script (JavaScript) — applies to any channel type
 +  if (formData.balance_script && formData.balance_script.trim()) {
 +    settingsObj.balance_script = formData.balance_script
 +  } else if ('balance_script' in settingsObj) {
 +    delete settingsObj.balance_script
-   }
- 
++  }
++
    return JSON.stringify(settingsObj)
+ }
+ 
 diff --git a/web/src/features/channels/types.ts b/web/src/features/channels/types.ts
 index a2c0ee818..a9e7cdafe 100644
 --- a/web/src/features/channels/types.ts
