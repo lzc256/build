@@ -22,6 +22,11 @@ The date describes the source commit, not when the image was built. A runtime
   include `prompt=login` and `max_age=0` to request fresh authentication from the
   identity provider (including Pocket ID). Ordinary login is unchanged.
 - `build-version`: embed the checked-out source commit date and hash.
+- `privacy-masking`: always-on server-side prompt masking via magpie's rule engine;
+  secrets and personal data are replaced with placeholders before relay and
+  restored in responses (including SSE), with a metadata-only admin dashboard.
+  Magpie source is fetched at build time, not stored in this repo; see
+  `patches/privacy-masking/README.md`.
 - `secondary-domain`: treat every host other than `ServerAddress` as a restricted
   entry point. A secondary domain answers `/api/status` as if the primary address,
   OIDC, Passkey and third-party sign-in had never been configured, and keeps
