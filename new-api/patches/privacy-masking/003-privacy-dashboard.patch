@@ -48,11 +48,11 @@ index 000000000..20d5631ad
 +    try {
 +      const [s, e] = await Promise.all([
 +        api.get<{ success: boolean; data: MaskSummary }>(
-+          '/api/privacy/masking/summary',
++          '/api/user/privacy/masking/summary',
 +          { params: { days } }
 +        ),
 +        api.get<{ success: boolean; data: MaskEvent[] }>(
-+          '/api/privacy/masking/events',
++          '/api/user/privacy/masking/events',
 +          { params: { days, limit: 200 } }
 +        ),
 +      ])
@@ -76,7 +76,7 @@ index 000000000..20d5631ad
 +
 +  const clear = async () => {
 +    if (!window.confirm('Clear all privacy masking history?')) return
-+    await api.delete('/api/privacy/masking/events')
++    await api.delete('/api/user/privacy/masking/events')
 +    await load()
 +  }
 +

@@ -63,16 +63,15 @@ upstream updates automatically.
 - `pkg/jsplugin/utils.go`: import plus `utils.magpieMaskJSON` and
   `utils.magpieMaskPatch`.
 - `plugins/builtin_plugins_test.go`: add `request-mask` to the expected list.
-- Dashboard registration in `web/src/features/dashboard/` (or
-  `web/default/src/features/dashboard/` on older trees), i18n keys and an
-  admin quick action on the overview page.
+- Admin-only sidebar entry at `/dashboard/privacy`, i18n keys and a lazy
+  component mount. There is intentionally no dashboard tab.
 
 All new logic lives in newly created files, so new-api upgrades rarely conflict.
 
 ## Dashboard
 
-The hooks patch adds a magpie-style "Privacy Masking" tab and an admin quick
-action on the dashboard overview. It uses magpie's `Options.Seen` callback and
+The hooks patch adds a magpie-style "Privacy Masking" page under the admin
+sidebar at `/dashboard/privacy`. It uses magpie's `Options.Seen` callback and
 stores only:
 
 - time, request id, route, model and user id
@@ -91,9 +90,9 @@ Storage is a JSONL file, not a database:
 
 Admin API endpoints:
 
-- `GET /api/privacy/masking/summary?days=7`
-- `GET /api/privacy/masking/events?days=7&limit=100`
-- `DELETE /api/privacy/masking/events`
+- `GET /api/user/privacy/masking/summary?days=7`
+- `GET /api/user/privacy/masking/events?days=7&limit=100`
+- `DELETE /api/user/privacy/masking/events`
 
 ## request-mask plugin
 

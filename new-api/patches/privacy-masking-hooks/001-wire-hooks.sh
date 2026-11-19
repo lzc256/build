@@ -63,20 +63,11 @@ else
     FRONT_SRC="$TARGET/web/default/src"
 fi
 
-REG="$FRONT_SRC/features/dashboard/section-registry.tsx"
-if ! grep -q "id: 'privacy'" "$REG"; then
-    perl -0pi -e "s#(\n\] as const)#\n  {\n    id: 'privacy',\n    titleKey: 'Privacy Masking',\n    adminOnly: true,\n    build: () => null,\n  },\$1#" "$REG"
-fi
-perl -0pi -e "s#new Set<string>\(\['users'\]\)#new Set<string>(['users', 'privacy'])#" "$REG"
 
 IDX="$FRONT_SRC/features/dashboard/index.tsx"
 if ! grep -q 'LazyPrivacyMasking' "$IDX"; then
     perl -0pi -e "s#(const LazyFlowCharts = lazy\(\(\) =>\n  import\('\./components/flow/flow-charts'\)\.then\(\(m\) => \(\{\n    default: m\.FlowCharts,\n  \}\)\)\n\))#\$1\nconst LazyPrivacyMasking = lazy(() =>\n  import('./components/privacy/privacy-masking').then((m) => ({\n    default: m.PrivacyMasking,\n  }))\n)\n#" "$IDX"
 fi
-if ! grep -q "  privacy: {" "$IDX"; then
-    perl -0pi -e "s#(  users: \{\n    titleKey: 'User Analytics',\n  \},\n)#\$1  privacy: {\n    titleKey: 'Privacy Masking',\n  },\n#" "$IDX"
-fi
-perl -0pi -e "s#\(section\) => section !== 'overview' && \(section !== 'users' \|\| isAdmin\)#(section) =>\n          section !== 'overview' &&\n          (isAdmin || (section !== 'users' && section !== 'privacy'))#" "$IDX"
 if ! grep -q "activeSection === 'privacy'" "$IDX"; then
     perl -0pi -e "s#(        </div>\n      </SectionPageLayout.Content>)#          {activeSection === 'privacy' && isAdmin && (\n            <FadeIn>\n              <Suspense fallback={<ModelChartsFallback />}>\n                <LazyPrivacyMasking />\n              </Suspense>\n            </FadeIn>\n          )}\n\$1#" "$IDX"
 fi
@@ -104,20 +95,12 @@ for spec in \
     fi
 done
 
-OV="$FRONT_SRC/features/dashboard/components/overview/overview-dashboard.tsx"
-if [ -f "$OV" ] && ! grep -q "'/dashboard/privacy'" "$OV"; then
-    perl -0pi -e "s#(      \{\n        title: t\('Channels'\),\n        description: t\('Configure upstream providers and routing.'\),\n        to: '/channels',\n        icon: RadioTower,\n        adminOnly: true,\n      \},\n)#\$1      {\n        title: t('Privacy Masking'),\n        description: t('Inspect privacy masking metadata and placeholders'),\n        to: '/dashboard/privacy',\n        icon: ShieldCheck,\n        adminOnly: true,\n      },\n#" "$OV"
+SIDEBAR="$FRONT_SRC/hooks/use-sidebar-data.ts"
+if [ -f "$SIDEBAR" ] && ! grep -q "'/dashboard/privacy'" "$SIDEBAR"; then
+    perl -0pi -e "s#(          \{\n            title: t\('Request processing'\),\n            url: '/request-processing',\n            icon: Workflow,\n            requiredRole: ROLE.SUPER_ADMIN,\n          \},\n)#\$1          {\n            title: t('Privacy Masking'),\n            url: '/dashboard/privacy',\n            icon: ShieldCheck,\n            requiredRole: ROLE.ADMIN,\n          },\n#" "$SIDEBAR"
 fi
 
-DESC_KEY="Inspect privacy masking metadata and placeholders"
-EN_S="${FRONT_SRC}/i18n/locales/en.json"
-if ! grep -q "$DESC_KEY" "$EN_S"; then
-    perl -0pi -e 's#("Privacy Masking": "[^"]*",\n)#$1    "Inspect privacy masking metadata and placeholders": "Inspect masked fields and their placeholders",\n#' "$EN_S"
-fi
-ZH_S="${FRONT_SRC}/i18n/locales/zh.json"
-if ! grep -q "$DESC_KEY" "$ZH_S"; then
-    perl -0pi -e 's#("Privacy Masking": "[^"]*",\n)#$1    "Inspect privacy masking metadata and placeholders": "查看脱敏字段及其占位符",\n#' "$ZH_S"
-fi
+
 
 echo "Applied privacy-masking hooks"
 echo "========================================="
