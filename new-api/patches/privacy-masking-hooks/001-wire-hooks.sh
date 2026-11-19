@@ -64,10 +64,21 @@ else
 fi
 
 
+REG="$FRONT_SRC/features/dashboard/section-registry.tsx"
+if ! grep -q "id: 'privacy'" "$REG"; then
+    perl -0pi -e "s#(\n\] as const)#\n  {\n    id: 'privacy',\n    titleKey: 'Privacy Masking',\n    adminOnly: true,\n    build: () => null,\n  },\$1#" "$REG"
+fi
+perl -0pi -e "s#new Set<string>\(\['users'\]\)#new Set<string>(['users', 'privacy'])#" "$REG"
+
 IDX="$FRONT_SRC/features/dashboard/index.tsx"
 if ! grep -q 'LazyPrivacyMasking' "$IDX"; then
     perl -0pi -e "s#(const LazyFlowCharts = lazy\(\(\) =>\n  import\('\./components/flow/flow-charts'\)\.then\(\(m\) => \(\{\n    default: m\.FlowCharts,\n  \}\)\)\n\))#\$1\nconst LazyPrivacyMasking = lazy(() =>\n  import('./components/privacy/privacy-masking').then((m) => ({\n    default: m.PrivacyMasking,\n  }))\n)\n#" "$IDX"
 fi
+
+if ! grep -q "  privacy: {" "$IDX"; then
+    perl -0pi -e "s#(  users: \{\n    titleKey: 'User Analytics',\n  \},\n)#\$1  privacy: {\n    titleKey: 'Privacy Masking',\n  },\n#" "$IDX"
+fi
+perl -0pi -e "s#\(section\) => section !== 'overview' && \(section !== 'users' \|\| isAdmin\)#(section) =>\n          section !== 'overview' &&\n          section !== 'privacy' &&\n          (section !== 'users' || isAdmin)#" "$IDX"
 if ! grep -q "activeSection === 'privacy'" "$IDX"; then
     perl -0pi -e "s#(        </div>\n      </SectionPageLayout.Content>)#          {activeSection === 'privacy' && isAdmin && (\n            <FadeIn>\n              <Suspense fallback={<ModelChartsFallback />}>\n                <LazyPrivacyMasking />\n              </Suspense>\n            </FadeIn>\n          )}\n\$1#" "$IDX"
 fi
