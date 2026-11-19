@@ -26,16 +26,16 @@ No database change. The admin dashboard stores metadata only.
 
 ## How it works
 
-New static files live in `.patch` files; only dynamic work and edits to existing
-upstream files stay as shell patches:
+This single patch directory is applied in filename order, so it can fetch a
+dependency, add static files, then wire existing files:
 
-- `../privacy-masking-engine/001-fetch-magpie.sh` fetches magpie at build time.
-- `001-privacy-core.patch`, `002-request-mask-plugin.patch` and
-  `003-privacy-dashboard.patch` add the Go core, plugin and dashboard.
-- `004-privacy-model.patch` adds `privacy/model.go` and the admin model routes;
-  `005-privacy-model-ui.patch` adds the settings card.
-- `../privacy-masking-hooks/001-wire-hooks.sh` edits existing router, jsplugin,
-  plugin-test and frontend files.
+- `001-fetch-magpie.sh` fetches magpie at build time.
+- `002-privacy-core.patch`, `003-request-mask-plugin.patch` and
+  `004-privacy-dashboard.patch` add the Go core, plugin and dashboard.
+- `005-privacy-model.patch` adds `privacy/model.go` and the admin model routes;
+  `006-privacy-model-ui.patch` adds the settings card.
+- `007-wire-hooks.sh` edits existing router, jsplugin, plugin-test and frontend
+  files.
 
 The engine patch uses:
 
@@ -138,7 +138,7 @@ plugin editor, not in the sidebar.
 
 ## request-mask plugin
 
-`002-request-mask-plugin.patch` adds a builtin request plugin named
+`003-request-mask-plugin.patch` adds a builtin request plugin named
 `request-mask`. In the admin UI it appears as **Request mask (Magpie)** /
 **请求脱敏（Magpie）**. Add an instance globally or per group to enable masking.
 Its config has:

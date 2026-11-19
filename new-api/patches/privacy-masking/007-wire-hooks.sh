@@ -1,7 +1,6 @@
 #!/bin/bash
-# Modifies existing new-api files to wire in the privacy-masking files added
-# by the privacy-masking .patch directory and the engine copied by
-# privacy-masking-engine. No new files are created here.
+# Modifies existing new-api files to wire in the files added by this same
+# patch directory. No new files are created here.
 
 set -euo pipefail
 
@@ -87,7 +86,7 @@ if [ -f "$FORM" ]; then
         perl -0pi -e "s#(import \{ RequestPluginConfigField \} from './request-plugin-config-field'\n)#import { PrivacyModelSettings } from './privacy-model-settings'\n\$1#" "$FORM"
     fi
     if ! grep -q "props.pluginKey === 'request-mask'" "$FORM"; then
-        perl -0pi -e "s#(<div className='divide-y rounded-xl border'>\n)#\$1      {props.pluginKey === 'request-mask' && (\n        <PrivacyModelSettings className='px-4 py-3.5' />\n      )}\n#" "$FORM"
+        perl -0pi -e "s#(      \}\)\}\n)(      \{visualField && \()#\$1      {props.pluginKey === 'request-mask' && (\n        <PrivacyModelSettings className='px-4 py-3.5' />\n      )}\n\$2#" "$FORM"
     fi
     grep -q 'PrivacyModelSettings' "$FORM" || { echo "failed to add privacy model settings" >&2; exit 1; }
 fi
