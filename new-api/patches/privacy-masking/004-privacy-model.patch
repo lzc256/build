@@ -1,0 +1,646 @@
+diff -ruN a/privacy/admin_api.go b/privacy/admin_api.go
+--- a/privacy/admin_api.go	2026-11-19 22:16:24
++++ b/privacy/admin_api.go	2026-11-19 22:40:08
+@@ -12,6 +12,11 @@
+ 	routes.GET("/privacy/masking/summary", privacySummaryHandler)
+ 	routes.GET("/privacy/masking/events", privacyEventsHandler)
+ 	routes.DELETE("/privacy/masking/events", privacyClearHandler)
++	routes.GET("/privacy/model/status", privacyModelStatusHandler)
++	routes.POST("/privacy/model/download", privacyModelDownloadHandler)
++	routes.POST("/privacy/model/cancel", privacyModelCancelHandler)
++	routes.POST("/privacy/model/config", privacyModelConfigHandler)
++	routes.POST("/privacy/model/unload", privacyModelUnloadHandler)
+ }
+ 
+ func privacySummaryHandler(c *gin.Context) {
+@@ -41,6 +46,49 @@
+ 		return
+ 	}
+ 	c.JSON(http.StatusOK, gin.H{"success": true, "data": gin.H{"cleared": true}})
++}
++
++func privacyModelStatusHandler(c *gin.Context) {
++	c.JSON(http.StatusOK, gin.H{"success": true, "data": astrlink.status()})
++}
++
++func privacyModelDownloadHandler(c *gin.Context) {
++	if err := astrlink.download(); err != nil {
++		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": err.Error()})
++		return
++	}
++	c.JSON(http.StatusOK, gin.H{"success": true, "data": astrlink.status()})
++}
++
++func privacyModelCancelHandler(c *gin.Context) {
++	astrlink.cancelDownload()
++	c.JSON(http.StatusOK, gin.H{"success": true, "data": astrlink.status()})
++}
++
++func privacyModelUnloadHandler(c *gin.Context) {
++	astrlink.unload()
++	c.JSON(http.StatusOK, gin.H{"success": true, "data": astrlink.status()})
++}
++
++func privacyModelConfigHandler(c *gin.Context) {
++	var req struct {
++		Directory         *string `json:"directory"`
++		IdleUnloadMinutes *int    `json:"idle_unload_minutes"`
++	}
++	if err := c.ShouldBindJSON(&req); err != nil {
++		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "invalid model config"})
++		return
++	}
++	directory := astrlink.status().Directory
++	if req.Directory != nil {
++		directory = *req.Directory
++	}
++	status, err := astrlink.configure(directory, req.IdleUnloadMinutes)
++	if err != nil {
++		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": err.Error()})
++		return
++	}
++	c.JSON(http.StatusOK, gin.H{"success": true, "data": status})
+ }
+ 
+ func queryInt(c *gin.Context, key string, fallback, min, max int) int {
+diff -ruN a/privacy/model.go b/privacy/model.go
+--- a/privacy/model.go	1970-01-01 08:00:00
++++ b/privacy/model.go	2026-11-19 22:52:43
+@@ -0,0 +1,529 @@
++package privacy
++
++import (
++	"context"
++	"crypto/sha256"
++	"encoding/hex"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"io"
++	"net/http"
++	"os"
++	"path/filepath"
++	"strings"
++	"sync"
++	"sync/atomic"
++	"time"
++
++	"github.com/QuantumNous/new-api/internal/privacy/guard"
++	"github.com/QuantumNous/new-api/internal/privacy/redact"
++)
++
++// AstrLink Guard is magpie's small local PII classifier: three pinned files
++// downloaded from Hugging Face, run in-process by internal/privacy/guard.
++// The model is optional; when it is not enabled, requests use the rule engine
++// and the user's names only.
++const (
++	astrlinkRevision   = "7216b6a3b897ef903d4b1ba367ae6fb95b0fa5e4"
++	defaultModelDir    = "data/privacy-models"
++	defaultIdleMinutes = 10
++	maxIdleMinutes     = 24 * 60
++)
++
++type astrlinkFile struct {
++	name string
++	path string
++	size int64
++	sha  string
++}
++
++var astrlinkFiles = []astrlinkFile{
++	{name: "model_int8.onnx", path: "int8/model_int8.onnx", size: 330781, sha: "0a070d3113615e33ba3b84d6bd486f663a377c04c4b056e7381732179f51832a"},
++	{name: "model_int8.onnx_data", path: "int8/model_int8.onnx_data", size: 37124608, sha: "0ba34216ceead01e0ae2dfd8e46d52b67e7aee80b04f722d9b758613a91c0067"},
++	{name: "tokenizer.json", path: "int8/tokenizer.json", size: 1502881, sha: "0cf3b235ef125658015a6c8026a5fe6f28088bf825101a990ec18a10200feef4"},
++}
++
++const astrlinkTotalSize = int64(330781 + 37124608 + 1502881)
++
++type modelConfig struct {
++	Directory         string `json:"directory"`
++	IdleUnloadMinutes int    `json:"idle_unload_minutes"`
++}
++
++// ModelStatus is what the plugin settings card shows.
++type ModelStatus struct {
++	State             string `json:"state"`
++	Installed         bool   `json:"installed"`
++	Loaded            bool   `json:"loaded"`
++	Directory         string `json:"directory"`
++	Path              string `json:"path"`
++	DownloadedBytes   int64  `json:"downloaded_bytes"`
++	TotalBytes        int64  `json:"total_bytes"`
++	Progress          int    `json:"progress"`
++	LastUsed          string `json:"last_used"`
++	IdleUnloadMinutes int    `json:"idle_unload_minutes"`
++	Error             string `json:"error"`
++}
++
++type astrlinkManager struct {
++	mu          sync.Mutex
++	loadMu      sync.Mutex
++	cfg         modelConfig
++	loaded      *guard.Model
++	state       string
++	err         string
++	lastUsed    time.Time
++	idleTimer   *time.Timer
++	downloading bool
++	cancel      context.CancelFunc
++	downloaded  atomic.Int64
++}
++
++var astrlink = newAstrlinkManager()
++
++func modelConfigPath() string {
++	if path := os.Getenv("PRIVACY_MODEL_CONFIG_PATH"); path != "" {
++		return path
++	}
++	return filepath.Join("data", "privacy-model.json")
++}
++
++func astrlinkFileURL(file string) string {
++	endpoint := strings.TrimRight(strings.TrimSpace(os.Getenv("HF_ENDPOINT")), "/")
++	if endpoint == "" {
++		endpoint = "https://huggingface.co"
++	}
++	return endpoint + "/QuantumNous/astrlink-guard/resolve/" + astrlinkRevision + "/" + file
++}
++
++func newAstrlinkManager() *astrlinkManager {
++	m := &astrlinkManager{cfg: modelConfig{Directory: defaultModelDir, IdleUnloadMinutes: defaultIdleMinutes}}
++	if raw, err := os.ReadFile(modelConfigPath()); err == nil {
++		var cfg modelConfig
++		if json.Unmarshal(raw, &cfg) == nil {
++			if strings.TrimSpace(cfg.Directory) != "" {
++				m.cfg.Directory = cfg.Directory
++			}
++			if cfg.IdleUnloadMinutes >= 0 && cfg.IdleUnloadMinutes <= maxIdleMinutes {
++				m.cfg.IdleUnloadMinutes = cfg.IdleUnloadMinutes
++			}
++		}
++	}
++	return m
++}
++
++func (m *astrlinkManager) modelDirLocked() string {
++	root := strings.TrimSpace(m.cfg.Directory)
++	if root == "" {
++		root = defaultModelDir
++	}
++	if abs, err := filepath.Abs(root); err == nil {
++		root = abs
++	}
++	return filepath.Join(root, "astrlink-guard", astrlinkRevision[:12])
++}
++
++func (m *astrlinkManager) directoryLocked() string {
++	root := strings.TrimSpace(m.cfg.Directory)
++	if root == "" {
++		root = defaultModelDir
++	}
++	if abs, err := filepath.Abs(root); err == nil {
++		root = abs
++	}
++	return root
++}
++
++func (m *astrlinkManager) installedLocked() bool {
++	dir := m.modelDirLocked()
++	for _, f := range astrlinkFiles {
++		info, err := os.Stat(filepath.Join(dir, f.name))
++		if err != nil || info.Size() != f.size {
++			return false
++		}
++	}
++	return true
++}
++
++func (m *astrlinkManager) allVerifiedLocked() bool {
++	dir := m.modelDirLocked()
++	for _, f := range astrlinkFiles {
++		if !verifyModelFile(filepath.Join(dir, f.name), f.size, f.sha) {
++			return false
++		}
++	}
++	return true
++}
++
++func (m *astrlinkManager) status() ModelStatus {
++	m.mu.Lock()
++	defer m.mu.Unlock()
++	installed := m.installedLocked()
++	state := m.state
++	if state == "" {
++		switch {
++		case m.loaded != nil:
++			state = "loaded"
++		case installed:
++			state = "ready"
++		default:
++			state = "not_installed"
++		}
++	}
++	downloaded := m.downloaded.Load()
++	if installed {
++		downloaded = astrlinkTotalSize
++	}
++	progress := 0
++	if astrlinkTotalSize > 0 {
++		progress = int(downloaded * 100 / astrlinkTotalSize)
++		if progress > 100 {
++			progress = 100
++		}
++	}
++	lastUsed := ""
++	if !m.lastUsed.IsZero() {
++		lastUsed = m.lastUsed.Format(time.RFC3339)
++	}
++	return ModelStatus{
++		State:             state,
++		Installed:         installed,
++		Loaded:            m.loaded != nil,
++		Directory:         m.directoryLocked(),
++		Path:              m.modelDirLocked(),
++		DownloadedBytes:   downloaded,
++		TotalBytes:        astrlinkTotalSize,
++		Progress:          progress,
++		LastUsed:          lastUsed,
++		IdleUnloadMinutes: m.cfg.IdleUnloadMinutes,
++		Error:             m.err,
++	}
++}
++
++func (m *astrlinkManager) configure(directory string, idle *int) (ModelStatus, error) {
++	directory = strings.TrimSpace(directory)
++	if directory == "" {
++		return m.status(), errors.New("model directory must not be empty")
++	}
++	if len(directory) > 1024 {
++		return m.status(), errors.New("model directory is too long")
++	}
++	if idle != nil && (*idle < 0 || *idle > maxIdleMinutes) {
++		return m.status(), fmt.Errorf("idle unload minutes must be between 0 and %d", maxIdleMinutes)
++	}
++
++	m.loadMu.Lock()
++	m.mu.Lock()
++	if m.downloading {
++		m.mu.Unlock()
++		return m.status(), errors.New("cannot change the model directory while a download is running")
++	}
++	changed := directory != m.cfg.Directory
++	m.cfg.Directory = directory
++	if idle != nil {
++		m.cfg.IdleUnloadMinutes = *idle
++	}
++	m.unloadLocked()
++	if changed {
++		m.state = ""
++		m.err = ""
++		m.downloaded.Store(0)
++	} else {
++		if m.state == "loaded" {
++			m.state = "ready"
++		}
++		m.touchLocked()
++	}
++	cfg := m.cfg
++	m.mu.Unlock()
++	m.loadMu.Unlock()
++
++	if err := saveModelConfig(cfg); err != nil {
++		return m.status(), err
++	}
++	return m.status(), nil
++}
++
++func saveModelConfig(cfg modelConfig) error {
++	path := modelConfigPath()
++	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
++		return err
++	}
++	raw, err := json.MarshalIndent(cfg, "", "  ")
++	if err != nil {
++		return err
++	}
++	tmp := path + ".tmp"
++	if err := os.WriteFile(tmp, append(raw, '\n'), 0o600); err != nil {
++		return err
++	}
++	return os.Rename(tmp, path)
++}
++
++func (m *astrlinkManager) download() error {
++	ctx, cancel := context.WithCancel(context.Background())
++	m.mu.Lock()
++	if m.downloading {
++		m.mu.Unlock()
++		cancel()
++		return errors.New("a model download is already running")
++	}
++	if m.installedLocked() && m.allVerifiedLocked() {
++		m.state = "ready"
++		m.err = ""
++		m.downloaded.Store(astrlinkTotalSize)
++		m.mu.Unlock()
++		cancel()
++		return nil
++	}
++	m.downloading = true
++	m.cancel = cancel
++	m.state = "downloading"
++	m.err = ""
++	m.downloaded.Store(0)
++	m.mu.Unlock()
++
++	go func() {
++		err := m.downloadFiles(ctx)
++		m.mu.Lock()
++		m.downloading = false
++		m.cancel = nil
++		if err != nil {
++			if errors.Is(err, context.Canceled) {
++				m.state = "not_installed"
++				m.err = ""
++				m.downloaded.Store(0)
++			} else {
++				m.state = "error"
++				m.err = err.Error()
++			}
++		} else {
++			m.state = "ready"
++			m.err = ""
++			m.downloaded.Store(astrlinkTotalSize)
++		}
++		m.mu.Unlock()
++	}()
++	return nil
++}
++
++func (m *astrlinkManager) cancelDownload() {
++	m.mu.Lock()
++	cancel := m.cancel
++	m.mu.Unlock()
++	if cancel != nil {
++		cancel()
++	}
++}
++
++func (m *astrlinkManager) unload() {
++	m.loadMu.Lock()
++	defer m.loadMu.Unlock()
++	m.mu.Lock()
++	defer m.mu.Unlock()
++	m.unloadLocked()
++	if m.state == "loaded" {
++		m.state = "ready"
++		m.touchLocked()
++	}
++}
++
++func (m *astrlinkManager) unloadLocked() {
++	if m.idleTimer != nil {
++		m.idleTimer.Stop()
++		m.idleTimer = nil
++	}
++	m.loaded = nil
++}
++
++func (m *astrlinkManager) touchLocked() {
++	m.lastUsed = time.Now()
++	if m.idleTimer != nil {
++		m.idleTimer.Stop()
++		m.idleTimer = nil
++	}
++	minutes := m.cfg.IdleUnloadMinutes
++	if minutes <= 0 || m.loaded == nil {
++		return
++	}
++	m.idleTimer = time.AfterFunc(time.Duration(minutes)*time.Minute, m.unload)
++}
++
++func (m *astrlinkManager) find(texts []string) [][]redact.Found {
++	if len(texts) == 0 {
++		return nil
++	}
++	m.loadMu.Lock()
++	m.mu.Lock()
++	model := m.loaded
++	if model != nil {
++		m.touchLocked()
++		m.mu.Unlock()
++		m.loadMu.Unlock()
++		return guardFind(model, texts)
++	}
++	if !m.installedLocked() {
++		m.mu.Unlock()
++		m.loadMu.Unlock()
++		return nil
++	}
++	dir := m.modelDirLocked()
++	m.state = "loading"
++	m.err = ""
++	m.mu.Unlock()
++
++	model, err := guard.Load(dir)
++	m.mu.Lock()
++	if err != nil {
++		m.state = "error"
++		m.err = err.Error()
++		m.mu.Unlock()
++		m.loadMu.Unlock()
++		return nil
++	}
++	m.loaded = model
++	m.state = "loaded"
++	m.err = ""
++	m.touchLocked()
++	m.mu.Unlock()
++	m.loadMu.Unlock()
++	return guardFind(model, texts)
++}
++
++func guardFind(model *guard.Model, texts []string) (out [][]redact.Found) {
++	defer func() {
++		if recover() != nil {
++			out = nil
++		}
++	}()
++	out = make([][]redact.Found, len(texts))
++	for i, text := range texts {
++		for _, span := range model.Find(text) {
++			label := astrlinkLabel(span.Label)
++			if label == "" {
++				continue
++			}
++			out[i] = append(out[i], redact.Found{
++				Start: span.Start,
++				End:   span.End,
++				Label: label,
++				Score: span.Score,
++			})
++		}
++	}
++	return out
++}
++
++func astrlinkLabel(label string) string {
++	switch label {
++	case "email":
++		return "private_email"
++	case "phone":
++		return "private_phone"
++	case "account", "payment_card":
++		return "account_number"
++	case "common_secret":
++		return "secret"
++	case "private_address":
++		return "private_address"
++	case "private_person":
++		return "private_person"
++	default:
++		return ""
++	}
++}
++
++func (m *astrlinkManager) downloadFiles(ctx context.Context) error {
++	dir := m.modelDirLocked()
++	if err := os.MkdirAll(dir, 0o755); err != nil {
++		return err
++	}
++	for _, f := range astrlinkFiles {
++		if err := ctx.Err(); err != nil {
++			return err
++		}
++		target := filepath.Join(dir, f.name)
++		if verifyModelFile(target, f.size, f.sha) {
++			m.downloaded.Add(f.size)
++			continue
++		}
++		if err := m.downloadFile(ctx, astrlinkFileURL(f.path), target, f.size, f.sha); err != nil {
++			return fmt.Errorf("%s: %w", f.name, err)
++		}
++	}
++	return nil
++}
++
++func (m *astrlinkManager) downloadFile(ctx context.Context, url, target string, size int64, want string) error {
++	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
++	if err != nil {
++		return err
++	}
++	resp, err := http.DefaultClient.Do(req)
++	if err != nil {
++		return err
++	}
++	defer resp.Body.Close()
++	if resp.StatusCode != http.StatusOK {
++		return fmt.Errorf("download returned %s", resp.Status)
++	}
++
++	tmp := target + ".part"
++	f, err := os.Create(tmp)
++	if err != nil {
++		return err
++	}
++	defer os.Remove(tmp)
++
++	hash := sha256.New()
++	writer := &countingWriter{writer: io.MultiWriter(f, hash), n: &m.downloaded}
++	if _, err := io.Copy(writer, resp.Body); err != nil {
++		f.Close()
++		return err
++	}
++	if err := f.Close(); err != nil {
++		return err
++	}
++	info, err := os.Stat(tmp)
++	if err != nil {
++		return err
++	}
++	if info.Size() != size {
++		return fmt.Errorf("size %d, want %d", info.Size(), size)
++	}
++	if got := hex.EncodeToString(hash.Sum(nil)); got != want {
++		return fmt.Errorf("sha256 %s, want %s", got, want)
++	}
++	return os.Rename(tmp, target)
++}
++
++type countingWriter struct {
++	writer io.Writer
++	n      *atomic.Int64
++}
++
++func (w *countingWriter) Write(p []byte) (int, error) {
++	n, err := w.writer.Write(p)
++	if n > 0 {
++		w.n.Add(int64(n))
++	}
++	return n, err
++}
++
++func verifyModelFile(path string, size int64, want string) bool {
++	info, err := os.Stat(path)
++	if err != nil || info.Size() != size {
++		return false
++	}
++	f, err := os.Open(path)
++	if err != nil {
++		return false
++	}
++	defer f.Close()
++	hash := sha256.New()
++	if _, err := io.Copy(hash, f); err != nil {
++		return false
++	}
++	return hex.EncodeToString(hash.Sum(nil)) == want
++}
+diff -ruN a/privacy/plugin.go b/privacy/plugin.go
+--- a/privacy/plugin.go	2026-11-19 22:16:24
++++ b/privacy/plugin.go	2026-11-19 22:40:08
+@@ -12,11 +12,14 @@
+ )
+ 
+ type pluginMaskOptions struct {
+-	Secrets  *bool  `json:"secrets"`
+-	Personal *bool  `json:"personal"`
+-	Path     string `json:"path"`
+-	Model    string `json:"model"`
+-	UserID   string `json:"user_id"`
++	Secrets      *bool    `json:"secrets"`
++	Personal     *bool    `json:"personal"`
++	Names        []string `json:"names"`
++	NamesByModel *bool    `json:"names_by_model"`
++	PIIModel     string   `json:"pii_model"`
++	Path         string   `json:"path"`
++	Model        string   `json:"model"`
++	UserID       string   `json:"user_id"`
+ }
+ 
+ type maskPatchOperation struct {
+@@ -40,6 +43,24 @@
+ 	}
+ 	if meta.Personal != nil {
+ 		opts.Personal = *meta.Personal
++	}
++
++	for _, name := range meta.Names {
++		if name = strings.TrimSpace(name); name != "" {
++			opts.Words = append(opts.Words, name)
++		}
++	}
++	if len(opts.Words) > 0 {
++		opts.WordsAnyCase = true
++		opts.WordsWhole = true
++	}
++	if meta.PIIModel == "astrlink" {
++		opts.Model = astrlink.find
++		opts.MinScore = 0.8
++		opts.NamesByModel = true
++		if meta.NamesByModel != nil {
++			opts.NamesByModel = *meta.NamesByModel
++		}
+ 	}
+ 	return meta, opts, nil
+ }

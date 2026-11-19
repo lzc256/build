@@ -155,6 +155,10 @@ jobs:
           test -f new-api-src/web/src/features/dashboard/components/privacy/privacy-masking.tsx && echo "privacy-masking: dashboard OK" || { echo "privacy-masking: dashboard MISSING"; exit 1; }
           test -f new-api-src/plugins/tasks/request-mask/plugin.js && echo "privacy-masking: request-mask plugin OK" || { echo "privacy-masking: request-mask plugin MISSING"; exit 1; }
           test -f new-api-src/privacy/plugin.go && echo "privacy-masking: plugin host OK" || { echo "privacy-masking: plugin host MISSING"; exit 1; }
+          test -f new-api-src/privacy/model.go && echo "privacy-masking: model manager OK" || { echo "privacy-masking: model manager MISSING"; exit 1; }
+          test -f new-api-src/internal/privacy/guard/guard.go && echo "privacy-masking: AstrLink Guard OK" || { echo "privacy-masking: AstrLink Guard MISSING"; exit 1; }
+          test -f new-api-src/web/src/features/task-plugins/components/privacy-model-settings.tsx && echo "privacy-masking: model settings UI OK" || { echo "privacy-masking: model settings UI MISSING"; exit 1; }
+          grep -q 'AstrLink Guard' new-api-src/plugins/tasks/request-mask/plugin.js && echo "privacy-masking: model config OK" || { echo "privacy-masking: model config MISSING"; exit 1; }
           grep -q "'/dashboard/privacy'" new-api-src/web/src/hooks/use-sidebar-data.ts && echo "privacy-masking: admin sidebar entry OK" || { echo "privacy-masking: admin sidebar entry MISSING"; exit 1; }
 
       - name: Login to GHCR

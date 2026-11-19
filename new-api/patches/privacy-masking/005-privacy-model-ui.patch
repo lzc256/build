@@ -1,0 +1,278 @@
+diff -ruN a/web/src/features/task-plugins/components/privacy-model-settings.tsx b/web/src/features/task-plugins/components/privacy-model-settings.tsx
+--- a/web/src/features/task-plugins/components/privacy-model-settings.tsx	1970-01-01 08:00:00
++++ b/web/src/features/task-plugins/components/privacy-model-settings.tsx	2026-11-19 22:16:49
+@@ -0,0 +1,274 @@
++import { useCallback, useEffect, useState } from 'react'
++
++import { Button } from '@/components/ui/button'
++import { Input } from '@/components/ui/input'
++import { formatBytes } from '@/lib/format'
++import { api } from '@/lib/api'
++import { cn } from '@/lib/utils'
++
++type ModelStatus = {
++  state: string
++  installed: boolean
++  loaded: boolean
++  directory: string
++  path: string
++  downloaded_bytes: number
++  total_bytes: number
++  progress: number
++  last_used: string
++  idle_unload_minutes: number
++  error: string
++}
++
++type StatusResponse = { success: boolean; data: ModelStatus }
++
++const stateLabel: Record<string, string> = {
++  not_installed: 'Not downloaded',
++  downloading: 'Downloading',
++  ready: 'Downloaded',
++  loading: 'Loading',
++  loaded: 'Loaded',
++  error: 'Error',
++}
++
++function stateClass(state: string) {
++  if (state === 'error') return 'border-red-500/40 bg-red-500/10 text-red-600'
++  if (state === 'ready' || state === 'loaded') {
++    return 'border-emerald-500/40 bg-emerald-500/10 text-emerald-600'
++  }
++  if (state === 'downloading' || state === 'loading') {
++    return 'border-amber-500/40 bg-amber-500/10 text-amber-600'
++  }
++  return 'border-muted-foreground/30 bg-muted text-muted-foreground'
++}
++
++/**
++ * The global AstrLink Guard panel shown in the request-mask plugin settings.
++ * The model is process-wide, so its directory, download and idle timer are
++ * not saved per plugin instance.
++ */
++export function PrivacyModelSettings(props: { className?: string }) {
++  const [status, setStatus] = useState<ModelStatus | null>(null)
++  const [directory, setDirectory] = useState('')
++  const [idle, setIdle] = useState('10')
++  const [busy, setBusy] = useState(false)
++  const [error, setError] = useState('')
++
++  const apply = useCallback((next: ModelStatus, withConfig: boolean) => {
++    setStatus(next)
++    setError(next.error || '')
++    if (withConfig) {
++      setDirectory(next.directory)
++      setIdle(String(next.idle_unload_minutes))
++    }
++  }, [])
++
++  const load = useCallback(
++    async (withConfig: boolean) => {
++      try {
++        const res = await api.get<StatusResponse>(
++          '/api/user/privacy/model/status'
++        )
++        apply(res.data.data, withConfig)
++      } catch (err) {
++        setError(err instanceof Error ? err.message : String(err))
++      }
++    },
++    [apply]
++  )
++
++  useEffect(() => {
++    void load(true)
++    const timer = window.setInterval(() => void load(false), 3000)
++    return () => window.clearInterval(timer)
++  }, [load])
++
++  const post = async (path: string, body?: unknown) => {
++    setBusy(true)
++    setError('')
++    try {
++      const res = await api.post<StatusResponse>(
++        `/api/user/privacy/model/${path}`,
++        body
++      )
++      apply(res.data.data, true)
++    } catch (err) {
++      setError(err instanceof Error ? err.message : String(err))
++    } finally {
++      setBusy(false)
++    }
++  }
++
++  const downloading = status?.state === 'downloading'
++  const dirty =
++    Boolean(status) &&
++    (directory !== status?.directory ||
++      idle !== String(status?.idle_unload_minutes ?? 10))
++
++  return (
++    <div className={cn('space-y-4', props.className)}>
++      <div className='flex flex-wrap items-start justify-between gap-3'>
++        <div className='min-w-0 space-y-1'>
++          <div className='text-sm font-medium'>AstrLink Guard</div>
++          <div className='text-muted-foreground text-xs'>
++            Local int8 PII model · {formatBytes(status?.total_bytes ?? 0)} ·
++            no native binary
++          </div>
++        </div>
++        <span
++          className={cn(
++            'rounded-full border px-2.5 py-1 text-xs font-medium',
++            stateClass(status?.state ?? 'not_installed')
++          )}
++        >
++          {stateLabel[status?.state ?? 'not_installed'] ?? status?.state}
++        </span>
++      </div>
++
++      {status && (
++        <div className='grid gap-x-4 gap-y-1 text-xs sm:grid-cols-2'>
++          <div className='text-muted-foreground'>
++            Installed:{' '}
++            <span className='text-foreground'>
++              {status.installed ? 'yes' : 'no'}
++            </span>
++          </div>
++          <div className='text-muted-foreground'>
++            Loaded:{' '}
++            <span className='text-foreground'>
++              {status.loaded ? 'yes' : 'no'}
++            </span>
++          </div>
++          <div className='text-muted-foreground'>
++            Last used:{' '}
++            <span className='text-foreground'>
++              {status.last_used || 'never'}
++            </span>
++          </div>
++          <div className='text-muted-foreground'>
++            Idle unload:{' '}
++            <span className='text-foreground'>
++              {status.idle_unload_minutes === 0
++                ? 'never'
++                : `${status.idle_unload_minutes} min`}
++            </span>
++          </div>
++          <div className='text-muted-foreground sm:col-span-2'>
++            Path:{' '}
++            <span className='text-foreground break-all'>{status.path}</span>
++          </div>
++        </div>
++      )}
++
++      {downloading && status && (
++        <div className='space-y-1.5'>
++          <div className='bg-muted h-2 overflow-hidden rounded'>
++            <div
++              className='bg-primary h-2 rounded transition-all'
++              style={{ width: `${Math.min(100, Math.max(0, status.progress))}%` }}
++            />
++          </div>
++          <div className='text-muted-foreground flex justify-between text-xs'>
++            <span>{status.progress}%</span>
++            <span>
++              {formatBytes(status.downloaded_bytes)} /{' '}
++              {formatBytes(status.total_bytes)}
++            </span>
++          </div>
++        </div>
++      )}
++
++      <div className='grid gap-3 sm:grid-cols-[1fr_140px]'>
++        <label className='space-y-1.5'>
++          <span className='text-sm font-medium'>Model directory</span>
++          <Input
++            value={directory}
++            placeholder='/app/data/privacy-models'
++            disabled={busy || downloading}
++            onChange={(event) => setDirectory(event.target.value)}
++          />
++          <span className='text-muted-foreground text-xs'>
++            The model is stored under this directory. Mount a volume to keep it
++            across container rebuilds.
++          </span>
++        </label>
++        <label className='space-y-1.5'>
++          <span className='text-sm font-medium'>Idle unload</span>
++          <div className='flex items-center gap-2'>
++            <Input
++              type='number'
++              min={0}
++              max={1440}
++              value={idle}
++              disabled={busy || downloading}
++              onChange={(event) => setIdle(event.target.value)}
++            />
++            <span className='text-muted-foreground text-xs'>min</span>
++          </div>
++          <span className='text-muted-foreground text-xs'>
++            0 = never unload.
++          </span>
++        </label>
++      </div>
++
++      <div className='flex flex-wrap items-center gap-2'>
++        <Button
++          type='button'
++          size='sm'
++          variant='outline'
++          disabled={busy || downloading || !dirty}
++          onClick={() =>
++            void post('config', {
++              directory,
++              idle_unload_minutes: Number(idle),
++            })
++          }
++        >
++          Save model settings
++        </Button>
++        {downloading ? (
++          <Button
++            type='button'
++            size='sm'
++            variant='outline'
++            disabled={busy}
++            onClick={() => void post('cancel')}
++          >
++            Cancel download
++          </Button>
++        ) : (
++          <Button
++            type='button'
++            size='sm'
++            disabled={busy || dirty}
++            onClick={() => void post('download')}
++          >
++            {status?.installed ? 'Verify model' : 'Download model'}
++          </Button>
++        )}
++        {status?.loaded && (
++          <Button
++            type='button'
++            size='sm'
++            variant='outline'
++            disabled={busy}
++            onClick={() => void post('unload')}
++          >
++            Unload now
++          </Button>
++        )}
++      </div>
++      {dirty && !downloading && (
++        <p className='text-muted-foreground text-xs'>
++          Save the model settings before downloading.
++        </p>
++      )}
++
++      {error && (
++        <div className='rounded-lg border border-red-500/40 bg-red-500/10 p-3 text-xs text-red-600'>
++          {error}
++        </div>
++      )}
++    </div>
++  )
++}

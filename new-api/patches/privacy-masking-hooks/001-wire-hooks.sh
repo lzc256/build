@@ -56,11 +56,40 @@ if [ -f "$TEST_FILE" ] && ! grep -q '"request-mask"' "$TEST_FILE"; then
     perl -0pi -e 's#(\t"request-redact":     \{"ingress", "egress", "reply"\},\n)#$1\t"request-mask":      {"ingress", "egress", "reply"},\n#' "$TEST_FILE"
 fi
 
+# ------------------------------------------------ astrlink guard deps ----
+if ! grep -q 'github.com/clipperhouse/uax29' "$TARGET/go.mod"; then
+    (cd "$TARGET" && go mod edit \
+        -require=github.com/clipperhouse/stringish@v0.1.1 \
+        -require=github.com/clipperhouse/uax29/v2@v2.5.0)
+fi
+SUM="$TARGET/go.sum"
+if ! grep -q '^github.com/clipperhouse/stringish v0.1.1 ' "$SUM"; then
+    printf '%s\n' \
+        'github.com/clipperhouse/stringish v0.1.1 h1:+NSqMOr3GR6k1FdRhhnXrLfztGzuG+VuFDfatpWHKCs=' \
+        'github.com/clipperhouse/stringish v0.1.1/go.mod h1:v/WhFtE1q0ovMta2+m+UbpZ+2/HEXNWYXQgCt4hdOzA=' >>"$SUM"
+fi
+if ! grep -q '^github.com/clipperhouse/uax29/v2 v2.5.0 ' "$SUM"; then
+    printf '%s\n' \
+        'github.com/clipperhouse/uax29/v2 v2.5.0 h1:x7T0T4eTHDONxFJsL94uKNKPHrclyFI0lm7+w94cO8U=' \
+        'github.com/clipperhouse/uax29/v2 v2.5.0/go.mod h1:Wn1g7MK6OoeDT0vL+Q0SQLDz/KpfsVRgg6W7ihQeh4g=' >>"$SUM"
+fi
+
 # ------------------------------------------------------------- frontend ---
 if [ -d "$TARGET/web/src" ]; then
     FRONT_SRC="$TARGET/web/src"
 else
     FRONT_SRC="$TARGET/web/default/src"
+fi
+
+FORM="$FRONT_SRC/features/task-plugins/components/request-plugin-config-form.tsx"
+if [ -f "$FORM" ]; then
+    if ! grep -q 'privacy-model-settings' "$FORM"; then
+        perl -0pi -e "s#(import \{ RequestPluginConfigField \} from './request-plugin-config-field'\n)#import { PrivacyModelSettings } from './privacy-model-settings'\n\$1#" "$FORM"
+    fi
+    if ! grep -q "props.pluginKey === 'request-mask'" "$FORM"; then
+        perl -0pi -e "s#(<div className='divide-y rounded-xl border'>\n)#\$1      {props.pluginKey === 'request-mask' && (\n        <PrivacyModelSettings className='px-4 py-3.5' />\n      )}\n#" "$FORM"
+    fi
+    grep -q 'PrivacyModelSettings' "$FORM" || { echo "failed to add privacy model settings" >&2; exit 1; }
 fi
 
 

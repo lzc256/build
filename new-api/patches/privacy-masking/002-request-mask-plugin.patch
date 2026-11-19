@@ -14,10 +14,10 @@ index 000000000..b50faae18
 +</svg>
 diff --git a/plugins/tasks/request-mask/plugin.js b/plugins/tasks/request-mask/plugin.js
 new file mode 100644
-index 000000000..ac5386836
+index 000000000..ac5386837
 --- /dev/null
 +++ b/plugins/tasks/request-mask/plugin.js
-@@ -0,0 +1,68 @@
+@@ -0,0 +1,110 @@
 +export const meta = {
 +  apiVersion: 1,
 +  key: "request-mask",
@@ -26,7 +26,7 @@ index 000000000..ac5386836
 +    en: "Replaces secrets and personal data with magpie placeholders before sending; replies are restored automatically.",
 +    zh: "发送前使用 magpie 规则把密钥和个人信息替换为占位符，回复自动还原。",
 +  },
-+  version: "1.0.2",
++  version: "1.0.3",
 +  author: { name: "lzc256" },
 +  configSchema: {
 +    type: "object",
@@ -42,6 +42,40 @@ index 000000000..ac5386836
 +        title: { en: "Mask personal data", zh: "脱敏个人信息" },
 +        description: { en: "Emails, phone numbers, ID and bank card numbers", zh: "邮箱、手机号、身份证号和银行卡号" },
 +        default: true,
++      },
++      names: {
++        type: "string",
++        format: "textarea",
++        title: { en: "Names to mask", zh: "需要脱敏的人名" },
++        description: {
++          en: "One name per line. Always masked, with or without the local model.",
++          zh: "每行一个名字。无论是否启用本地模型都会脱敏。",
++        },
++        default: "",
++      },
++      model: {
++        type: "string",
++        enum: ["off", "astrlink"],
++        enumTitles: [
++          { en: "Off (rules only)", zh: "关闭（仅规则）" },
++          { en: "AstrLink Guard (37 MB)", zh: "AstrLink Guard（37 MB）" },
++        ],
++        title: { en: "Local PII model", zh: "本地 PII 模型" },
++        description: {
++          en: "Find names, addresses and passwords that rules miss. Downloads once and runs on this server.",
++          zh: "识别规则漏掉的人名、地址和密码。首次使用时下载并运行在本机。",
++        },
++        default: "off",
++      },
++      names_by_model: {
++        type: "boolean",
++        title: { en: "Use model for full names", zh: "用模型识别完整人名" },
++        description: {
++          en: "AstrLink Guard finds full Chinese names; the rules then only add nicknames.",
++          zh: "AstrLink Guard 能识别完整中文人名，规则只补充昵称。",
++        },
++        default: true,
++        visibleWhen: { model: ["astrlink"] },
 +      },
 +    },
 +  },
@@ -64,9 +98,17 @@ index 000000000..ac5386836
 +};
 +
 +function requestMeta(ctx) {
++  const config = ctx.config || {};
++  const names = String(config.names || "")
++    .split(/\r?\n/)
++    .map((name) => name.trim())
++    .filter(Boolean);
 +  return JSON.stringify({
-+    secrets: (ctx.config || {}).secrets !== false,
-+    personal: (ctx.config || {}).personal !== false,
++    secrets: config.secrets !== false,
++    personal: config.personal !== false,
++    names,
++    pii_model: config.model === "astrlink" ? "astrlink" : "off",
++    names_by_model: config.names_by_model !== false,
 +    path: ctx.path || "",
 +    model: ctx.model || "",
 +    user_id: ctx.user && ctx.user.id ? String(ctx.user.id) : "",
