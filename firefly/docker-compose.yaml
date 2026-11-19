@@ -1,7 +1,7 @@
 services:
   app:
     restart: unless-stopped
-    image: ghcr.io/lzc256/firefly-iii-alpine:latest
+    image: ghcr.io/lzc256/build:firefly
     volumes:
       - .env:/var/www/html/.env
       - ./sqlite3.db:/var/www/html/sqlite3.db
