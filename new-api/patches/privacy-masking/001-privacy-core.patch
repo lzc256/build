@@ -100,12 +100,12 @@ index 000000000..7ba80b38c
 +func (w *ginWriter) WriteHeaderNow() { w.rw.WriteHeader(w.ResponseWriter.Status()) }
 +
 +func (w *ginWriter) Flush() { w.rw.Flush() }
-diff --git a/privacy/insights.go b/privacy/insights.go
+diff --git a/privacy/insights.go
 new file mode 100644
 index 000000000..4b864a2c3
 --- /dev/null
 +++ b/privacy/insights.go
-@@ -0,0 +1,221 @@
+@@ -0,0 +1,302 @@
 +package privacy
 +
 +import (
@@ -115,6 +115,7 @@ index 000000000..4b864a2c3
 +	"os"
 +	"path/filepath"
 +	"sort"
++	"strconv"
 +	"strings"
 +	"sync"
 +	"sync/atomic"
@@ -143,16 +144,26 @@ index 000000000..4b864a2c3
 +	Days     int            `json:"days"`
 +	Total    int            `json:"total"`
 +	Requests int            `json:"requests"`
++	Dropped  uint64         `json:"dropped"`
 +	ByKind   map[string]int `json:"by_kind"`
 +	ByDay    map[string]int `json:"by_day"`
 +	ByModel  map[string]int `json:"by_model"`
 +}
 +
++const (
++	defaultInsightFlushFrequency = 100
++	insightQueueSize             = 4096
++	insightFlushInterval         = time.Second
++)
++
 +type insightStore struct {
-+	mu        sync.RWMutex
-+	path      string
-+	retention time.Duration
-+	maxLines  int
++	mu         sync.RWMutex
++	path       string
++	retention  time.Duration
++	maxLines   int
++	flushEvery int
++	queue      chan MaskEvent
++	dropped    atomic.Uint64
 +}
 +
 +var (
@@ -165,11 +176,20 @@ index 000000000..4b864a2c3
 +	if path == "" {
 +		path = filepath.Join("data", "privacy-masking.jsonl")
 +	}
-+	s := &insightStore{
-+		path:      path,
-+		retention: 30 * 24 * time.Hour,
-+		maxLines:  100000,
++	flushEvery := defaultInsightFlushFrequency
++	if raw := os.Getenv("PRIVACY_INSIGHTS_FLUSH_FREQUENCY"); raw != "" {
++		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
++			flushEvery = n
++		}
 +	}
++	s := &insightStore{
++		path:       path,
++		retention:  30 * 24 * time.Hour,
++		maxLines:   100000,
++		flushEvery: flushEvery,
++		queue:      make(chan MaskEvent, insightQueueSize),
++	}
++	go s.writeLoop()
 +	go s.cleanupLoop()
 +	return s
 +}
@@ -178,6 +198,8 @@ index 000000000..4b864a2c3
 +	return fmt.Sprintf("%d-%d", time.Now().UnixNano(), atomic.AddUint64(&requestSeq, 1))
 +}
 +
++// record never blocks the relay path. A full queue drops the event and
++// counts it; the dashboard exposes that count as dropped.
 +func (s *insightStore) record(e MaskEvent) {
 +	if e.ID == "" {
 +		e.ID = fmt.Sprintf("%d-%d", time.Now().UnixNano(), atomic.AddUint64(&requestSeq, 1))
@@ -185,22 +207,80 @@ index 000000000..4b864a2c3
 +	if e.Time.IsZero() {
 +		e.Time = time.Now()
 +	}
-+	line, err := json.Marshal(e)
-+	if err != nil {
++	if s.queue == nil {
++		s.writeBatch([]MaskEvent{e})
++		return
++	}
++	select {
++	case s.queue <- e:
++	default:
++		s.dropped.Add(1)
++	}
++}
++
++func (s *insightStore) writeLoop() {
++	ticker := time.NewTicker(insightFlushInterval)
++	defer ticker.Stop()
++
++	flushEvery := s.flushEvery
++	if flushEvery <= 0 {
++		flushEvery = defaultInsightFlushFrequency
++	}
++	batch := make([]MaskEvent, 0, flushEvery)
++	flush := func() {
++		if len(batch) == 0 {
++			return
++		}
++		s.writeBatch(batch)
++		batch = batch[:0]
++	}
++
++	for {
++		select {
++		case e := <-s.queue:
++			batch = append(batch, e)
++			if len(batch) >= flushEvery {
++				flush()
++			}
++		case <-ticker.C:
++			flush()
++		}
++	}
++}
++
++func (s *insightStore) writeBatch(events []MaskEvent) {
++	var lines strings.Builder
++	written := 0
++	for _, e := range events {
++		line, err := json.Marshal(e)
++		if err != nil {
++			s.dropped.Add(1)
++			continue
++		}
++		lines.Write(line)
++		lines.WriteByte('\n')
++		written++
++	}
++	if written == 0 {
 +		return
 +	}
 +
 +	s.mu.Lock()
 +	defer s.mu.Unlock()
 +	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
++		s.dropped.Add(uint64(written))
 +		return
 +	}
 +	f, err := os.OpenFile(s.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 +	if err != nil {
++		s.dropped.Add(uint64(written))
 +		return
 +	}
-+	defer f.Close()
-+	_, _ = f.Write(append(line, '\n'))
++	_, writeErr := f.WriteString(lines.String())
++	closeErr := f.Close()
++	if writeErr != nil || closeErr != nil {
++		s.dropped.Add(uint64(written))
++	}
 +}
 +
 +func (s *insightStore) cleanupLoop() {
@@ -301,6 +381,7 @@ index 000000000..4b864a2c3
 +	res := InsightSummary{
 +		Days:    days,
 +		Total:   len(all),
++		Dropped: s.dropped.Load(),
 +		ByKind:  map[string]int{},
 +		ByDay:   map[string]int{},
 +		ByModel: map[string]int{},
@@ -332,7 +413,7 @@ new file mode 100644
 index 000000000..d49b816b0
 --- /dev/null
 +++ b/privacy/insights_test.go
-@@ -0,0 +1,43 @@
+@@ -0,0 +1,52 @@
 +package privacy
 +
 +import (
@@ -376,12 +457,21 @@ index 000000000..d49b816b0
 +		t.Fatalf("insight file contains plaintext: %s", raw)
 +	}
 +}
++
++func TestInsightStoreDropsWhenQueueIsFull(t *testing.T) {
++	s := &insightStore{queue: make(chan MaskEvent, 1)}
++	s.record(MaskEvent{Kind: "EMAIL"})
++	s.record(MaskEvent{Kind: "EMAIL"})
++	if got := s.dropped.Load(); got != 1 {
++		t.Fatalf("dropped = %d, want 1", got)
++	}
++}
 diff --git a/privacy/integration_test.go b/privacy/integration_test.go
 new file mode 100644
 index 000000000..6a8d95c79
 --- /dev/null
 +++ b/privacy/integration_test.go
-@@ -0,0 +1,65 @@
+@@ -0,0 +1,74 @@
 +package privacy
 +
 +import (
@@ -389,6 +479,7 @@ index 000000000..6a8d95c79
 +	"fmt"
 +	"strings"
 +	"testing"
++	"time"
 +)
 +
 +func TestMaskJSONForJSUsesMagpieAndRecordsMetadata(t *testing.T) {
@@ -403,9 +494,17 @@ index 000000000..6a8d95c79
 +	if masked == string(body) || strings.Contains(masked, plaintext) {
 +		t.Fatalf("body was not masked: %s", masked)
 +	}
-+	events, err := insights.events(1, "EMAIL", 10)
-+	if err != nil {
-+		t.Fatal(err)
++	var events []MaskEvent
++	deadline := time.Now().Add(2 * time.Second)
++	for time.Now().Before(deadline) {
++		events, err = insights.events(1, "EMAIL", 10)
++		if err != nil {
++			t.Fatal(err)
++		}
++		if len(events) > 0 {
++			break
++		}
++		time.Sleep(10 * time.Millisecond)
 +	}
 +	if len(events) == 0 {
 +		t.Fatal("no EMAIL insight recorded")

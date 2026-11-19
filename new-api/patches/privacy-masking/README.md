@@ -87,6 +87,11 @@ Storage is a JSONL file, not a database:
 - path is relative to the new-api process working directory (Docker: `/app`)
 - retention: 30 days, max 100000 lines
 - cleanup runs hourly on startup
+- writes are asynchronous: requests enqueue events, one writer appends batches
+- `PRIVACY_INSIGHTS_FLUSH_FREQUENCY` sets events per batch (default `100`)
+- partial batches flush every second, so low traffic still lands promptly
+- queue holds 4096 events; when full, new events are dropped and counted
+- the summary API/UI exposes the dropped count
 
 Admin API endpoints:
 

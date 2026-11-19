@@ -5,7 +5,7 @@ new file mode 100644
 index 000000000..20d5631ad
 --- /dev/null
 +++ b/web/src/features/dashboard/components/privacy/privacy-masking.tsx
-@@ -0,0 +1,221 @@
+@@ -0,0 +1,228 @@
 +import { useCallback, useEffect, useMemo, useState } from 'react'
 +
 +import { Button } from '@/components/ui/button'
@@ -30,6 +30,7 @@ index 000000000..20d5631ad
 +  days: number
 +  total: number
 +  requests: number
++  dropped: number
 +  by_kind: Record<string, number>
 +  by_day: Record<string, number>
 +  by_model: Record<string, number>
@@ -108,6 +109,12 @@ index 000000000..20d5631ad
 +      {error && (
 +        <div className='rounded-lg border border-red-500/40 bg-red-500/10 p-3 text-sm text-red-500'>
 +          {error}
++        </div>
++      )}
++
++      {summary && summary.dropped > 0 && (
++        <div className='rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-sm text-amber-600'>
++          Dropped {summary.dropped} privacy events because the async queue was full.
 +        </div>
 +      )}
 +
