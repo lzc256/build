@@ -170,7 +170,7 @@ export const meta = {
     en: "Replaces secrets and personal data with magpie placeholders before sending; replies are restored automatically.",
     zh: "发送前使用 magpie 规则把密钥和个人信息替换为占位符，回复自动还原。",
   },
-  version: "1.0.0",
+  version: "1.0.1",
   author: { name: "lzc256" },
   configSchema: {
     type: "object",
@@ -189,6 +189,22 @@ export const meta = {
       },
     },
   },
+  samples: [
+    {
+      name: { en: "Email and API key", zh: "邮箱和 API 密钥" },
+      lang: "en",
+      format: "openai",
+      body: {
+        model: "gpt-4o-mini",
+        messages: [
+          {
+            role: "user",
+            content: "Send the report to [REDACTED] using sk-abcdefghijklmnopqrstuv.",
+          },
+        ],
+      },
+    },
+  ],
 };
 
 function requestMeta(ctx) {
