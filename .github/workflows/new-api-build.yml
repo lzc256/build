@@ -114,10 +114,12 @@ jobs:
           source scripts/common.sh
           apply_patch billing-header-filter new-api-src
 
-      - name: Apply server-side privacy masking patch
+      - name: Apply server-side privacy masking patches
         run: |
           source scripts/common.sh
+          apply_patch privacy-masking-engine new-api-src
           apply_patch privacy-masking new-api-src
+          apply_patch privacy-masking-hooks new-api-src
 
       # - name: Apply zero-completion-compact-error patch
       #   run: |

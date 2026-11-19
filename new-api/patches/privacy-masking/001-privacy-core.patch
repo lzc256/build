@@ -1,0 +1,668 @@
+Subject: [PATCH] add privacy masking Go package
+
+diff --git a/privacy/admin_api.go b/privacy/admin_api.go
+new file mode 100644
+index 000000000..d0cff63d6
+--- /dev/null
++++ b/privacy/admin_api.go
+@@ -0,0 +1,58 @@
++package privacy
++
++import (
++	"net/http"
++	"strconv"
++
++	"github.com/gin-gonic/gin"
++)
++
++// RegisterAdminRoutes adds the dashboard endpoints to an admin route group.
++func RegisterAdminRoutes(routes gin.IRoutes) {
++	routes.GET("/privacy/masking/summary", privacySummaryHandler)
++	routes.GET("/privacy/masking/events", privacyEventsHandler)
++	routes.DELETE("/privacy/masking/events", privacyClearHandler)
++}
++
++func privacySummaryHandler(c *gin.Context) {
++	days := queryInt(c, "days", 7, 1, 90)
++	summary, err := insights.summary(days)
++	if err != nil {
++		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": err.Error()})
++		return
++	}
++	c.JSON(http.StatusOK, gin.H{"success": true, "data": summary})
++}
++
++func privacyEventsHandler(c *gin.Context) {
++	days := queryInt(c, "days", 7, 1, 90)
++	limit := queryInt(c, "limit", 100, 1, 1000)
++	events, err := insights.events(days, c.Query("kind"), limit)
++	if err != nil {
++		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": err.Error()})
++		return
++	}
++	c.JSON(http.StatusOK, gin.H{"success": true, "data": events})
++}
++
++func privacyClearHandler(c *gin.Context) {
++	if err := insights.clear(); err != nil {
++		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": err.Error()})
++		return
++	}
++	c.JSON(http.StatusOK, gin.H{"success": true, "data": gin.H{"cleared": true}})
++}
++
++func queryInt(c *gin.Context, key string, fallback, min, max int) int {
++	v, err := strconv.Atoi(c.Query(key))
++	if err != nil || v <= 0 {
++		return fallback
++	}
++	if v < min {
++		return min
++	}
++	if v > max {
++		return max
++	}
++	return v
++}
+diff --git a/privacy/gin_writer.go b/privacy/gin_writer.go
+new file mode 100644
+index 000000000..7ba80b38c
+--- /dev/null
++++ b/privacy/gin_writer.go
+@@ -0,0 +1,30 @@
++package privacy
++
++import (
++	"net/http"
++
++	"github.com/QuantumNous/new-api/internal/privacy/redact"
++	"github.com/gin-gonic/gin"
++)
++
++// ginWriter makes magpie's http.ResponseWriter wrapper usable as gin's
++// richer ResponseWriter. All data methods go through the redact writer so
++// restored values reach the client; metadata methods stay with gin.
++type ginWriter struct {
++	gin.ResponseWriter
++	rw *redact.Writer
++}
++
++func (w *ginWriter) Header() http.Header { return w.rw.Header() }
++
++func (w *ginWriter) Write(p []byte) (int, error) { return w.rw.Write(p) }
++
++func (w *ginWriter) WriteString(s string) (int, error) { return w.Write([]byte(s)) }
++
++func (w *ginWriter) WriteHeader(code int) { w.rw.WriteHeader(code) }
++
++// WriteHeaderNow is called by gin right before writing. Delegate to the
++// redact writer so it can drop Content-Length before the header is frozen.
++func (w *ginWriter) WriteHeaderNow() { w.rw.WriteHeader(w.ResponseWriter.Status()) }
++
++func (w *ginWriter) Flush() { w.rw.Flush() }
+diff --git a/privacy/insights.go b/privacy/insights.go
+new file mode 100644
+index 000000000..4b864a2c3
+--- /dev/null
++++ b/privacy/insights.go
+@@ -0,0 +1,221 @@
++package privacy
++
++import (
++	"bufio"
++	"encoding/json"
++	"fmt"
++	"os"
++	"path/filepath"
++	"sort"
++	"strings"
++	"sync"
++	"sync/atomic"
++	"time"
++)
++
++// MaskEvent is one magpie hit. It deliberately contains no raw value: Head
++// and Len are magpie's Hint, and Placeholder is the token sent upstream.
++type MaskEvent struct {
++	ID          string    `json:"id"`
++	Time        time.Time `json:"time"`
++	RequestID   string    `json:"request_id"`
++	Path        string    `json:"path"`
++	Model       string    `json:"model,omitempty"`
++	UserID      string    `json:"user_id,omitempty"`
++	Kind        string    `json:"kind"`
++	By          string    `json:"by"`
++	Action      string    `json:"action,omitempty"`
++	Placeholder string    `json:"placeholder"`
++	Head        string    `json:"head"`
++	Len         int       `json:"len"`
++}
++
++// InsightSummary is the small aggregate the dashboard needs.
++type InsightSummary struct {
++	Days     int            `json:"days"`
++	Total    int            `json:"total"`
++	Requests int            `json:"requests"`
++	ByKind   map[string]int `json:"by_kind"`
++	ByDay    map[string]int `json:"by_day"`
++	ByModel  map[string]int `json:"by_model"`
++}
++
++type insightStore struct {
++	mu        sync.RWMutex
++	path      string
++	retention time.Duration
++	maxLines  int
++}
++
++var (
++	insights   = newInsightStore()
++	requestSeq uint64
++)
++
++func newInsightStore() *insightStore {
++	path := os.Getenv("PRIVACY_INSIGHTS_PATH")
++	if path == "" {
++		path = filepath.Join("data", "privacy-masking.jsonl")
++	}
++	s := &insightStore{
++		path:      path,
++		retention: 30 * 24 * time.Hour,
++		maxLines:  100000,
++	}
++	go s.cleanupLoop()
++	return s
++}
++
++func nextRequestID() string {
++	return fmt.Sprintf("%d-%d", time.Now().UnixNano(), atomic.AddUint64(&requestSeq, 1))
++}
++
++func (s *insightStore) record(e MaskEvent) {
++	if e.ID == "" {
++		e.ID = fmt.Sprintf("%d-%d", time.Now().UnixNano(), atomic.AddUint64(&requestSeq, 1))
++	}
++	if e.Time.IsZero() {
++		e.Time = time.Now()
++	}
++	line, err := json.Marshal(e)
++	if err != nil {
++		return
++	}
++
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
++		return
++	}
++	f, err := os.OpenFile(s.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
++	if err != nil {
++		return
++	}
++	defer f.Close()
++	_, _ = f.Write(append(line, '\n'))
++}
++
++func (s *insightStore) cleanupLoop() {
++	ticker := time.NewTicker(time.Hour)
++	defer ticker.Stop()
++	s.cleanup()
++	for range ticker.C {
++		s.cleanup()
++	}
++}
++
++func (s *insightStore) cleanup() {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++
++	f, err := os.Open(s.path)
++	if err != nil {
++		return
++	}
++	defer f.Close()
++
++	cutoff := time.Now().Add(-s.retention)
++	lines := make([]string, 0)
++	scanner := bufio.NewScanner(f)
++	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
++	for scanner.Scan() {
++		line := scanner.Text()
++		var e MaskEvent
++		if json.Unmarshal([]byte(line), &e) == nil && e.Time.After(cutoff) {
++			lines = append(lines, line)
++		}
++	}
++	if len(lines) > s.maxLines {
++		lines = lines[len(lines)-s.maxLines:]
++	}
++
++	tmp := s.path + ".tmp"
++	content := strings.Join(lines, "\n")
++	if content != "" {
++		content += "\n"
++	}
++	if err := os.WriteFile(tmp, []byte(content), 0o600); err != nil {
++		return
++	}
++	_ = os.Rename(tmp, s.path)
++}
++
++func (s *insightStore) events(days int, kind string, limit int) ([]MaskEvent, error) {
++	if days <= 0 {
++		days = 7
++	}
++	cutoff := time.Now().Add(-time.Duration(days) * 24 * time.Hour)
++
++	s.mu.RLock()
++	defer s.mu.RUnlock()
++
++	f, err := os.Open(s.path)
++	if err != nil {
++		if os.IsNotExist(err) {
++			return []MaskEvent{}, nil
++		}
++		return nil, err
++	}
++	defer f.Close()
++
++	out := make([]MaskEvent, 0)
++	scanner := bufio.NewScanner(f)
++	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
++	for scanner.Scan() {
++		var e MaskEvent
++		if json.Unmarshal(scanner.Bytes(), &e) != nil {
++			continue
++		}
++		if e.Time.Before(cutoff) {
++			continue
++		}
++		if kind != "" && e.Kind != kind {
++			continue
++		}
++		out = append(out, e)
++	}
++	if err := scanner.Err(); err != nil {
++		return nil, err
++	}
++
++	sort.Slice(out, func(i, j int) bool { return out[i].Time.After(out[j].Time) })
++	if limit > 0 && len(out) > limit {
++		out = out[:limit]
++	}
++	return out, nil
++}
++
++func (s *insightStore) summary(days int) (InsightSummary, error) {
++	all, err := s.events(days, "", 0)
++	if err != nil {
++		return InsightSummary{}, err
++	}
++	res := InsightSummary{
++		Days:    days,
++		Total:   len(all),
++		ByKind:  map[string]int{},
++		ByDay:   map[string]int{},
++		ByModel: map[string]int{},
++	}
++	requests := map[string]struct{}{}
++	for _, e := range all {
++		requests[e.RequestID] = struct{}{}
++		res.ByKind[e.Kind]++
++		res.ByDay[e.Time.Format("2006-01-02")]++
++		if e.Model != "" {
++			res.ByModel[e.Model]++
++		}
++	}
++	res.Requests = len(requests)
++	return res, nil
++}
++
++func (s *insightStore) clear() error {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	err := os.Remove(s.path)
++	if err != nil && os.IsNotExist(err) {
++		return nil
++	}
++	return err
++}
+diff --git a/privacy/insights_test.go b/privacy/insights_test.go
+new file mode 100644
+index 000000000..d49b816b0
+--- /dev/null
++++ b/privacy/insights_test.go
+@@ -0,0 +1,43 @@
++package privacy
++
++import (
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++	"time"
++)
++
++func TestInsightStoreKeepsMetadataOnly(t *testing.T) {
++	dir := t.TempDir()
++	s := &insightStore{
++		path:      filepath.Join(dir, "privacy.jsonl"),
++		retention: 30 * 24 * time.Hour,
++		maxLines:  100,
++	}
++	plaintext := "alice" + "@" + "acme" + ".com"
++	s.record(MaskEvent{
++		RequestID:   "req-1",
++		Path:        "/v1/chat/completions",
++		Kind:        "EMAIL",
++		By:          "rule",
++		Placeholder: "{{EMAIL_abcdefgh}}",
++		Head:        "a",
++		Len:         len(plaintext),
++	})
++
++	sum, err := s.summary(7)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if sum.Total != 1 || sum.Requests != 1 || sum.ByKind["EMAIL"] != 1 {
++		t.Fatalf("unexpected summary: %+v", sum)
++	}
++	raw, err := os.ReadFile(s.path)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if strings.Contains(string(raw), plaintext) {
++		t.Fatalf("insight file contains plaintext: %s", raw)
++	}
++}
+diff --git a/privacy/integration_test.go b/privacy/integration_test.go
+new file mode 100644
+index 000000000..6a8d95c79
+--- /dev/null
++++ b/privacy/integration_test.go
+@@ -0,0 +1,65 @@
++package privacy
++
++import (
++	"encoding/json"
++	"fmt"
++	"strings"
++	"testing"
++)
++
++func TestMaskJSONForJSUsesMagpieAndRecordsMetadata(t *testing.T) {
++	plaintext := "alice" + "@" + "acme" + ".com"
++	body, _ := json.Marshal(map[string]string{"prompt": "contact " + plaintext})
++	meta, _ := json.Marshal(map[string]any{"secrets": true, "personal": true, "path": "/v1/chat/completions"})
++
++	masked, err := MaskJSONForJS(body, string(meta))
++	if err != nil {
++		t.Fatal(err)
++	}
++	if masked == string(body) || strings.Contains(masked, plaintext) {
++		t.Fatalf("body was not masked: %s", masked)
++	}
++	events, err := insights.events(1, "EMAIL", 10)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if len(events) == 0 {
++		t.Fatal("no EMAIL insight recorded")
++	}
++	if strings.Contains(events[0].Placeholder, plaintext) {
++		t.Fatal("insight contains plaintext")
++	}
++}
++
++func TestMaskPatchForJSSkipsMediaPlaceholders(t *testing.T) {
++	plaintext := "bob" + "@" + "acme" + ".com"
++	body := []byte(fmt.Sprintf(`{"model":"gpt-4o-mini","messages":[{"role":"user","content":[{"type":"text","text":"mail %s"},{"type":"image_url","image_url":{"url":"[media:0]"}}]}]}`, plaintext))
++	meta, _ := json.Marshal(map[string]any{"secrets": true, "personal": true, "path": "/v1/messages"})
++
++	patch, err := MaskPatchForJS(body, string(meta))
++	if err != nil {
++		t.Fatal(err)
++	}
++	var ops []struct {
++		Op    string          `json:"op"`
++		Path  string          `json:"path"`
++		Value json.RawMessage `json:"value"`
++	}
++	if err := json.Unmarshal([]byte(patch), &ops); err != nil {
++		t.Fatal(err)
++	}
++	if len(ops) == 0 {
++		t.Fatal("no patch operations")
++	}
++	for _, op := range ops {
++		if op.Op != "replace" || op.Path == "" {
++			t.Fatalf("unexpected op: %+v", op)
++		}
++		if strings.Contains(string(op.Value), "[media:") {
++			t.Fatalf("media placeholder leaked into patch: %s", patch)
++		}
++		if strings.Contains(string(op.Value), plaintext) {
++			t.Fatalf("plaintext leaked into patch: %s", patch)
++		}
++	}
++}
+diff --git a/privacy/middleware.go b/privacy/middleware.go
+new file mode 100644
+index 000000000..4237c297a
+--- /dev/null
++++ b/privacy/middleware.go
+@@ -0,0 +1,33 @@
++package privacy
++
++import (
++	"strings"
++
++	"github.com/QuantumNous/new-api/internal/privacy/redact"
++	"github.com/gin-gonic/gin"
++)
++
++// Middleware restores magpie placeholders in responses. Request masking is
++// performed by the builtin request-mask plugin through the Go host function,
++// so enabling/disabling the plugin controls masking while restoration remains
++// a harmless no-op when no placeholders were produced.
++func Middleware() gin.HandlerFunc {
++	return func(c *gin.Context) {
++		if !isRelayPath(c.Request.URL.Path) || strings.EqualFold(c.GetHeader("Upgrade"), "websocket") {
++			c.Next()
++			return
++		}
++
++		original := c.Writer
++		rw := redact.NewWriter(original)
++		c.Writer = &ginWriter{ResponseWriter: original, rw: rw}
++		defer rw.Finish()
++
++		c.Next()
++	}
++}
++
++func isRelayPath(path string) bool {
++	return path == "/v1" || path == "/v1beta" ||
++		strings.HasPrefix(path, "/v1/") || strings.HasPrefix(path, "/v1beta/")
++}
+diff --git a/privacy/plugin.go b/privacy/plugin.go
+new file mode 100644
+index 000000000..25b414dac
+--- /dev/null
++++ b/privacy/plugin.go
+@@ -0,0 +1,174 @@
++package privacy
++
++import (
++	"bytes"
++	"encoding/json"
++	"fmt"
++	"sort"
++	"strconv"
++	"strings"
++
++	"github.com/QuantumNous/new-api/internal/privacy/redact"
++)
++
++type pluginMaskOptions struct {
++	Secrets  *bool  `json:"secrets"`
++	Personal *bool  `json:"personal"`
++	Path     string `json:"path"`
++	Model    string `json:"model"`
++	UserID   string `json:"user_id"`
++}
++
++type maskPatchOperation struct {
++	Op    string          `json:"op"`
++	Path  string          `json:"path"`
++	Value json.RawMessage `json:"value"`
++}
++
++const maxMaskPatchOps = 512
++
++func pluginMaskOptionsFromMeta(metaJSON string) (pluginMaskOptions, redact.Options, error) {
++	opts := redact.Options{Secrets: true, Personal: true}
++	var meta pluginMaskOptions
++	if metaJSON != "" {
++		if err := json.Unmarshal([]byte(metaJSON), &meta); err != nil {
++			return meta, opts, fmt.Errorf("invalid request-mask metadata: %w", err)
++		}
++	}
++	if meta.Secrets != nil {
++		opts.Secrets = *meta.Secrets
++	}
++	if meta.Personal != nil {
++		opts.Personal = *meta.Personal
++	}
++	return meta, opts, nil
++}
++
++func maskJSONWithMeta(body []byte, metaJSON string) ([]byte, MaskEvent, error) {
++	meta, opts, err := pluginMaskOptionsFromMeta(metaJSON)
++	if err != nil {
++		return nil, MaskEvent{}, err
++	}
++	base := MaskEvent{RequestID: nextRequestID(), Path: meta.Path, Model: meta.Model, UserID: meta.UserID}
++	opts.Seen = func(h redact.Hit) {
++		e := base
++		e.Kind = h.Kind
++		e.By = h.By
++		e.Action = h.Action
++		e.Placeholder = h.Placeholder
++		e.Head = h.Head
++		e.Len = h.Len
++		insights.record(e)
++	}
++	masked, _ := redact.MaskJSON(body, opts)
++	return masked, base, nil
++}
++
++// MaskJSONForJS is kept for diagnostics and tests. The plugin itself uses
++// MaskPatchForJS so that media placeholders are never sent back in an effect.
++func MaskJSONForJS(body []byte, metaJSON string) (string, error) {
++	masked, _, err := maskJSONWithMeta(body, metaJSON)
++	if err != nil {
++		return "", err
++	}
++	return string(masked), nil
++}
++
++// MaskPatchForJS returns an RFC 6901 JSON Patch of only the changed leaves.
++// requestplugin refuses an effect value containing "[media:N]"; emitting leaf
++// ops lets media-bearing requests be masked without tripping that guard.
++func MaskPatchForJS(body []byte, metaJSON string) (string, error) {
++	masked, _, err := maskJSONWithMeta(body, metaJSON)
++	if err != nil {
++		return "", err
++	}
++	var before, after any
++	if err := decodeJSONValue(body, &before); err != nil {
++		return "[]", nil
++	}
++	if err := decodeJSONValue(masked, &after); err != nil {
++		return "[]", nil
++	}
++	ops := make([]maskPatchOperation, 0)
++	collectMaskPatchOps(before, after, "", &ops)
++	out, err := json.Marshal(ops)
++	if err != nil {
++		return "", err
++	}
++	return string(out), nil
++}
++
++func decodeJSONValue(data []byte, dst any) error {
++	decoder := json.NewDecoder(bytes.NewReader(data))
++	decoder.UseNumber()
++	return decoder.Decode(dst)
++}
++
++func collectMaskPatchOps(before, after any, path string, ops *[]maskPatchOperation) {
++	if len(*ops) >= maxMaskPatchOps {
++		return
++	}
++	switch old := before.(type) {
++	case map[string]any:
++		newValue, ok := after.(map[string]any)
++		if !ok {
++			appendMaskPatchOp(path, after, ops)
++			return
++		}
++		keys := make([]string, 0, len(newValue))
++		for key := range newValue {
++			keys = append(keys, key)
++		}
++		sort.Strings(keys)
++		for _, key := range keys {
++			childPath := path + "/" + maskPointerToken(key)
++			oldChild, exists := old[key]
++			if !exists {
++				appendMaskPatchOp(childPath, newValue[key], ops)
++				continue
++			}
++			collectMaskPatchOps(oldChild, newValue[key], childPath, ops)
++		}
++	case []any:
++		newValue, ok := after.([]any)
++		if !ok || len(newValue) != len(old) {
++			appendMaskPatchOp(path, after, ops)
++			return
++		}
++		for i := range old {
++			collectMaskPatchOps(old[i], newValue[i], path+"/"+strconv.Itoa(i), ops)
++		}
++	default:
++		if !jsonValuesEqual(before, after) {
++			appendMaskPatchOp(path, after, ops)
++		}
++	}
++}
++
++func appendMaskPatchOp(path string, value any, ops *[]maskPatchOperation) {
++	if len(*ops) >= maxMaskPatchOps {
++		return
++	}
++	raw, err := json.Marshal(value)
++	if err != nil || strings.Contains(string(raw), "[media:") {
++		return
++	}
++	*ops = append(*ops, maskPatchOperation{Op: "replace", Path: path, Value: raw})
++}
++
++func jsonValuesEqual(a, b any) bool {
++	left, err := json.Marshal(a)
++	if err != nil {
++		return false
++	}
++	right, err := json.Marshal(b)
++	if err != nil {
++		return false
++	}
++	return bytes.Equal(left, right)
++}
++
++func maskPointerToken(token string) string {
++	token = strings.ReplaceAll(token, "~", "~0")
++	return strings.ReplaceAll(token, "/", "~1")
++}
