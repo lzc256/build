@@ -1,30 +1,37 @@
 # privacy-masking
 
-Server-side, always-on prompt masking for new-api, powered by magpie's rule
-engine. No setting, no database change. The admin dashboard stores metadata only.
+Server-side prompt masking for new-api, powered by magpie's rule engine. The
+builtin request plugin `request-mask` is only JS glue: it calls a Go host
+function that runs magpie. No database change. The admin dashboard stores
+metadata only.
 
 ## What it does
 
-- On every JSON relay request under `/v1/` or `/v1beta/`, the body is passed
-  through `redact.MaskJSON` from magpie before new-api parses and forwards it.
-- The response writer is wrapped with magpie's `redact.Writer`, so placeholders
-  in both normal and streamed responses are restored to their original values.
-- WebSocket/realtime requests are skipped (the HTTP writer is not used there).
-- Masking is global and always on. There is no option to disable it at runtime.
+- Add the builtin `request-mask` request plugin (global or per group) to mask
+  JSON relay requests. Its `ingress`/`egress` hooks call magpie's `MaskJSON`
+  through `utils.magpieMaskJSON`.
+- Secrets and personal data become stable magpie placeholders before the body
+  is forwarded upstream.
+- `privacy.Middleware()` wraps the response writer with magpie's `redact.Writer`,
+  so placeholders in normal and streamed responses are restored.
+- WebSocket/realtime requests are skipped by the response wrapper.
+- The plugin config exposes `secrets` and `personal`; no database or option
+  table changes are needed.
 
 ## How it works
 
-`001-privacy-masking.sh` is a patch script (not a `.patch` file) because the
-magpie engine is fetched at build time instead of being copied into this repo:
+`001-privacy-masking.sh` fetches magpie at build time because its rule engine
+lives under an `internal` package:
 
 - `MAGPIE_REPO` (default `https://github.com/yetone/magpie.git`)
 - `MAGPIE_REF` (default `main`; branch, tag or commit)
 - `MAGPIE_DIR` (default `<build>/.upstream-repos/magpie-src`, a local cache)
 
-The script clones/fetches magpie, copies only the production files of
-`internal/redact` and `internal/lazyre` into the target tree, rewrites the
-internal import path, writes our small glue package under `privacy/`, and adds
-one middleware hook to `router/relay-router.go`.
+`001` copies only the production files of `internal/redact` and
+`internal/lazyre`, rewrites the internal import path, and writes the response
+wrapper under `privacy/`. `002` adds the insight store, admin API and dashboard.
+`003` adds the builtin `request-mask` plugin and exposes `utils.magpieMaskJSON`
+to its JS hooks.
 
 Magpie is MIT licensed. Its LICENSE is copied to
 `internal/privacy/redact/LICENSE` in the build tree, and `privacy/NOTICE`
@@ -43,8 +50,10 @@ upstream updates automatically.
   `router.Use(privacy.Middleware())` line.
 - `router/api-router.go`: one import line and one
   `privacy.RegisterAdminRoutes(adminRoute)` line.
-- Dashboard registration in `web/default/src/features/dashboard/` and two i18n
-  keys (`en.json`, `zh.json`).
+- `pkg/jsplugin/utils.go`: one import and one `utils.magpieMaskJSON` entry.
+- `plugins/builtin_plugins_test.go`: add `request-mask` to the expected list.
+- Dashboard registration in `web/src/features/dashboard/` (or
+  `web/default/src/features/dashboard/` on older trees) and i18n keys.
 
 All new logic lives in newly created files, so new-api upgrades rarely conflict.
 
@@ -74,6 +83,20 @@ Admin API endpoints:
 - `GET /api/privacy/masking/events?days=7&limit=100`
 - `DELETE /api/privacy/masking/events`
 
+## request-mask plugin
+
+`003-request-mask-plugin.sh` adds a builtin request plugin named
+`request-mask`. In the admin UI it appears as **Request mask (Magpie)** /
+**请求脱敏（Magpie）**. Configure an instance globally or per group to enable
+masking. Its config has two booleans:
+
+- `secrets`: API keys, tokens, private keys and passwords (default true)
+- `personal`: emails, phone numbers, ID and bank card numbers (default true)
+
+The JS hook only serializes the body and calls `utils.magpieMaskJSON`, which
+runs the Go magpie engine and records insight metadata. Response restoration is
+handled by `privacy.Middleware()` at the HTTP writer layer, so the plugin does
+not need a reply hook to replace text.
 ## Limitations
 
 - Channels using new-api pass-through mode forward the raw body and bypass all

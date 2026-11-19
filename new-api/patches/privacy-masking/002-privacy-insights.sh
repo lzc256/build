@@ -472,8 +472,15 @@ fi
 grep -q 'privacy.RegisterAdminRoutes' "$API_ROUTER" || { echo "failed to register privacy admin routes" >&2; exit 1; }
 
 # ------------------------------------------------------------- frontend ----
-mkdir -p "$TARGET/web/default/src/features/dashboard/components/privacy"
-cat > "$TARGET/web/default/src/features/dashboard/components/privacy/privacy-masking.tsx" <<'PFRONT'
+# Upstream moved the default frontend from web/default to web. Support both.
+if [ -d "$TARGET/web/src" ]; then
+    FRONT_SRC="$TARGET/web/src"
+else
+    FRONT_SRC="$TARGET/web/default/src"
+fi
+
+mkdir -p "$FRONT_SRC/features/dashboard/components/privacy"
+cat > "$FRONT_SRC/features/dashboard/components/privacy/privacy-masking.tsx" <<'PFRONT'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 
 import { Button } from '@/components/ui/button'
@@ -698,13 +705,13 @@ export function PrivacyMasking() {
 PFRONT
 
 # Dashboard section registration.
-REG="$TARGET/web/default/src/features/dashboard/section-registry.tsx"
+REG="$FRONT_SRC/features/dashboard/section-registry.tsx"
 if ! grep -q "id: 'privacy'" "$REG"; then
     perl -0pi -e "s#(\n\] as const)#\n  {\n    id: 'privacy',\n    titleKey: 'Privacy Masking',\n    adminOnly: true,\n    build: () => null,\n  },\$1#" "$REG"
 fi
 perl -0pi -e "s#new Set<string>\(\['users'\]\)#new Set<string>(['users', 'privacy'])#" "$REG"
 
-IDX="$TARGET/web/default/src/features/dashboard/index.tsx"
+IDX="$FRONT_SRC/features/dashboard/index.tsx"
 if ! grep -q 'LazyPrivacyMasking' "$IDX"; then
     perl -0pi -e "s#(const LazyFlowCharts = lazy\(\(\) =>\n  import\('\./components/flow/flow-charts'\)\.then\(\(m\) => \(\{\n    default: m\.FlowCharts,\n  \}\)\)\n\))#\$1\nconst LazyPrivacyMasking = lazy(() =>\n  import('./components/privacy/privacy-masking').then((m) => ({\n    default: m.PrivacyMasking,\n  }))\n)\n#" "$IDX"
 fi
@@ -717,11 +724,11 @@ if ! grep -q "activeSection === 'privacy'" "$IDX"; then
 fi
 
 # Minimal i18n keys for the section title.
-EN="$TARGET/web/default/src/i18n/locales/en.json"
+EN="$FRONT_SRC/i18n/locales/en.json"
 if ! grep -q '"Privacy Masking"' "$EN"; then
     perl -0pi -e 's#("Previous page": "[^"]*",\n)#$1    "Privacy Masking": "Privacy Masking",\n#' "$EN"
 fi
-ZH="$TARGET/web/default/src/i18n/locales/zh.json"
+ZH="$FRONT_SRC/i18n/locales/zh.json"
 if ! grep -q '"Privacy Masking"' "$ZH"; then
     perl -0pi -e 's#("Previous page": "[^"]*",\n)#$1    "Privacy Masking": "隐私脱敏看板",\n#' "$ZH"
 fi
@@ -733,7 +740,7 @@ for spec in \
     "vi|Che giấu quyền riêng tư"; do
     LOCALE="${spec%%|*}"
     TEXT="${spec#*|}"
-    FILE="$TARGET/web/default/src/i18n/locales/$LOCALE.json"
+    FILE="$FRONT_SRC/i18n/locales/$LOCALE.json"
     if [ -f "$FILE" ] && ! grep -q '"Privacy Masking"' "$FILE"; then
         TEXT="$TEXT" perl -0pi -e 'my $t = $ENV{TEXT}; s#("Previous page": "[^"]*",\n)#$1    "Privacy Masking": "$t",\n#' "$FILE"
     fi

@@ -150,7 +150,9 @@ jobs:
           test -f new-api-src/common/site_origin.go && echo "secondary-domain: site_origin.go OK" || { echo "secondary-domain: site_origin.go MISSING"; exit 1; }
           test -f new-api-src/privacy/middleware.go && echo "privacy-masking: middleware.go OK" || { echo "privacy-masking: middleware.go MISSING"; exit 1; }
           test -f new-api-src/privacy/insights.go && echo "privacy-masking: insights.go OK" || { echo "privacy-masking: insights.go MISSING"; exit 1; }
-          test -f new-api-src/web/default/src/features/dashboard/components/privacy/privacy-masking.tsx && echo "privacy-masking: dashboard OK" || { echo "privacy-masking: dashboard MISSING"; exit 1; }
+          test -f new-api-src/web/src/features/dashboard/components/privacy/privacy-masking.tsx && echo "privacy-masking: dashboard OK" || { echo "privacy-masking: dashboard MISSING"; exit 1; }
+          test -f new-api-src/plugins/tasks/request-mask/plugin.js && echo "privacy-masking: request-mask plugin OK" || { echo "privacy-masking: request-mask plugin MISSING"; exit 1; }
+          test -f new-api-src/privacy/plugin.go && echo "privacy-masking: plugin host OK" || { echo "privacy-masking: plugin host MISSING"; exit 1; }
 
       - name: Login to GHCR
         uses: docker/login-action@v4
