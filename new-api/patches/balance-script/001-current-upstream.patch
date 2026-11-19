@@ -1,45 +1,42 @@
-Subject: [PATCH] Port balance-script with dedicated editor tab and multiline messages
-
 diff --git a/Dockerfile b/Dockerfile
-index 3a2bc74db..9bb609992 100644
+index ce588b6e7..1f12e7953 100644
 --- a/Dockerfile
 +++ b/Dockerfile
-@@ -26,6 +26,10 @@ RUN go mod download
+@@ -26,6 +26,9 @@ RUN go mod download
  
  COPY . .
  COPY --from=builder /build/web/dist ./web/dist
-+
 +# Balance scripts run on goja; the requirement is resolved here instead of
 +# being pinned in the patch, so upstream go.mod changes cannot break it.
 +RUN go get github.com/dop251/goja@v0.0.0-20261024144015-2a9269b6b6de
- RUN go build -pgo="$(go list -m -f '{{.Dir}}' github.com/Calcium-Ion/moejs)/default.pgo" -ldflags "-s -w -X 'github.com/QuantumNous/new-api/common.Version=$(cat VERSION)'" -o new-api
+ RUN go build -pgo="$(go list -m -f '{{.Dir}}' github.com/MoeForge/moejs)/default.pgo" -ldflags "-s -w -X 'github.com/QuantumNous/new-api/common.Version=$(cat VERSION)'" -o new-api
  
  FROM debian:bookworm-slim@sha256:f06537653ac770703bc45b4b113475bd402f451e85223f0f2837acbf89ab020a
 diff --git a/controller/channel-billing.go b/controller/channel-billing.go
-index bf508b956..e1e55e478 100644
+index 7c04953d3..d7cd21564 100644
 --- a/controller/channel-billing.go
 +++ b/controller/channel-billing.go
-@@ -58,6 +58,7 @@ const maxAdvancedCustomBalanceResponseBytes = 256 << 10
- type channelBalanceResult struct {
+@@ -61,6 +61,7 @@ type channelBalanceResult struct {
  	Balance     float64
  	RawResponse string
+ 	Detail      *model.ChannelBalanceDetail
 +	Message     string
  }
  
  type OpenAIUsageResponse struct {
-@@ -622,6 +623,10 @@ func fetchAdvancedCustomBalance(channel *model.Channel) (channelBalanceResult, e
- }
- 
+@@ -629,6 +630,10 @@ func fetchAdvancedCustomBalance(channel *model.Channel) (channelBalanceResult, e
  func updateChannelBalance(channel *model.Channel) (channelBalanceResult, error) {
+ 	var result channelBalanceResult
+ 	var err error
 +	if script := channel.GetOtherSettings().BalanceScript; script != "" {
 +		balance, message, err := updateChannelBalanceScript(channel, script)
 +		return channelBalanceResult{Balance: balance, Message: message}, err
 +	}
  	if channel.Type == constant.ChannelTypeAdvancedCustom {
- 		return fetchAdvancedCustomBalance(channel)
- 	}
-@@ -713,7 +718,7 @@ func UpdateChannelBalance(c *gin.Context) {
- 		c.JSON(http.StatusOK, gin.H{"success": false, "message": "Task Plugin channels do not support balance queries"})
+ 		result, err = fetchAdvancedCustomBalance(channel)
+ 	} else {
+@@ -745,7 +750,7 @@ func UpdateChannelBalance(c *gin.Context) {
+ 		})
  		return
  	}
 -	if channel.ChannelInfo.IsMultiKey {
@@ -47,7 +44,7 @@ index bf508b956..e1e55e478 100644
  		common.ApiErrorT(c, "Multi-key channels do not support balance queries")
  		return
  	}
-@@ -724,7 +729,7 @@ func UpdateChannelBalance(c *gin.Context) {
+@@ -756,7 +761,7 @@ func UpdateChannelBalance(c *gin.Context) {
  	}
  	response := gin.H{
  		"success": true,
@@ -56,17 +53,24 @@ index bf508b956..e1e55e478 100644
  	}
  	if result.RawResponse == "" {
  		response["balance"] = result.Balance
-@@ -743,7 +748,7 @@ func updateAllChannelsBalance() error {
- 		if channel.Status != common.ChannelStatusEnabled {
- 			continue
- 		}
--		if channel.ChannelInfo.IsMultiKey {
+@@ -783,9 +788,13 @@ func updateAllChannelsBalance(ctx context.Context, report func(processed, total
+ 	}
+ 	enabled := make([]*model.Channel, 0, len(channels))
+ 	for _, channel := range channels {
+-		if channel.Status == common.ChannelStatusEnabled {
+-			enabled = append(enabled, channel)
++		if channel.Status != common.ChannelStatusEnabled {
++			continue
++		}
 +		if channel.ChannelInfo.IsMultiKey && channel.GetOtherSettings().BalanceScript == "" {
- 			continue // skip multi-key channels
++			continue // skip multi-key channels
  		}
- 		// TODO: support Azure
++		enabled = append(enabled, channel)
+ 	}
+ 	report(0, len(enabled))
+ 
 diff --git a/controller/channel_authz.go b/controller/channel_authz.go
-index f85ffef92..2cc9f2656 100644
+index 9548e5ff3..ae0049534 100644
 --- a/controller/channel_authz.go
 +++ b/controller/channel_authz.go
 @@ -87,6 +87,7 @@ var channelReadOnlyFields = map[string]struct{}{
@@ -75,11 +79,11 @@ index f85ffef92..2cc9f2656 100644
  	"balance_updated_time": {},
 +	"balance_script_state": {},
  	"used_quota":           {},
+ 	"balance_detail":       {},
  }
- 
 diff --git a/controller/channel_balance_script.go b/controller/channel_balance_script.go
 new file mode 100644
-index 000000000..564e8d544
+index 000000000..01115170f
 --- /dev/null
 +++ b/controller/channel_balance_script.go
 @@ -0,0 +1,674 @@
@@ -758,10 +762,10 @@ index 000000000..564e8d544
 +	return fmt.Sprint(value)
 +}
 diff --git a/model/channel.go b/model/channel.go
-index 202f51cb4..e9835594e 100644
+index f40b0c142..03007e5ea 100644
 --- a/model/channel.go
 +++ b/model/channel.go
-@@ -36,6 +36,7 @@ type Channel struct {
+@@ -41,6 +41,7 @@ type Channel struct {
  	Other              string  `json:"other"`
  	Balance            float64 `json:"balance"` // in USD
  	BalanceUpdatedTime int64   `json:"balance_updated_time" gorm:"bigint"`
@@ -769,7 +773,7 @@ index 202f51cb4..e9835594e 100644
  	Models             string  `json:"models"`
  	Group              string  `json:"group" gorm:"type:varchar(64);default:'default'"`
  	UsedQuota          int64   `json:"used_quota" gorm:"bigint;default:0"`
-@@ -629,6 +630,12 @@ func (channel *Channel) UpdateBalance(balance float64) {
+@@ -684,6 +685,12 @@ func (channel *Channel) UpdateBalance(balance float64) {
  	}
  }
  
@@ -783,23 +787,23 @@ index 202f51cb4..e9835594e 100644
  	var err error
  	err = DB.Delete(channel).Error
 diff --git a/relaykit/dto/channel_settings.go b/relaykit/dto/channel_settings.go
-index 2f82e5baa..9fe5976dc 100644
+index 74461244d..7687c8fa4 100644
 --- a/relaykit/dto/channel_settings.go
 +++ b/relaykit/dto/channel_settings.go
-@@ -110,6 +110,8 @@ const (
+@@ -114,6 +114,8 @@ const (
  )
  
  type ChannelOtherSettings struct {
 +	BalanceScript string `json:"balance_script,omitempty"` // Custom JavaScript balance script using newapi.balance.set()
 +
  	AzureResponsesVersion                 string                `json:"azure_responses_version,omitempty"`
- 	VertexKeyType                         VertexKeyType         `json:"vertex_key_type,omitempty"`   // "json" or "api_key"
- 	VertexProjectID                       string                `json:"vertex_project_id,omitempty"` // 仅当 vertex_key_type=api_key 时使用；JSON 模式下从 service account 解析
+ 	VertexKeyType                         VertexKeyType         `json:"vertex_key_type,omitempty"`    // "json" or "api_key"
+ 	VertexProjectID                       string                `json:"vertex_project_id,omitempty"`  // 仅当 vertex_key_type=api_key 时使用；JSON 模式下从 service account 解析
 diff --git a/web/src/features/channels/components/__tests__/channel-configuration.test.tsx b/web/src/features/channels/components/__tests__/channel-configuration.test.tsx
-index 03d9df788..2068ac36c 100644
+index ad1ad1596..7c0e1c9f4 100644
 --- a/web/src/features/channels/components/__tests__/channel-configuration.test.tsx
 +++ b/web/src/features/channels/components/__tests__/channel-configuration.test.tsx
-@@ -1395,7 +1395,7 @@ test('editing opens the shared configuration and omits an unchanged key on updat
+@@ -1424,7 +1424,7 @@ test('editing opens the shared configuration and omits an unchanged key on updat
    expect(await screen.findByDisplayValue('Existing channel')).toBeVisible()
    expect(screen.queryByLabelText('Type *')).not.toBeInTheDocument()
    expect(screen.getByRole('button', { name: 'Change provider' })).toBeVisible()
@@ -808,7 +812,7 @@ index 03d9df788..2068ac36c 100644
    expect(
      screen.getByRole('tab', { name: /Connection & Models/ })
    ).toHaveAccessibleName(/Ready/)
-@@ -1413,6 +1413,32 @@ test('editing opens the shared configuration and omits an unchanged key on updat
+@@ -1442,6 +1442,32 @@ test('editing opens the shared configuration and omits an unchanged key on updat
    expect(put.mock.calls[0]?.[1]).not.toHaveProperty('key')
  })
  
@@ -842,19 +846,19 @@ index 03d9df788..2068ac36c 100644
    editingChannel = { ...editingChannel, type: 55 }
    pluginOptions = [
 diff --git a/web/src/features/channels/components/channels-columns.tsx b/web/src/features/channels/components/channels-columns.tsx
-index 4bd4b40e3..ad5e73526 100644
+index 5eb3dbaa2..445779b17 100644
 --- a/web/src/features/channels/components/channels-columns.tsx
 +++ b/web/src/features/channels/components/channels-columns.tsx
-@@ -469,13 +469,19 @@ export function BalanceCell({ channel }: { channel: Channel }) {
+@@ -507,13 +507,19 @@ export function BalanceCell({ channel }: { channel: Channel }) {
        const response = await updateChannelBalance(channel.id)
        if (response.success && response.balance !== undefined) {
          toast.success(
 -          t('Balance updated: {{balance}}', {
--            balance: formatCurrencyFromUSD(response.balance, {
--              digitsLarge: 2,
--              digitsSmall: 4,
--              abbreviate: false,
--            }),
+-            balance: formatChannelBalanceSummary(
+-              response.balance_detail,
+-              response.balance,
+-              { digitsLarge: 2, digitsSmall: 4, abbreviate: false, locale }
+-            ),
 -          })
 +          response.message ? (
 +            <span className='break-words whitespace-pre-wrap'>
@@ -862,21 +866,21 @@ index 4bd4b40e3..ad5e73526 100644
 +            </span>
 +          ) : (
 +            t('Balance updated: {{balance}}', {
-+              balance: formatCurrencyFromUSD(response.balance, {
-+                digitsLarge: 2,
-+                digitsSmall: 4,
-+                abbreviate: false,
-+              }),
++              balance: formatChannelBalanceSummary(
++                response.balance_detail,
++                response.balance,
++                { digitsLarge: 2, digitsSmall: 4, abbreviate: false, locale }
++              ),
 +            })
 +          )
          )
          void queryClient.invalidateQueries({
            queryKey: channelsQueryKeys.lists(),
 diff --git a/web/src/features/channels/components/dialogs/balance-query-dialog.tsx b/web/src/features/channels/components/dialogs/balance-query-dialog.tsx
-index 1d3c89120..ce0dedccf 100644
+index 370ca2600..b467ab008 100644
 --- a/web/src/features/channels/components/dialogs/balance-query-dialog.tsx
 +++ b/web/src/features/channels/components/dialogs/balance-query-dialog.tsx
-@@ -102,7 +102,15 @@ export function BalanceQueryDialog(props: BalanceQueryDialogProps) {
+@@ -104,7 +104,15 @@ export function BalanceQueryDialog(props: BalanceQueryDialogProps) {
  
          setBalance(newBalance)
          setBalanceUpdatedTime(now)
@@ -928,10 +932,10 @@ index 12afba01b..808fd631f 100644
          value='routing'
          keepMounted
 diff --git a/web/src/features/channels/components/drawers/channel-mutate-drawer.tsx b/web/src/features/channels/components/drawers/channel-mutate-drawer.tsx
-index a1b527ddf..18656b8aa 100644
+index 1cb66ac7d..c2f73a3b6 100644
 --- a/web/src/features/channels/components/drawers/channel-mutate-drawer.tsx
 +++ b/web/src/features/channels/components/drawers/channel-mutate-drawer.tsx
-@@ -242,6 +242,7 @@ import { ChannelProviderPicker } from './channel-provider-picker'
+@@ -250,6 +250,7 @@ import { PluginCredentialPanel } from './plugin-credential-panel'
  import {
    ChannelApiAccessSection,
    ChannelAuthSection,
@@ -939,7 +943,7 @@ index a1b527ddf..18656b8aa 100644
    ChannelBasicSection,
    ChannelEditorLoadingState,
    ChannelModelsSection,
-@@ -4715,6 +4716,9 @@ export function ChannelMutateDrawer({
+@@ -4992,6 +4993,9 @@ export function ChannelMutateDrawer({
            </>
          }
          models={modelsSection}
@@ -1129,10 +1133,10 @@ index ce62a583d..37df465dd 100644
  export * from './channel-models-section'
 +export * from './balance-script-section'
 diff --git a/web/src/features/channels/lib/channel-configuration.ts b/web/src/features/channels/lib/channel-configuration.ts
-index 40f661027..2321e8758 100644
+index d044a45d8..ed9a44af4 100644
 --- a/web/src/features/channels/lib/channel-configuration.ts
 +++ b/web/src/features/channels/lib/channel-configuration.ts
-@@ -34,6 +34,7 @@ export type ChannelProviderTarget =
+@@ -36,6 +36,7 @@ export type ChannelProviderTarget =
  
  export type ChannelConfigurationSection =
    | 'connection'
@@ -1140,7 +1144,7 @@ index 40f661027..2321e8758 100644
    | 'routing'
    | 'request'
    | 'other'
-@@ -97,6 +98,7 @@ const CONFIGURATION_BLOCKS = {
+@@ -104,6 +105,7 @@ const CONFIGURATION_BLOCKS = {
      ],
    },
    internalNotes: { section: 'other', fields: ['tag', 'remark'] },
@@ -1148,7 +1152,7 @@ index 40f661027..2321e8758 100644
  } as const satisfies Record<
    string,
    {
-@@ -187,6 +189,7 @@ export function getChannelConfigurationState(
+@@ -208,6 +210,7 @@ export function getChannelConfigurationState(
          values.upstream_model_update_ignored_models?.trim()
        ),
      internalNotes: Boolean(values.tag?.trim() || values.remark?.trim()),
@@ -1156,7 +1160,7 @@ index 40f661027..2321e8758 100644
    }
    const blocks = {} as Record<
      ChannelConfigurationBlock,
-@@ -197,6 +200,7 @@ export function getChannelConfigurationState(
+@@ -218,6 +221,7 @@ export function getChannelConfigurationState(
      ChannelConfigurationStatus
    > = {
      connection: 'idle',
@@ -1165,71 +1169,69 @@ index 40f661027..2321e8758 100644
      request: 'idle',
      other: 'idle',
 diff --git a/web/src/features/channels/lib/channel-form.ts b/web/src/features/channels/lib/channel-form.ts
-index 158f510e0..68c13b493 100644
+index 906d915b9..03793c83a 100644
 --- a/web/src/features/channels/lib/channel-form.ts
 +++ b/web/src/features/channels/lib/channel-form.ts
-@@ -295,6 +295,7 @@ export const channelFormSchema = z
-     upstream_model_update_check_enabled: z.boolean().optional(),
-     upstream_model_update_auto_sync_enabled: z.boolean().optional(),
-     upstream_model_update_ignored_models: z.string().optional(),
+@@ -304,6 +304,7 @@ export const channelFormSchema = z
+       .record(z.string(), z.unknown())
+       .nullable()
+       .optional(),
 +    balance_script: z.string().optional(),
    })
    .superRefine((data, ctx) => {
      if (
-@@ -489,6 +490,7 @@ export const CHANNEL_FORM_DEFAULT_VALUES: ChannelFormValues = {
-   upstream_model_update_auto_sync_enabled: false,
-   upstream_model_update_ignored_models: '',
+@@ -502,6 +503,7 @@ export const CHANNEL_FORM_DEFAULT_VALUES: ChannelFormValues = {
    advanced_custom: '',
+   plugin_config: {},
+   plugin_config_draft: null,
 +  balance_script: '',
  }
  
  // ============================================================================
-@@ -565,6 +567,7 @@ export function transformChannelToFormDefaults(
-   let upstreamModelUpdateAutoSyncEnabled = false
+@@ -586,6 +588,7 @@ export function transformChannelToFormDefaults(
    let upstreamModelUpdateIgnoredModels = ''
    let advancedCustom = ''
+   let pluginConfig: Record<string, unknown> = {}
 +  let balanceScript = ''
  
    if (channel.settings) {
      try {
-@@ -596,6 +599,7 @@ export function transformChannelToFormDefaults(
-       if (parsed.advanced_custom) {
-         advancedCustom = stringifyAdvancedCustomConfig(parsed.advanced_custom)
+@@ -622,6 +625,7 @@ export function transformChannelToFormDefaults(
+       if (isJsonObjectValue(parsed.plugin_config)) {
+         pluginConfig = parsed.plugin_config
        }
 +      balanceScript = parsed.balance_script || ''
      } catch (error) {
        // eslint-disable-next-line no-console
        console.error('Failed to parse channel settings:', error)
-@@ -650,6 +654,7 @@ export function transformChannelToFormDefaults(
-     upstream_model_update_auto_sync_enabled: upstreamModelUpdateAutoSyncEnabled,
-     upstream_model_update_ignored_models: upstreamModelUpdateIgnoredModels,
+@@ -679,6 +683,7 @@ export function transformChannelToFormDefaults(
      advanced_custom: advancedCustom,
+     plugin_config: pluginConfig,
+     plugin_config_draft: null,
 +    balance_script: balanceScript,
    }
  }
  
-@@ -847,6 +852,13 @@ function buildSettingsJSON(formData: ChannelFormValues): string {
-     delete settingsObj.advanced_custom
-   }
- 
+@@ -895,6 +900,11 @@ function buildSettingsJSON(formData: ChannelFormValues): string {
+     settingsObj.plugin_config = formData.plugin_config
+   } else {
+     delete settingsObj.plugin_config
 +  // Custom balance script (JavaScript) — applies to any channel type
 +  if (formData.balance_script && formData.balance_script.trim()) {
 +    settingsObj.balance_script = formData.balance_script
 +  } else if ('balance_script' in settingsObj) {
 +    delete settingsObj.balance_script
-+  }
-+
-   return JSON.stringify(settingsObj)
- }
+   }
  
+   return JSON.stringify(settingsObj)
 diff --git a/web/src/features/channels/types.ts b/web/src/features/channels/types.ts
-index 721e216e9..fe983c3ff 100644
+index a2c0ee818..a9e7cdafe 100644
 --- a/web/src/features/channels/types.ts
 +++ b/web/src/features/channels/types.ts
-@@ -116,6 +116,7 @@ export interface ChannelOtherSettings {
-   upstream_model_update_last_check_time?: number
-   upstream_model_update_last_detected_models?: string[]
+@@ -151,6 +151,7 @@ export interface ChannelOtherSettings {
    advanced_custom?: AdvancedCustomConfig
+   /** The values of the bound plugin's channel settings (type 61). */
+   plugin_config?: Record<string, unknown>
 +  balance_script?: string
  }
  
