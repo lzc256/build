@@ -13,7 +13,7 @@ index ce588b6e7..1f12e7953 100644
  
  FROM debian:bookworm-slim@sha256:f06537653ac770703bc45b4b113475bd402f451e85223f0f2837acbf89ab020a
 diff --git a/controller/channel-billing.go b/controller/channel-billing.go
-index 7c04953d3..d7cd21564 100644
+index 7c04953d3..6f3def407 100644
 --- a/controller/channel-billing.go
 +++ b/controller/channel-billing.go
 @@ -61,6 +61,7 @@ type channelBalanceResult struct {
@@ -24,18 +24,31 @@ index 7c04953d3..d7cd21564 100644
  }
  
  type OpenAIUsageResponse struct {
-@@ -629,6 +630,10 @@ func fetchAdvancedCustomBalance(channel *model.Channel) (channelBalanceResult, e
+@@ -629,6 +630,12 @@ func fetchAdvancedCustomBalance(channel *model.Channel) (channelBalanceResult, e
  func updateChannelBalance(channel *model.Channel) (channelBalanceResult, error) {
  	var result channelBalanceResult
  	var err error
 +	if script := channel.GetOtherSettings().BalanceScript; script != "" {
 +		balance, message, err := updateChannelBalanceScript(channel, script)
-+		return channelBalanceResult{Balance: balance, Message: message}, err
++		result = channelBalanceResult{Balance: balance, Message: message}
++		result.Detail = recordBuiltinBalance(channel, result, err)
++		return result, err
 +	}
  	if channel.Type == constant.ChannelTypeAdvancedCustom {
  		result, err = fetchAdvancedCustomBalance(channel)
  	} else {
-@@ -745,7 +750,7 @@ func UpdateChannelBalance(c *gin.Context) {
+@@ -720,7 +727,9 @@ func UpdateChannelBalance(c *gin.Context) {
+ 		common.ApiError(c, err)
+ 		return
+ 	}
+-	if channel.Type == constant.ChannelTypeTaskPlugin {
++	// A custom balance script answers for any channel type, including a plugin
++	// channel whose plugin reports no balance of its own.
++	if channel.Type == constant.ChannelTypeTaskPlugin && channel.GetOtherSettings().BalanceScript == "" {
+ 		plugin, ok := service.PluginOfChannel(channel)
+ 		if !ok || !pluginReportsBalance(plugin) {
+ 			common.ApiErrorT(c, "The plugin of this channel does not report a balance")
+@@ -745,7 +754,7 @@ func UpdateChannelBalance(c *gin.Context) {
  		})
  		return
  	}
@@ -44,7 +57,7 @@ index 7c04953d3..d7cd21564 100644
  		common.ApiErrorT(c, "Multi-key channels do not support balance queries")
  		return
  	}
-@@ -756,7 +761,7 @@ func UpdateChannelBalance(c *gin.Context) {
+@@ -756,7 +765,7 @@ func UpdateChannelBalance(c *gin.Context) {
  	}
  	response := gin.H{
  		"success": true,
@@ -53,7 +66,7 @@ index 7c04953d3..d7cd21564 100644
  	}
  	if result.RawResponse == "" {
  		response["balance"] = result.Balance
-@@ -783,9 +788,13 @@ func updateAllChannelsBalance(ctx context.Context, report func(processed, total
+@@ -783,9 +792,13 @@ func updateAllChannelsBalance(ctx context.Context, report func(processed, total
  	}
  	enabled := make([]*model.Channel, 0, len(channels))
  	for _, channel := range channels {
@@ -81,6 +94,31 @@ index 9548e5ff3..ae0049534 100644
  	"used_quota":           {},
  	"balance_detail":       {},
  }
+diff --git a/controller/channel_balance.go b/controller/channel_balance.go
+index 1d5557acc..44b05212e 100644
+--- a/controller/channel_balance.go
++++ b/controller/channel_balance.go
+@@ -195,7 +195,10 @@ func balanceErrorText(err error, key string) string {
+ // balances and disables what has none left, when the channel's automatic
+ // disabling is on: the channel, or a multi-key plugin channel's empty keys.
+ func updateBalanceInRun(channel *model.Channel) {
+-	if channel.Type == constant.ChannelTypeTaskPlugin {
++	// A custom balance script answers for any channel type, including a plugin
++	// channel whose plugin reports no balance of its own.
++	script := channel.GetOtherSettings().BalanceScript
++	if channel.Type == constant.ChannelTypeTaskPlugin && script == "" {
+ 		plugin, ok := service.PluginOfChannel(channel)
+ 		if !ok || !pluginReportsBalance(plugin) {
+ 			return
+@@ -213,7 +216,7 @@ func updateBalanceInRun(channel *model.Channel) {
+ 		}
+ 		return
+ 	}
+-	if channel.ChannelInfo.IsMultiKey {
++	if channel.ChannelInfo.IsMultiKey && script == "" {
+ 		return // built-in multi-key channels have no balance query
+ 	}
+ 	result, err := withBalanceTimeout(func() (channelBalanceResult, error) {
 diff --git a/controller/channel_balance_script.go b/controller/channel_balance_script.go
 new file mode 100644
 index 000000000..01115170f
@@ -845,6 +883,43 @@ index ad1ad1596..7c0e1c9f4 100644
  test('editing legacy channels retains the full provider list and saves the original type', async () => {
    editingChannel = { ...editingChannel, type: 55 }
    pluginOptions = [
+diff --git a/web/src/features/channels/components/__tests__/row-actions-query-balance.test.tsx b/web/src/features/channels/components/__tests__/row-actions-query-balance.test.tsx
+index 2ad50e219..b898a9621 100644
+--- a/web/src/features/channels/components/__tests__/row-actions-query-balance.test.tsx
++++ b/web/src/features/channels/components/__tests__/row-actions-query-balance.test.tsx
+@@ -73,6 +73,14 @@ test.each([
+     plugin: 'no-balance',
+     shown: false,
+   },
++  {
++    // A custom balance script answers for it, whatever the plugin reports.
++    name: 'a plugin with a custom balance script',
++    type: 61,
++    plugin: 'no-balance',
++    script: 'newapi.balance.set(1)',
++    shown: true,
++  },
+   {
+     // Without the bind permission the plugin is unknown; the server answers.
+     name: 'a plugin, to an admin who cannot read plugins',
+@@ -86,6 +94,7 @@ test.each([
+   async (item: {
+     type: number
+     plugin: string
++    script?: string
+     shown: boolean
+     admin?: boolean
+   }) => {
+@@ -110,6 +119,9 @@ test.each([
+       setting: item.plugin
+         ? JSON.stringify({ task_plugin_key: item.plugin })
+         : '',
++      settings: item.script
++        ? JSON.stringify({ balance_script: item.script })
++        : '{}',
+     })
+     const user = userEvent.setup()
+     render(
 diff --git a/web/src/features/channels/components/channels-columns.tsx b/web/src/features/channels/components/channels-columns.tsx
 index 5eb3dbaa2..445779b17 100644
 --- a/web/src/features/channels/components/channels-columns.tsx
@@ -1132,6 +1207,50 @@ index ce62a583d..37df465dd 100644
  export * from './channel-editor-loading-state'
  export * from './channel-models-section'
 +export * from './balance-script-section'
+diff --git a/web/src/features/channels/hooks/use-task-plugin-option.ts b/web/src/features/channels/hooks/use-task-plugin-option.ts
+index 2ee1b6944..9f1306882 100644
+--- a/web/src/features/channels/hooks/use-task-plugin-option.ts
++++ b/web/src/features/channels/hooks/use-task-plugin-option.ts
+@@ -28,7 +28,10 @@ import { useAuthStore } from '@/stores/auth-store'
+ 
+ import { getTaskPluginOptions } from '../api'
+ import { CHANNEL_TYPE_TASK_PLUGIN, MODEL_FETCHABLE_TYPES } from '../constants'
+-import { parseChannelSettings } from '../lib/channel-utils'
++import {
++  parseChannelOtherSettings,
++  parseChannelSettings,
++} from '../lib/channel-utils'
+ import type { Channel } from '../types'
+ 
+ /** Whether the user may read the plugin options, which only binding needs. */
+@@ -79,11 +82,12 @@ export function useChannelModelFetchable(
+ /**
+  * Whether a channel's balance can be queried: always for a built-in channel
+  * type, which the server answers for, and for a plugin channel only when its
+- * plugin can query one. Without the bind permission the plugin's abilities
+- * are unknown, so the action stays and the server answers.
++ * plugin can query one or a custom balance script answers for it. Without the
++ * bind permission the plugin's abilities are unknown, so the action stays and
++ * the server answers.
+  */
+ export function useChannelBalanceQueryable(
+-  channel: Pick<Channel, 'type' | 'setting'>
++  channel: Pick<Channel, 'type' | 'setting' | 'settings'>
+ ) {
+   const canBind = useCanBindTaskPlugins()
+   const pluginKey =
+@@ -91,7 +95,11 @@ export function useChannelBalanceQueryable(
+       ? parseChannelSettings(channel.setting)?.task_plugin_key
+       : undefined
+   const plugin = useTaskPluginOption(pluginKey)
++  // A custom balance script answers for any channel type, plugin channels too.
++  const balanceScript =
++    parseChannelOtherSettings(channel.settings).balance_script ?? ''
+   return (
++    balanceScript.trim() !== '' ||
+     channel.type !== CHANNEL_TYPE_TASK_PLUGIN ||
+     !canBind ||
+     plugin?.balance === true
 diff --git a/web/src/features/channels/lib/channel-configuration.ts b/web/src/features/channels/lib/channel-configuration.ts
 index d044a45d8..ed9a44af4 100644
 --- a/web/src/features/channels/lib/channel-configuration.ts

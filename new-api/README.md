@@ -12,7 +12,7 @@ The date describes the source commit, not when the image was built. A runtime
 
 # Active custom patches
 
-- `balance-script`: sandboxed JavaScript channel balance scripts, state persistence and result messages.
+- `balance-script`: sandboxed JavaScript channel balance scripts, state persistence and result messages; a script answers for every channel type, including a plugin channel whose plugin reports no balance.
 - `self-use-default-price`: use model ratio 0.5 for unconfigured models in self-use mode.
 - `billing-header-filter`: remove Claude Code billing-header markers from forwarded requests.
 - `oauth-step-up`: offer linked OAuth for sensitive browser actions even with a password,
@@ -122,6 +122,27 @@ there is no interpreter binary, no pip package and no wrapper process.
 
 **Important**: Scripts MUST call `newapi.balance.set()` to return the balance.
 `print()`, `require()` and file/process/socket access do not exist.
+
+## When a script runs
+
+A script in the channel's `settings.balance_script` answers before any built-in
+answer, for every channel type:
+
+- a built-in channel type (OpenAI dashboard billing, DeepSeek, SiliconFlow, …)
+  uses the script instead of its own query;
+- an Advanced Custom channel uses the script instead of its configured balance
+  endpoint;
+- a Task Plugin channel (type 61) uses the script even when its plugin exports
+  no `buildBalanceRequest`/`parseBalance` hooks — the plugin channel otherwise
+  has no balance query at all. The `Query Balance` action is offered for such a
+  channel, and the scheduled update of all balances queries it too;
+- a multi-key channel joins its keys into `CHANNEL_KEY` (`,` separated) and sets
+  `CHANNEL_IS_MULTI_KEY` to `"1"`, so the script decides how to report one
+  balance for all of them.
+
+Without a script, every channel type keeps its stock behaviour: the plugin
+channel asks its plugin, and a plugin without balance hooks still answers that
+it reports none.
 
 ### Dependency handling
 
